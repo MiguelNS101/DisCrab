@@ -3,15 +3,20 @@ import { WebRtcEngine, RemotePeer } from '../services/webrtc/WebRtcEngine';
 import { wasapiAudioBridge } from '../services/webrtc/AudioBridge';
 import { isTauriEnvironment } from '../services/tauriBridge';
 
+import { ChatMessage } from '../types';
+
 export interface UseWebRtcReturn {
   isConnected: boolean;
   myPeerId: string | null;
   isHost: boolean;
   peers: RemotePeer[];
   error: string | null;
+  clearError: () => void;
   isScreenSharing: boolean;
   isWebcamActive: boolean;
   localStream: MediaStream | null;
+  chatMessages: ChatMessage[];
+  sendChatMessage: (text: string, senderName: string) => void;
   connectToRoom: (wsUrl: string, token: string, nickname: string) => Promise<void>;
   disconnectFromRoom: () => void;
   startScreenShare: (
@@ -37,8 +42,13 @@ export function useWebRtc(): UseWebRtcReturn {
   const [isWebcamActive, setIsWebcamActive] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [volumeMap, setVolumeMap] = useState<Record<string, number>>({});
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
 
   const engineRef = useRef<WebRtcEngine | null>(null);
+
+  const clearError = useCallback(() => {
+    setError(null);
+  }, []);
 
   // Escuta pacotes PCM de áudio isolado enviados pelo Rust via Tauri Event
   useEffect(() => {
@@ -80,10 +90,28 @@ export function useWebRtc(): UseWebRtcReturn {
       onRemoteStream: (peerId, type, stream) => {
         console.log(`[useWebRtc] Stream remoto recebido de ${peerId} (${type})`);
       },
+      onChatMessage: (msg) => {
+        setChatMessages((prev) => [...prev, msg]);
+      },
     });
 
     engineRef.current = engine;
     return engine;
+  }, []);
+
+  const sendChatMessage = useCallback((text: string, senderName: string) => {
+    if (!engineRef.current) {
+      const errMsg = 'Você não está conectado a nenhuma sala para enviar mensagens.';
+      setError(errMsg);
+      throw new Error(errMsg);
+    }
+    try {
+      const sentMsg = engineRef.current.sendChatMessage(text, senderName);
+      setChatMessages((prev) => [...prev, sentMsg]);
+    } catch (err: any) {
+      setError(err?.message || 'Falha ao transmitir mensagem via P2P DataChannel');
+      throw err;
+    }
   }, []);
 
   const connectToRoom = useCallback(
@@ -111,6 +139,7 @@ export function useWebRtc(): UseWebRtcReturn {
     setIsScreenSharing(false);
     setIsWebcamActive(false);
     setLocalStream(null);
+    setChatMessages([]);
   }, []);
 
   const startScreenShare = useCallback(
@@ -174,9 +203,12 @@ export function useWebRtc(): UseWebRtcReturn {
     isHost,
     peers,
     error,
+    clearError,
     isScreenSharing,
     isWebcamActive,
     localStream,
+    chatMessages,
+    sendChatMessage,
     connectToRoom,
     disconnectFromRoom,
     startScreenShare,

@@ -6,6 +6,8 @@
 
 import { wasapiAudioBridge } from './AudioBridge';
 
+import { ChatMessage } from '../../types';
+
 export const RTC_CONFIGURATION: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
@@ -35,13 +37,14 @@ export type EngineEventCallback = {
   onError?: (err: string) => void;
   onRemoteStream?: (peerId: string, type: 'screen' | 'webcam', stream: MediaStream) => void;
   onStatsUpdate?: (stats: { rttMs: number; bytesReceived: number; bytesSent: number }) => void;
+  onChatMessage?: (msg: ChatMessage) => void;
 };
 
 export class WebRtcEngine {
   private ws: WebSocket | null = null;
   private myPeerId: string | null = null;
   private isHost = false;
-  private peers: Map<string, { pc: RTCPeerConnection; info: RemotePeer }> = new Map();
+  private peers: Map<string, { pc: RTCPeerConnection; info: RemotePeer; dc?: RTCDataChannel }> = new Map();
   private callbacks: EngineEventCallback = {};
 
   // Streams locais
@@ -195,7 +198,23 @@ export class WebRtcEngine {
       hasIsolatedAudio: false,
     };
 
-    this.peers.set(peerId, { pc, info });
+    const peerEntry = { pc, info, dc: undefined as RTCDataChannel | undefined };
+    this.peers.set(peerId, peerEntry);
+
+    // Configuração do RTCDataChannel para Chat de Texto P2P direto
+    if (initiator) {
+      try {
+        const dc = pc.createDataChannel('streamcompanion-chat', { ordered: true });
+        this.setupDataChannel(dc, peerId, peerEntry);
+      } catch (err) {
+        console.error(`[WebRTC] Falha ao criar DataChannel para peer ${peerId}:`, err);
+      }
+    }
+
+    pc.ondatachannel = (event) => {
+      console.log(`[WebRTC] DataChannel recebido do peer ${peerId}:`, event.channel.label);
+      this.setupDataChannel(event.channel, peerId, peerEntry);
+    };
 
     // Envio de ICE Candidate
     pc.onicecandidate = (event) => {
@@ -245,6 +264,104 @@ export class WebRtcEngine {
     }
 
     return pc;
+  }
+
+  private setupDataChannel(
+    dc: RTCDataChannel,
+    peerId: string,
+    peerEntry: { pc: RTCPeerConnection; info: RemotePeer; dc?: RTCDataChannel }
+  ) {
+    peerEntry.dc = dc;
+
+    dc.onopen = () => {
+      console.log(`[WebRTC DataChannel] Canal de texto P2P ABERTO com peer ${peerId}`);
+    };
+
+    dc.onclose = () => {
+      console.log(`[WebRTC DataChannel] Canal fechado com peer ${peerId}`);
+      if (peerEntry.dc === dc) {
+        peerEntry.dc = undefined;
+      }
+    };
+
+    dc.onerror = (err) => {
+      console.error(`[WebRTC DataChannel] Erro no canal com peer ${peerId}:`, err);
+    };
+
+    dc.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === 'chat') {
+          const chatMsg: ChatMessage = {
+            id: data.id || Math.random().toString(36).substring(2),
+            senderId: peerId,
+            senderName: data.senderName || peerEntry.info.nickname || 'Amigo',
+            text: data.text,
+            timestamp: data.timestamp || Date.now(),
+            isSelf: false,
+          };
+          this.callbacks.onChatMessage?.(chatMsg);
+        }
+      } catch (e) {
+        console.error('[WebRTC DataChannel] Erro ao decodificar mensagem de texto:', e);
+      }
+    };
+  }
+
+  /**
+   * Envia uma mensagem de texto via WebRTC P2P DataChannel para todos os peers conectados
+   */
+  public sendChatMessage(text: string, senderName: string): ChatMessage {
+    const trimmed = text.trim();
+    if (!trimmed) {
+      throw new Error('A mensagem não pode ser vazia.');
+    }
+
+    if (this.peers.size === 0) {
+      throw new Error('Não há outros participantes na sala no momento. Aguarde alguém entrar com o Código da Sala.');
+    }
+
+    const chatMsg: ChatMessage = {
+      id: Math.random().toString(36).substring(2, 10),
+      senderId: this.myPeerId || 'self',
+      senderName,
+      text: trimmed,
+      timestamp: Date.now(),
+      isSelf: true,
+    };
+
+    const payload = JSON.stringify({
+      type: 'chat',
+      id: chatMsg.id,
+      text: chatMsg.text,
+      senderName: chatMsg.senderName,
+      timestamp: chatMsg.timestamp,
+    });
+
+    let sentCount = 0;
+    let failedPeers: string[] = [];
+
+    for (const [peerId, peerEntry] of this.peers.entries()) {
+      if (peerEntry.dc && peerEntry.dc.readyState === 'open') {
+        try {
+          peerEntry.dc.send(payload);
+          sentCount++;
+        } catch (e: any) {
+          console.error(`[WebRTC DataChannel] Falha ao enviar para ${peerId}:`, e);
+          failedPeers.push(peerEntry.info.nickname);
+        }
+      } else {
+        failedPeers.push(peerEntry.info.nickname);
+      }
+    }
+
+    if (sentCount === 0) {
+      throw new Error(
+        `Nenhum canal P2P direto está pronto ainda (status: conectando com ${failedPeers.join(', ')}). Aguarde o handshake WebRTC.`
+      );
+    }
+
+    return chatMsg;
   }
 
   private async handleRemoteSignal(fromPeerId: string, payload: any) {

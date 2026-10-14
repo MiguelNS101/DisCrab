@@ -12,7 +12,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { RoomDetails } from '../types';
-import { encodeRoomCodeUrlSafe, decodeRoomCodeUrlSafe } from '../services/tauriBridge';
+import { encodeRoomCodeUrlSafe, decodeRoomCodeUrlSafe, createNativeRoom, isTauriEnvironment } from '../services/tauriBridge';
 
 interface RoomControlProps {
   nickname: string;
@@ -42,53 +42,38 @@ export const RoomControl: React.FC<RoomControlProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Manipulador para o Host criar a sala
-  const handleCreateRoom = () => {
+  const handleCreateRoom = async () => {
     if (!nickname.trim()) {
       setErrorMsg('Digite seu apelido antes de criar a sala.');
       return;
     }
     setErrorMsg(null);
 
-    // Gera token aleatório de 6 caracteres maiúsculos (ex: "8K3M9P")
-    const charset = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
-    let token = '';
-    for (let i = 0; i < 6; i++) {
-      token += charset.charAt(Math.floor(Math.random() * charset.length));
-    }
+    if (isTauriEnvironment()) {
+      try {
+        const res = await createNativeRoom(nickname.trim(), useCloudflare);
+        const details: RoomDetails = {
+          code: res.room_code,
+          token: res.token,
+          mode: res.mode as any,
+          ws_url: res.public_url ? `wss://${res.public_url.replace(/^https?:\/\//, '')}` : `ws://${res.local_ip}:${res.local_port}`,
+          subdomain: res.public_url ? res.public_url.replace(/^https?:\/\//, '').replace(/\..*$/, '') : undefined,
+          local_ip: res.local_ip,
+          local_port: res.local_port,
+          created_at: Date.now(),
+        };
 
-    const localPort = 38445;
-    const localIp = '192.168.1.105';
-    let roomCode = '';
-    let wsUrl = '';
-    let subdomain = '';
-
-    if (useCloudflare) {
-      // Subdomínio gerado pelo cloudflared
-      const randomSub = 'sc-' + Math.random().toString(36).substring(2, 8);
-      subdomain = randomSub;
-      wsUrl = `wss://${randomSub}.trycloudflare.com`;
-      // Empacota subdominio:token em Base64 URL-Safe
-      roomCode = encodeRoomCodeUrlSafe(`${randomSub}:${token}`);
+        setRoomDetails(details);
+        setIsHost(true);
+        setIsConnected(true);
+      } catch (err: any) {
+        setErrorMsg(`Erro ao criar sala nativa: ${err?.message || err}`);
+      }
     } else {
-      wsUrl = `ws://${localIp}:${localPort}`;
-      // Empacota ip:porta:token em Base64 URL-Safe
-      roomCode = encodeRoomCodeUrlSafe(`${localIp}:${localPort}:${token}`);
+      setErrorMsg(
+        'A criação do Servidor WebSocket local e do túnel Cloudflare em background requer a execução no aplicativo desktop compilado (StreamCompanion.exe). No navegador, utilize a aba "Entrar na Sala (Peer)" para se conectar com um Código de Sala gerado por um Host.'
+      );
     }
-
-    const details: RoomDetails = {
-      code: roomCode,
-      token,
-      mode: useCloudflare ? 'cloudflare' : 'lan',
-      ws_url: wsUrl,
-      subdomain,
-      local_ip: localIp,
-      local_port: localPort,
-      created_at: Date.now(),
-    };
-
-    setRoomDetails(details);
-    setIsHost(true);
-    setIsConnected(true);
   };
 
   // Manipulador para o Peer entrar na sala

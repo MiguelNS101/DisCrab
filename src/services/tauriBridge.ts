@@ -28,7 +28,7 @@ export function decodeRoomCodeUrlSafe(code: string): { wsUrl: string; token: str
       token: parts[2],
     };
   }
-  throw new Error('Formato de Código de Sala inválido.');
+  throw new Error('Formato de Código de Sala inválido. Verifique se copiou o código completo.');
 }
 
 // Verifica se está rodando dentro do Tauri v2 nativo
@@ -36,48 +36,46 @@ export function isTauriEnvironment(): boolean {
   return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
 }
 
-// Mock inicial de janelas do Windows com PIDs realistas
-export const SAMPLE_WINDOWS: WindowItem[] = [
-  {
-    hwnd: 10420,
-    pid: 14820,
-    title: 'Counter-Strike 2 - Dust II (Competitivo)',
-    process_name: 'cs2.exe',
-    category: 'game',
-  },
-  {
-    hwnd: 20188,
-    pid: 9240,
-    title: 'Cyberpunk 2077: Phantom Liberty',
-    process_name: 'Cyberpunk2077.exe',
-    category: 'game',
-  },
-  {
-    hwnd: 31054,
-    pid: 6108,
-    title: 'Elden Ring',
-    process_name: 'eldenring.exe',
-    category: 'game',
-  },
-  {
-    hwnd: 40992,
-    pid: 18450,
-    title: 'Discord - #geral [Voz Conectada]',
-    process_name: 'Discord.exe',
-    category: 'chat',
-  },
-  {
-    hwnd: 51200,
-    pid: 4328,
-    title: 'Spotify Premium - Synthwave Boy',
-    process_name: 'Spotify.exe',
-    category: 'media',
-  },
-  {
-    hwnd: 60100,
-    pid: 12044,
-    title: 'Google Chrome - YouTube 4K',
-    process_name: 'chrome.exe',
-    category: 'browser',
-  },
-];
+// Chama comando nativo do Tauri ou lança erro se não estiver no ambiente nativo
+export async function invokeTauri<T>(cmd: string, args?: Record<string, any>): Promise<T> {
+  if (isTauriEnvironment()) {
+    const tauri = (window as any).__TAURI__;
+    const invokeFn = tauri?.core?.invoke || tauri?.invoke;
+    if (typeof invokeFn === 'function') {
+      try {
+        return await invokeFn(cmd, args);
+      } catch (err: any) {
+        throw new Error(`Falha no comando nativo '${cmd}': ${err?.message || err}`);
+      }
+    }
+  }
+  throw new Error(
+    `O recurso '${cmd}' requer execução dentro do executável desktop compilado (StreamCompanion.exe). O ambiente web não possui acesso direto à API Win32/WASAPI.`
+  );
+}
+
+// Busca as janelas reais do Windows usando Win32 EnumWindows via Rust
+export async function fetchSystemWindows(): Promise<WindowItem[]> {
+  return await invokeTauri<WindowItem[]>('list_windows');
+}
+
+// Cria a sala real no Rust com WebSocket local e Cloudflare Quick Tunnel
+export async function createNativeRoom(
+  hostNickname: string,
+  useCloudflare: boolean
+): Promise<{ room_code: string; token: string; mode: string; public_url?: string; local_port: number; local_ip: string }> {
+  return await invokeTauri('create_room', {
+    hostNickname,
+    useCloudflare,
+  });
+}
+
+// Inicia captura isolada WASAPI por PID
+export async function startNativeProcessAudio(pid: number): Promise<void> {
+  return await invokeTauri('start_process_audio', { pid });
+}
+
+// Para captura isolada WASAPI
+export async function stopNativeProcessAudio(): Promise<void> {
+  return await invokeTauri('stop_process_audio');
+}

@@ -30,4 +30,14 @@ export interface StreamItem {
   isolated_audio: boolean;
   audio_pid?: number;
   process_name?: string;
+  stream?: MediaStream | null;
+}
+
+export interface ChatMessage {
+  id: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  timestamp: number;
+  isSelf: boolean;
 }

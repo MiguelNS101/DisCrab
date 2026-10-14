@@ -3,33 +3,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { RoomControl } from './components/RoomControl';
 import { WindowSelector } from './components/WindowSelector';
 import { WasapiVisualizer } from './components/WasapiVisualizer';
 import { BroadcastControls } from './components/BroadcastControls';
 import { LivePlayer } from './components/LivePlayer';
+import { ChatBox } from './components/ChatBox';
 import { RustCodeViewer } from './components/RustCodeViewer';
 import { WindowItem, RoomDetails, StreamItem } from './types';
-import { SAMPLE_WINDOWS } from './services/tauriBridge';
 import { useWebRtc } from './hooks/useWebRtc';
-import { Radio, Users, Sparkles, Activity } from 'lucide-react';
+import { Radio, Users, AlertCircle, X, Tv } from 'lucide-react';
 
 export default function App() {
-  const [nickname, setNickname] = useState<string>('Streamer_Pro');
+  const [nickname, setNickname] = useState<string>('Jogador_1');
   const [roomDetails, setRoomDetails] = useState<RoomDetails | null>(null);
   const [isHost, setIsHost] = useState<boolean>(true);
 
-  // Hook WebRTC nativo P2P
+  // Hook WebRTC nativo P2P com DataChannel Chat integrado
   const {
     isConnected,
     myPeerId,
     peers,
     error: rtcError,
+    clearError,
     isScreenSharing,
     isWebcamActive,
     localStream,
+    chatMessages,
+    sendChatMessage,
     connectToRoom,
     disconnectFromRoom,
     startScreenShare,
@@ -41,79 +44,59 @@ export default function App() {
   } = useWebRtc();
 
   // Seleção de janela e áudio WASAPI por processo
-  const [selectedWindow, setSelectedWindow] = useState<WindowItem | null>(SAMPLE_WINDOWS[0]);
+  const [selectedWindow, setSelectedWindow] = useState<WindowItem | null>(null);
   const [isolateAudio, setIsolateAudio] = useState<boolean>(true);
   const [fps, setFps] = useState<30 | 60>(60);
   const [resolution, setResolution] = useState<'720p' | '1080p' | '1440p'>('1080p');
 
-  // Modal para inspecionar os arquivos da Parte 1 e Parte 2
+  // Modal para inspecionar os arquivos da Parte 1, Parte 2 e Parte 3
   const [isCodeViewerOpen, setIsCodeViewerOpen] = useState<boolean>(false);
 
-  // Lista de transmissões simuladas/ativas para espectadores
-  const [streams, setStreams] = useState<StreamItem[]>([
-    {
-      id: 'stream-peer-1',
-      user_name: 'Alex_Valkyrie',
-      type: 'screen',
-      title: 'Cyberpunk 2077: Phantom Liberty',
+  // Conecta ao WebSocket de sinalização quando a sala for criada ou acessada
+  useEffect(() => {
+    if (roomDetails && !isConnected) {
+      connectToRoom(roomDetails.ws_url, roomDetails.token, nickname).catch((err) => {
+        console.error('[App] Erro na conexão WebRTC:', err);
+      });
+    }
+  }, [roomDetails, isConnected, connectToRoom, nickname]);
+
+  // Monta a lista de streams estritamente REAIS a partir dos peers conectados
+  const peerStreams: StreamItem[] = peers
+    .filter((p) => p.hasScreen || p.hasWebcam)
+    .map((p) => ({
+      id: p.id,
+      user_name: p.nickname,
+      type: (p.hasScreen ? 'screen' : 'webcam') as 'screen' | 'webcam',
+      title: p.screenTitle || (p.hasScreen ? 'Tela do Amigo' : 'Webcam'),
       resolution: '1080p',
       fps: 60,
-      volume: 85,
-      is_muted: false,
-      is_watched: true,
-      isolated_audio: true,
-      audio_pid: 9240,
-      process_name: 'Cyberpunk2077.exe',
-    },
-    {
-      id: 'stream-peer-2',
-      user_name: 'Lucas_Sniper',
-      type: 'webcam',
-      title: 'Webcam C920 Pro HD',
-      resolution: '720p',
-      fps: 30,
-      volume: 100,
-      is_muted: false,
-      is_watched: false,
-      isolated_audio: false,
-    },
-  ]);
+      volume: volumeMap[p.id] ?? 100,
+      is_muted: (volumeMap[p.id] ?? 100) === 0,
+      is_watched: !!p.screenStream,
+      isolated_audio: p.hasIsolatedAudio,
+      process_name: p.hasIsolatedAudio ? 'WASAPI Process' : undefined,
+      stream: p.screenStream || p.webcamStream,
+    }));
 
-  const handleToggleWatch = (id: string) => {
-    setStreams((prev) =>
-      prev.map((s) => {
-        if (s.id === id) {
-          const nextWatched = !s.is_watched;
-          if (nextWatched) {
-            requestPeerStream(s.id, s.type);
-          }
-          return { ...s, is_watched: nextWatched };
-        }
-        return s;
-      })
-    );
-  };
-
-  const handleChangeVolume = (id: string, vol: number) => {
-    setStreamVolume(id, vol);
-    setStreams((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, volume: vol } : s))
-    );
-  };
-
-  const handleToggleMute = (id: string) => {
-    setStreams((prev) =>
-      prev.map((s) => (s.id === id ? { ...s, is_muted: !s.is_muted } : s))
-    );
+  const handleToggleWatch = (peerId: string) => {
+    const peer = peers.find((p) => p.id === peerId);
+    if (peer) {
+      requestPeerStream(peer.id, peer.hasScreen ? 'screen' : 'webcam');
+    }
   };
 
   const handleToggleScreenShare = async () => {
     if (isScreenSharing) {
       stopScreenShare();
     } else {
-      const title = selectedWindow ? selectedWindow.title : 'Tela Inteira';
+      const title = selectedWindow ? selectedWindow.title : 'Tela do Usuário';
       await startScreenShare(title, fps, resolution, isolateAudio);
     }
+  };
+
+  const handleSendMessage = (text: string) => {
+    sendChatMessage(text, nickname);
   };
 
   return (
@@ -127,29 +110,25 @@ export default function App() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
-        {/* Banner Informativo Completo: Partes 1, 2 e 3 */}
-        <div className="bg-gradient-to-r from-cyan-950/40 via-neutral-900 to-indigo-950/30 border border-cyan-800/40 rounded-xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg">
-          <div>
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
-              <h2 className="text-xs font-mono font-bold uppercase tracking-wider text-emerald-300">
-                StreamCompanion · Projeto Completo (Partes 1, 2 e 3 Entregues)
-              </h2>
+        {/* Alerta de Erro Real (Sem Mensagens Falsas) */}
+        {rtcError && (
+          <div className="bg-red-950/80 border border-red-800 rounded-xl p-4 flex items-start justify-between gap-3 shadow-lg shadow-red-950/40 text-xs font-mono">
+            <div className="flex items-start gap-2.5">
+              <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+              <div>
+                <strong className="text-red-200 block text-sm">Erro Detectado:</strong>
+                <p className="text-red-300 mt-0.5 leading-relaxed">{rtcError}</p>
+              </div>
             </div>
-            <p className="text-xs text-neutral-300 mt-0.5">
-              Backend Rust WASAPI + WebRTC P2P On-Demand + Automação One-Click (<strong>CONSTRUIR_APP.bat</strong> e <strong>builder.ps1</strong> com entrega automática na pasta <code>PRONTO_PARA_USAR</code>).
-            </p>
-          </div>
-
-          <div className="flex items-center gap-2">
             <button
-              onClick={() => setIsCodeViewerOpen(true)}
-              className="px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-black text-xs font-mono font-bold rounded cursor-pointer transition-all shrink-0 shadow-md shadow-cyan-950"
+              onClick={clearError}
+              className="text-red-400 hover:text-white p-1 rounded hover:bg-red-900/40 cursor-pointer"
+              title="Fechar erro"
             >
-              Inspecionar Scripts & Código
+              <X className="w-4 h-4" />
             </button>
           </div>
-        </div>
+        )}
 
         {/* Linha 1: Controle de Sala (Criar / Entrar sem cadastro) */}
         <RoomControl
@@ -161,11 +140,14 @@ export default function App() {
           setIsHost={setIsHost}
           isConnected={isConnected}
           setIsConnected={(val) => {
-            if (!val) disconnectFromRoom();
+            if (!val) {
+              disconnectFromRoom();
+              setRoomDetails(null);
+            }
           }}
         />
 
-        {/* Barra de Transmissão Rápida (Screen Share / Webcam / Resolução) */}
+        {/* Barra de Transmissão (Screen Share / Webcam / Resolução / FPS) */}
         <BroadcastControls
           isScreenSharing={isScreenSharing}
           isWebcamActive={isWebcamActive}
@@ -206,69 +188,101 @@ export default function App() {
           </div>
         </div>
 
-        {/* Linha 3: Grid de Transmissões e Webcams On-Demand com Player de Alta Performance */}
-        <div className="space-y-4">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-2">
-              <Radio className="w-4 h-4 text-cyan-400" />
-              <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-200 font-mono">
-                Transmissões & Webcams na Sala ({streams.length + (isScreenSharing ? 1 : 0)})
-              </h2>
+        {/* Linha 3: Transmissões em Tempo Real e Chat WebRTC P2P */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Seção das Lives e Transmissões (7 colunas) */}
+          <div className="lg:col-span-8 space-y-4">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <Radio className="w-4 h-4 text-cyan-400" />
+                <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-200 font-mono">
+                  Transmissões Ativas ({peerStreams.length + (isScreenSharing ? 1 : 0)})
+                </h2>
+              </div>
+              <div className="flex items-center gap-3 text-xs font-mono text-neutral-400">
+                <span className="flex items-center gap-1.5">
+                  <Users className="w-3.5 h-3.5 text-cyan-400" />
+                  Peers na Sala: <strong className="text-white">{peers.length}</strong>
+                </span>
+                <span>·</span>
+                <span className="text-emerald-400">P2P WebRTC Direto</span>
+              </div>
             </div>
-            <div className="flex items-center gap-3 text-xs font-mono text-neutral-400">
-              <span className="flex items-center gap-1.5">
-                <Users className="w-3.5 h-3.5 text-cyan-400" />
-                Peers Conectados: <strong className="text-white">{peers.length + 1}</strong>
-              </span>
-              <span>·</span>
-              <span className="text-emerald-400">Modo On-Demand Ativo</span>
-            </div>
+
+            {/* Se não houver transmissões ativas */}
+            {!isScreenSharing && peerStreams.length === 0 ? (
+              <div className="bg-neutral-900/60 border border-neutral-800 rounded-xl p-8 text-center space-y-3">
+                <div className="w-12 h-12 rounded-full bg-neutral-950 border border-neutral-800 flex items-center justify-center mx-auto text-neutral-600">
+                  <Tv className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-mono font-bold text-neutral-300">
+                    Nenhuma transmissão ativa no momento
+                  </h3>
+                  <p className="text-xs text-neutral-500 font-mono max-w-md mx-auto mt-1">
+                    Inicie sua transmissão no botão "Transmitir Tela" ou aguarde os amigos conectados na sala abrirem suas transmissões de tela ou webcam.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Transmissão do Próprio Usuário (Local) */}
+                {isScreenSharing && (
+                  <LivePlayer
+                    id="self-screen"
+                    userName={nickname}
+                    title={selectedWindow ? selectedWindow.title : 'Tela do Usuário'}
+                    type="screen"
+                    stream={localStream}
+                    resolution={resolution}
+                    fps={fps}
+                    isSelf={true}
+                    hasIsolatedAudio={isolateAudio}
+                    processName={selectedWindow?.process_name}
+                    volume={100}
+                    isMuted={false}
+                    isWatched={true}
+                    onToggleWatch={() => {}}
+                    onChangeVolume={() => {}}
+                    onToggleMute={() => {}}
+                  />
+                )}
+
+                {/* Transmissões Reais Recebidas dos Amigos */}
+                {peerStreams.map((stream) => (
+                  <LivePlayer
+                    key={stream.id}
+                    id={stream.id}
+                    userName={stream.user_name}
+                    title={stream.title}
+                    type={stream.type}
+                    stream={stream.stream}
+                    resolution={stream.resolution}
+                    fps={stream.fps}
+                    isSelf={false}
+                    hasIsolatedAudio={stream.isolated_audio}
+                    processName={stream.process_name}
+                    volume={stream.volume}
+                    isMuted={stream.is_muted}
+                    isWatched={stream.is_watched}
+                    onToggleWatch={() => handleToggleWatch(stream.id)}
+                    onChangeVolume={(vol) => setStreamVolume(stream.id, vol)}
+                    onToggleMute={() => setStreamVolume(stream.id, stream.is_muted ? 100 : 0)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {/* Stream Local (Sua Transmissão) se estiver transmitindo */}
-            {isScreenSharing && (
-              <LivePlayer
-                id="self-screen"
-                userName={nickname}
-                title={selectedWindow ? selectedWindow.title : 'Tela do Usuário'}
-                type="screen"
-                stream={localStream}
-                resolution={resolution}
-                fps={fps}
-                isSelf={true}
-                hasIsolatedAudio={isolateAudio}
-                processName={selectedWindow?.process_name}
-                volume={100}
-                isMuted={false}
-                isWatched={true}
-                onToggleWatch={() => {}}
-                onChangeVolume={() => {}}
-                onToggleMute={() => {}}
-              />
-            )}
-
-            {/* Streams dos Amigos (Peers) */}
-            {streams.map((stream) => (
-              <LivePlayer
-                key={stream.id}
-                id={stream.id}
-                userName={stream.user_name}
-                title={stream.title}
-                type={stream.type}
-                resolution={stream.resolution}
-                fps={stream.fps}
-                isSelf={false}
-                hasIsolatedAudio={stream.isolated_audio}
-                processName={stream.process_name}
-                volume={volumeMap[stream.id] ?? stream.volume}
-                isMuted={stream.is_muted}
-                isWatched={stream.is_watched}
-                onToggleWatch={() => handleToggleWatch(stream.id)}
-                onChangeVolume={(vol) => handleChangeVolume(stream.id, vol)}
-                onToggleMute={() => handleToggleMute(stream.id)}
-              />
-            ))}
+          {/* Componente de Chat WebRTC P2P (4 colunas) */}
+          <div className="lg:col-span-4">
+            <ChatBox
+              messages={chatMessages}
+              onSendMessage={handleSendMessage}
+              isConnected={isConnected}
+              peerCount={peers.length}
+              myNickname={nickname}
+            />
           </div>
         </div>
       </main>
@@ -281,7 +295,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="border-t border-neutral-900 bg-neutral-950/80 px-4 py-3 text-center text-xs font-mono text-neutral-500">
-        StreamCompanion · Arquitetura Zero-Server / Self-Hosted · Rust + Tauri v2 + WASAPI Process Loopback + WebRTC P2P
+        StreamCompanion · P2P WebRTC DataChannel Chat & WASAPI Process Streaming · Sem Servidor Central
       </footer>
     </div>
   );

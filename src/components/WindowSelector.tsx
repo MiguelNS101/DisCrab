@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   AppWindow,
   Gamepad2,
@@ -6,13 +6,13 @@ import {
   Search,
   Volume2,
   VolumeX,
-  Sliders,
   CheckCircle2,
   Monitor,
   Flame,
+  AlertTriangle,
 } from 'lucide-react';
 import { WindowItem } from '../types';
-import { SAMPLE_WINDOWS } from '../services/tauriBridge';
+import { fetchSystemWindows, isTauriEnvironment } from '../services/tauriBridge';
 
 interface WindowSelectorProps {
   selectedWindow: WindowItem | null;
@@ -39,17 +39,33 @@ export const WindowSelector: React.FC<WindowSelectorProps> = ({
   isBroadcasting,
   onToggleBroadcast,
 }) => {
-  const [windowsList, setWindowsList] = useState<WindowItem[]>(SAMPLE_WINDOWS);
+  const [windowsList, setWindowsList] = useState<WindowItem[]>([]);
   const [search, setSearch] = useState<string>('');
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const handleRefresh = () => {
+  const loadWindows = async () => {
     setIsRefreshing(true);
-    // Simulação ou chamada real via Tauri invoke('list_windows')
-    setTimeout(() => {
+    setErrorMsg(null);
+    try {
+      const list = await fetchSystemWindows();
+      setWindowsList(list);
+      if (list.length > 0 && !selectedWindow) {
+        onSelectWindow(list[0]);
+      }
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'Falha ao enumerar processos do Windows.');
+      setWindowsList([]);
+    } finally {
       setIsRefreshing(false);
-    }, 400);
+    }
   };
+
+  useEffect(() => {
+    if (isTauriEnvironment()) {
+      loadWindows();
+    }
+  }, []);
 
   const filteredWindows = windowsList.filter(
     (w) =>
@@ -73,12 +89,12 @@ export const WindowSelector: React.FC<WindowSelectorProps> = ({
             </span>
           </div>
           <p className="text-xs text-neutral-400">
-            Escolha o jogo ou aplicativo desejado para transmitir apenas seu áudio nativo (Discord excluído).
+            Enumera processos ativos no Windows para isolar o áudio exclusivo do jogo/aplicativo via WASAPI (sem vazar voz do Discord).
           </p>
         </div>
 
         <button
-          onClick={handleRefresh}
+          onClick={loadWindows}
           disabled={isRefreshing}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-950 hover:bg-neutral-800 border border-neutral-700 rounded text-xs font-mono text-neutral-300 transition-colors cursor-pointer"
         >
@@ -87,88 +103,108 @@ export const WindowSelector: React.FC<WindowSelectorProps> = ({
         </button>
       </div>
 
-      {/* Barra de Busca de Janelas */}
-      <div className="relative">
-        <Search className="w-4 h-4 text-neutral-500 absolute left-3 top-2.5" />
-        <input
-          type="text"
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Filtrar por nome do jogo, executável (ex: cs2.exe) ou PID..."
-          className="w-full bg-neutral-950 border border-neutral-800 focus:border-cyan-500 rounded-lg pl-9 pr-3 py-2 text-xs font-mono text-neutral-200 outline-none"
-        />
-      </div>
-
-      {/* Lista de Janelas do Windows com PIDs visíveis */}
-      <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
-        {filteredWindows.length === 0 ? (
-          <div className="text-center py-6 text-xs text-neutral-500 font-mono">
-            Nenhuma janela encontrada com esse filtro.
+      {/* Exibição de Erro Real caso o backend Win32 não esteja presente */}
+      {errorMsg ? (
+        <div className="p-3.5 bg-neutral-950 border border-amber-900/60 rounded-lg text-xs font-mono text-amber-300/90 space-y-1.5">
+          <div className="flex items-center gap-2 font-bold text-amber-400">
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+            <span>Aviso do Driver Nativo Win32:</span>
           </div>
-        ) : (
-          filteredWindows.map((win) => {
-            const isSelected = selectedWindow?.hwnd === win.hwnd;
-            const isDiscord = win.process_name.toLowerCase().includes('discord');
+          <p className="text-[11px] text-neutral-400 leading-relaxed">
+            {errorMsg}
+          </p>
+          <p className="text-[10px] text-cyan-400 pt-1">
+            * Dica: Você ainda pode transmitir a tela diretamente através da captura do navegador clicando em "Transmitir Tela" abaixo.
+          </p>
+        </div>
+      ) : (
+        <>
+          {/* Barra de Busca de Janelas */}
+          <div className="relative">
+            <Search className="w-4 h-4 text-neutral-500 absolute left-3 top-2.5" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Filtrar por nome do jogo, executável (ex: cs2.exe) ou PID..."
+              className="w-full bg-neutral-950 border border-neutral-800 focus:border-cyan-500 rounded-lg pl-9 pr-3 py-2 text-xs font-mono text-neutral-200 outline-none"
+            />
+          </div>
 
-            return (
-              <div
-                key={win.hwnd}
-                onClick={() => onSelectWindow(win)}
-                className={`flex items-center justify-between p-2.5 rounded-lg border transition-all cursor-pointer ${
-                  isSelected
-                    ? 'bg-cyan-950/40 border-cyan-500 shadow-md shadow-cyan-950/50'
-                    : 'bg-neutral-950/70 border-neutral-800/80 hover:border-neutral-700'
-                }`}
-              >
-                <div className="flex items-center gap-3 overflow-hidden">
+          {/* Lista de Janelas Reais */}
+          <div className="max-h-56 overflow-y-auto space-y-1.5 pr-1">
+            {filteredWindows.length === 0 ? (
+              <div className="text-center py-6 text-xs text-neutral-500 font-mono">
+                {windowsList.length === 0
+                  ? 'Nenhuma janela enumerada. Clique em "Atualizar Janelas" para buscar via Win32.'
+                  : 'Nenhuma janela encontrada com esse filtro de busca.'}
+              </div>
+            ) : (
+              filteredWindows.map((win) => {
+                const isSelected = selectedWindow?.hwnd === win.hwnd;
+                const isDiscord = win.process_name.toLowerCase().includes('discord');
+
+                return (
                   <div
-                    className={`w-8 h-8 rounded flex items-center justify-center font-mono text-xs ${
-                      win.category === 'game'
-                        ? 'bg-amber-950/60 text-amber-400 border border-amber-800'
-                        : isDiscord
-                        ? 'bg-indigo-950/60 text-indigo-400 border border-indigo-800'
-                        : 'bg-neutral-900 text-neutral-400 border border-neutral-800'
+                    key={win.hwnd}
+                    onClick={() => onSelectWindow(win)}
+                    className={`flex items-center justify-between p-2.5 rounded-lg border transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-cyan-950/40 border-cyan-500 shadow-md shadow-cyan-950/50'
+                        : 'bg-neutral-950/70 border-neutral-800/80 hover:border-neutral-700'
                     }`}
                   >
-                    {win.category === 'game' ? (
-                      <Gamepad2 className="w-4 h-4" />
-                    ) : (
-                      <AppWindow className="w-4 h-4" />
-                    )}
-                  </div>
+                    <div className="flex items-center gap-3 overflow-hidden">
+                      <div
+                        className={`w-8 h-8 rounded flex items-center justify-center font-mono text-xs ${
+                          win.category === 'game'
+                            ? 'bg-amber-950/60 text-amber-400 border border-amber-800'
+                            : isDiscord
+                            ? 'bg-indigo-950/60 text-indigo-400 border border-indigo-800'
+                            : 'bg-neutral-900 text-neutral-400 border border-neutral-800'
+                        }`}
+                      >
+                        {win.category === 'game' ? (
+                          <Gamepad2 className="w-4 h-4" />
+                        ) : (
+                          <AppWindow className="w-4 h-4" />
+                        )}
+                      </div>
 
-                  <div className="overflow-hidden">
-                    <div className="flex items-center gap-2">
-                      <span className="text-xs font-semibold text-neutral-200 truncate">
-                        {win.title}
-                      </span>
-                      {isDiscord && (
-                        <span className="text-[9px] bg-indigo-950/80 text-indigo-300 border border-indigo-700/60 px-1.5 py-0.2 rounded font-mono">
-                          Voz do Discord
+                      <div className="overflow-hidden">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-semibold text-neutral-200 truncate">
+                            {win.title}
+                          </span>
+                          {isDiscord && (
+                            <span className="text-[9px] bg-indigo-950/80 text-indigo-300 border border-indigo-700/60 px-1.5 py-0.2 rounded font-mono">
+                              Discord (Excluído do WASAPI)
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2 text-[10px] font-mono text-neutral-400">
+                          <span>Executável: <strong className="text-neutral-300">{win.process_name}</strong></span>
+                          <span>·</span>
+                          <span className="text-cyan-400">PID: {win.pid}</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      {isSelected && (
+                        <span className="flex items-center gap-1 text-[11px] font-mono text-cyan-400">
+                          <CheckCircle2 className="w-4 h-4" />
+                          Selecionada
                         </span>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 text-[10px] font-mono text-neutral-400">
-                      <span>Executável: <strong className="text-neutral-300">{win.process_name}</strong></span>
-                      <span>·</span>
-                      <span className="text-cyan-400">PID: {win.pid}</span>
-                    </div>
                   </div>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  {isSelected && (
-                    <span className="flex items-center gap-1 text-[11px] font-mono text-cyan-400">
-                      <CheckCircle2 className="w-4 h-4" />
-                      Selecionada
-                    </span>
-                  )}
-                </div>
-              </div>
-            );
-          })
-        )}
-      </div>
+                );
+              })
+            )}
+          </div>
+        </>
+      )}
 
       {/* Configurações de Transmissão e Isolamento de Áudio */}
       <div className="pt-3 border-t border-neutral-800 flex flex-wrap items-center justify-between gap-4">
@@ -231,13 +267,10 @@ export const WindowSelector: React.FC<WindowSelectorProps> = ({
           {/* Botão de Transmitir */}
           <button
             onClick={onToggleBroadcast}
-            disabled={!selectedWindow}
             className={`flex items-center gap-1.5 px-4 py-1.5 rounded font-mono font-bold text-xs uppercase tracking-wider transition-all cursor-pointer shadow-md ${
               isBroadcasting
                 ? 'bg-red-600 hover:bg-red-500 text-white shadow-red-950'
-                : selectedWindow
-                ? 'bg-cyan-500 hover:bg-cyan-400 text-black shadow-cyan-950'
-                : 'bg-neutral-800 text-neutral-500 cursor-not-allowed'
+                : 'bg-cyan-500 hover:bg-cyan-400 text-black shadow-cyan-950'
             }`}
           >
             {isBroadcasting ? (
