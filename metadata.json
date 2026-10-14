@@ -1,0 +1,6 @@
+{
+  "name": "StreamCompanion",
+  "description": "Aplicativo desktop ultra-leve para streaming de jogos, janelas e webcams P2P com isolamento de áudio WASAPI por processo e tunelamento Cloudflare.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
