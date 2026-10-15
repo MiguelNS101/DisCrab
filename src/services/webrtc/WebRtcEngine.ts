@@ -31,6 +31,21 @@ export interface RemotePeer {
   webcamStream?: MediaStream;
 }
 
+export interface PerformanceLogEntry {
+  id: string;
+  timestamp: number;
+  peerId: string;
+  userName: string;
+  type: 'info' | 'warning' | 'error';
+  message: string;
+  metric?: {
+    fps?: number;
+    rttMs?: number;
+    packetLossPct?: number;
+    bitrateKbps?: number;
+  };
+}
+
 export type EngineEventCallback = {
   onPeersChange?: (peers: RemotePeer[]) => void;
   onSelfConnected?: (peerId: string, isHost: boolean) => void;
@@ -38,6 +53,7 @@ export type EngineEventCallback = {
   onRemoteStream?: (peerId: string, type: 'screen' | 'webcam', stream: MediaStream) => void;
   onStatsUpdate?: (stats: { rttMs: number; bytesReceived: number; bytesSent: number }) => void;
   onChatMessage?: (msg: ChatMessage) => void;
+  onPerformanceLog?: (entry: PerformanceLogEntry) => void;
 };
 
 export class WebRtcEngine {
@@ -243,18 +259,53 @@ export class WebRtcEngine {
       info.connectionState = pc.connectionState;
       this.emitPeersChange();
       console.log(`[WebRTC] Peer ${peerId} estado de conexão:`, pc.connectionState);
+
+      if (pc.connectionState === 'connected') {
+        this.callbacks.onPerformanceLog?.({
+          id: Math.random().toString(36).substring(2, 9),
+          timestamp: Date.now(),
+          peerId,
+          userName: info.nickname || 'Amigo',
+          type: 'info',
+          message: 'Túnel P2P direto WebRTC estabelecido.',
+        });
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        this.callbacks.onPerformanceLog?.({
+          id: Math.random().toString(36).substring(2, 9),
+          timestamp: Date.now(),
+          peerId,
+          userName: info.nickname || 'Amigo',
+          type: 'error',
+          message: `Conexão P2P com instabilidade (${pc.connectionState}).`,
+        });
+      }
     };
+
+    // Se já estivermos transmitindo tela, injeta faixas de vídeo e áudio imediatamente
+    if (this.isBroadcastingScreen && this.localScreenStream) {
+      this.localScreenStream.getTracks().forEach((track) => {
+        pc.addTrack(track, this.localScreenStream!);
+      });
+    }
 
     // Recepção de Streams de Vídeo e Áudio
     pc.ontrack = (event) => {
-      console.log(`[WebRTC] Faixa recebida do peer ${peerId}:`, event.track.kind);
-      const stream = event.streams[0] || new MediaStream([event.track]);
-
-      // Diferenciação se é tela ou webcam baseado no tipo ou metadado
-      if (event.track.kind === 'video') {
-        info.screenStream = stream;
-        this.callbacks.onRemoteStream?.(peerId, 'screen', stream);
+      console.log(`[WebRTC] Faixa recebida do peer ${peerId}: ${event.track.kind} (${event.track.id})`);
+      
+      if (!info.screenStream) {
+        info.screenStream = event.streams[0] || new MediaStream();
       }
+
+      // Adiciona a faixa se ainda não estiver anexada
+      if (!info.screenStream.getTracks().some((t) => t.id === event.track.id)) {
+        info.screenStream.addTrack(event.track);
+      }
+
+      if (event.track.kind === 'audio') {
+        info.hasIsolatedAudio = true;
+      }
+
+      this.callbacks.onRemoteStream?.(peerId, 'screen', info.screenStream);
       this.emitPeersChange();
     };
 
@@ -565,7 +616,95 @@ export class WebRtcEngine {
     this.callbacks.onPeersChange?.(list);
   }
 
+  private statsInterval: any = null;
+  private prevStatsMap: Map<string, { packetsLost: number; packetsReceived: number; framesDropped: number }> = new Map();
+
+  public startPerformanceMonitoring() {
+    if (this.statsInterval) return;
+    this.statsInterval = setInterval(async () => {
+      for (const [peerId, peerEntry] of this.peers.entries()) {
+        try {
+          if (peerEntry.pc.connectionState !== 'connected') continue;
+          const stats = await peerEntry.pc.getStats();
+          let rttMs = 0;
+          let packetLossPct = 0;
+          let fps = 0;
+          let framesDroppedDelta = 0;
+
+          stats.forEach((report) => {
+            if (report.type === 'candidate-pair' && report.state === 'succeeded' && typeof report.currentRoundTripTime === 'number') {
+              rttMs = Math.round(report.currentRoundTripTime * 1000);
+            }
+            if (report.type === 'inbound-rtp' && report.kind === 'video') {
+              fps = report.framesPerSecond || 0;
+              const prev = this.prevStatsMap.get(peerId);
+              const lost = report.packetsLost || 0;
+              const received = report.packetsReceived || 0;
+              const dropped = report.framesDropped || 0;
+
+              if (prev) {
+                const deltaLost = Math.max(0, lost - prev.packetsLost);
+                const deltaRecv = Math.max(0, received - prev.packetsReceived);
+                const total = deltaLost + deltaRecv;
+                if (total > 0) {
+                  packetLossPct = Math.round((deltaLost / total) * 1000) / 10;
+                }
+                framesDroppedDelta = Math.max(0, dropped - prev.framesDropped);
+              }
+
+              this.prevStatsMap.set(peerId, {
+                packetsLost: lost,
+                packetsReceived: received,
+                framesDropped: dropped,
+              });
+            }
+          });
+
+          // Notifica se houver problemas de performance
+          if (packetLossPct > 5) {
+            this.callbacks.onPerformanceLog?.({
+              id: Math.random().toString(36).substring(2, 9),
+              timestamp: Date.now(),
+              peerId,
+              userName: peerEntry.info.nickname || 'Amigo',
+              type: 'warning',
+              message: `Perda de pacotes elevada (${packetLossPct}%)`,
+              metric: { packetLossPct, rttMs, fps },
+            });
+          } else if (rttMs > 180) {
+            this.callbacks.onPerformanceLog?.({
+              id: Math.random().toString(36).substring(2, 9),
+              timestamp: Date.now(),
+              peerId,
+              userName: peerEntry.info.nickname || 'Amigo',
+              type: 'warning',
+              message: `Latência de rede elevada (${rttMs}ms ping)`,
+              metric: { rttMs, packetLossPct, fps },
+            });
+          } else if (framesDroppedDelta > 15) {
+            this.callbacks.onPerformanceLog?.({
+              id: Math.random().toString(36).substring(2, 9),
+              timestamp: Date.now(),
+              peerId,
+              userName: peerEntry.info.nickname || 'Amigo',
+              type: 'warning',
+              message: `Queda de quadros de vídeo detectada (${framesDroppedDelta} frames descartados)`,
+              metric: { rttMs, packetLossPct, fps },
+            });
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }, 3500);
+  }
+
   private cleanup() {
+    if (this.statsInterval) {
+      clearInterval(this.statsInterval);
+      this.statsInterval = null;
+    }
+    this.prevStatsMap.clear();
     this.peers.forEach((p) => p.pc.close());
     this.peers.clear();
     this.stopScreenShare();

@@ -10,6 +10,7 @@ export class WasapiAudioBridge {
   private destinationNode: MediaStreamAudioDestinationNode | null = null;
   private gainNode: GainNode | null = null;
   private isInitialized = false;
+  private nextStartTime = 0;
 
   constructor() {
     // AudioContext será inicializado após gesto do usuário
@@ -28,6 +29,7 @@ export class WasapiAudioBridge {
     this.gainNode = this.audioCtx.createGain();
     this.gainNode.gain.value = 1.0;
     this.gainNode.connect(this.destinationNode);
+    this.nextStartTime = this.audioCtx.currentTime;
 
     this.isInitialized = true;
     console.log('[AudioBridge] WASAPI AudioBridge inicializado a', sampleRate, 'Hz');
@@ -39,6 +41,9 @@ export class WasapiAudioBridge {
   public getAudioTrack(): MediaStreamTrack | null {
     if (!this.destinationNode) {
       this.init();
+    }
+    if (this.audioCtx && this.audioCtx.state === 'suspended') {
+      this.audioCtx.resume().catch(() => {});
     }
     const tracks = this.destinationNode?.stream.getAudioTracks();
     return tracks && tracks.length > 0 ? tracks[0] : null;
@@ -53,11 +58,13 @@ export class WasapiAudioBridge {
     }
 
     if (this.audioCtx?.state === 'suspended') {
-      this.audioCtx.resume();
+      this.audioCtx.resume().catch(() => {});
     }
 
     const ctx = this.audioCtx!;
-    const frameCount = pcmData.length / channels;
+    const frameCount = Math.floor(pcmData.length / channels);
+    if (frameCount === 0) return;
+
     const audioBuffer = ctx.createBuffer(channels, frameCount, sampleRate);
 
     if (pcmData instanceof Float32Array) {
@@ -78,11 +85,17 @@ export class WasapiAudioBridge {
       }
     }
 
-    // Toca o buffer na saída do MediaStreamDestination
+    const now = ctx.currentTime;
+    if (this.nextStartTime < now) {
+      this.nextStartTime = now + 0.025; // 25ms buffer contra underruns
+    }
+
+    // Toca o buffer de forma contígua no tempo
     const sourceNode = ctx.createBufferSource();
     sourceNode.buffer = audioBuffer;
     sourceNode.connect(this.gainNode!);
-    sourceNode.start();
+    sourceNode.start(this.nextStartTime);
+    this.nextStartTime += audioBuffer.duration;
   }
 
   /**
@@ -92,16 +105,22 @@ export class WasapiAudioBridge {
     try {
       const binaryStr = atob(base64Data);
       const len = binaryStr.length;
-      const bytes = new Uint8Array(len);
-      for (let i = 0; i < len; i++) {
-        bytes[i] = binaryStr.charCodeAt(i);
+      if (len === 0) return;
+
+      const alignedLength = bitsPerSample === 32 ? Math.floor(len / 4) * 4 : Math.floor(len / 2) * 2;
+      if (alignedLength === 0) return;
+
+      const buffer = new ArrayBuffer(alignedLength);
+      const u8View = new Uint8Array(buffer);
+      for (let i = 0; i < alignedLength; i++) {
+        u8View[i] = binaryStr.charCodeAt(i);
       }
 
       if (bitsPerSample === 32) {
-        const floatView = new Float32Array(bytes.buffer);
+        const floatView = new Float32Array(buffer);
         this.feedPcmChunk(floatView, channels, sampleRate);
       } else {
-        const int16View = new Int16Array(bytes.buffer);
+        const int16View = new Int16Array(buffer);
         this.feedPcmChunk(int16View, channels, sampleRate);
       }
     } catch (err) {

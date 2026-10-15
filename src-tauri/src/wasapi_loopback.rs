@@ -135,7 +135,7 @@ impl ProcessAudioCapturer {
 
 #[cfg(windows)]
 fn run_wasapi_capture_loop(
-    _pid: u32,
+    pid: u32,
     running: Arc<AtomicBool>,
     sender: broadcast::Sender<PcmAudioPacket>,
 ) -> Result<(), String> {
@@ -152,6 +152,29 @@ fn run_wasapi_capture_loop(
     };
     use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
+    #[repr(C)]
+    struct AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+        target_process_id: u32,
+        process_loopback_mode: u32,
+    }
+
+    #[repr(C)]
+    struct AUDIOCLIENT_ACTIVATION_PARAMS {
+        activation_type: u32,
+        process_loopback_params: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
+    }
+
+    #[repr(C)]
+    struct CustomPropVariantBlob {
+        vt: u16,
+        reserved1: u16,
+        reserved2: u16,
+        reserved3: u16,
+        cb_size: u32,
+        _pad: u32,
+        p_blob_data: *mut u8,
+    }
+
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED)
             .ok()
@@ -165,9 +188,64 @@ fn run_wasapi_capture_loop(
             .GetDefaultAudioEndpoint(eRender, eConsole)
             .map_err(|e| format!("GetDefaultAudioEndpoint falhou: {}", e))?;
 
-        let audio_client: IAudioClient = device
-            .Activate::<IAudioClient>(CLSCTX_ALL, None)
-            .map_err(|e| format!("device.Activate falhou: {}", e))?;
+        // 1. Determina se é captura isolada de janela (Include PID) ou tela inteira sem Discord (Exclude Discord)
+        let mut audio_client_opt: Option<IAudioClient> = None;
+
+        let (target_pid, loopback_mode) = if pid > 0 {
+            println!("[WASAPI] Configurando captura isolada para o processo PID {}", pid);
+            (Some(pid), PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE)
+        } else {
+            // Procura PID do Discord para excluir da captura de tela cheia
+            let discord_pid = crate::window_manager::enumerate_windows()
+                .into_iter()
+                .find(|w| w.process_name.to_lowercase().contains("discord"))
+                .map(|w| w.pid);
+
+            if let Some(d_pid) = discord_pid {
+                println!("[WASAPI] Discord detectado (PID {}). Excluindo Discord do áudio do sistema!", d_pid);
+                (Some(d_pid), PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE)
+            } else {
+                println!("[WASAPI] Discord não localizado. Capturando áudio global do sistema.");
+                (None, 0)
+            }
+        };
+
+        if let Some(t_pid) = target_pid {
+            let mut activation_params = AUDIOCLIENT_ACTIVATION_PARAMS {
+                activation_type: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
+                process_loopback_params: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
+                    target_process_id: t_pid,
+                    process_loopback_mode: loopback_mode,
+                },
+            };
+
+            let mut pv = CustomPropVariantBlob {
+                vt: 65, // VT_BLOB
+                reserved1: 0,
+                reserved2: 0,
+                reserved3: 0,
+                cb_size: std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                _pad: 0,
+                p_blob_data: &mut activation_params as *mut _ as *mut u8,
+            };
+
+            match device.Activate::<IAudioClient>(CLSCTX_ALL, Some(&pv as *const _ as *const _)) {
+                Ok(client) => {
+                    println!("[WASAPI] Ativação com filtro de processo (PID {}, modo {}) bem-sucedida!", t_pid, loopback_mode);
+                    audio_client_opt = Some(client);
+                }
+                Err(err) => {
+                    eprintln!("[WASAPI] Ativação filtrada não suportada nesta versão do Windows ({}), usando loopback padrão", err);
+                }
+            }
+        }
+
+        let audio_client: IAudioClient = match audio_client_opt {
+            Some(client) => client,
+            None => device
+                .Activate::<IAudioClient>(CLSCTX_ALL, None)
+                .map_err(|e| format!("device.Activate falhou: {}", e))?,
+        };
 
         let wave_format_ptr = audio_client
             .GetMixFormat()
@@ -227,19 +305,22 @@ fn run_wasapi_capture_loop(
                         break;
                     }
 
-                    if (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) == 0 && !data_ptr.is_null() {
-                        let total_bytes = (num_frames_read as usize) * bytes_per_frame;
+                    let total_bytes = (num_frames_read as usize) * bytes_per_frame;
+                    let pcm_bytes = if (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data_ptr.is_null() {
+                        vec![0u8; total_bytes]
+                    } else {
                         let slice = std::slice::from_raw_parts(data_ptr, total_bytes);
+                        slice.to_vec()
+                    };
 
-                        let packet = PcmAudioPacket {
-                            sample_rate,
-                            channels,
-                            bits_per_sample,
-                            pcm_data: slice.to_vec(),
-                        };
+                    let packet = PcmAudioPacket {
+                        sample_rate,
+                        channels,
+                        bits_per_sample,
+                        pcm_data: pcm_bytes,
+                    };
 
-                        let _ = sender.send(packet);
-                    }
+                    let _ = sender.send(packet);
 
                     let _ = capture_client.ReleaseBuffer(num_frames_read);
                 }

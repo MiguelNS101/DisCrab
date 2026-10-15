@@ -5,6 +5,9 @@ import { isTauriEnvironment } from '../services/tauriBridge';
 
 import { ChatMessage } from '../types';
 
+import { listen } from '@tauri-apps/api/event';
+import { PerformanceLogEntry } from '../services/webrtc/WebRtcEngine';
+
 export interface UseWebRtcReturn {
   isConnected: boolean;
   myPeerId: string | null;
@@ -16,6 +19,8 @@ export interface UseWebRtcReturn {
   isWebcamActive: boolean;
   localStream: MediaStream | null;
   chatMessages: ChatMessage[];
+  performanceLogs: PerformanceLogEntry[];
+  clearPerformanceLogs: () => void;
   sendChatMessage: (text: string, senderName: string) => void;
   connectToRoom: (wsUrl: string, token: string, nickname: string) => Promise<void>;
   disconnectFromRoom: () => void;
@@ -43,6 +48,7 @@ export function useWebRtc(): UseWebRtcReturn {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [volumeMap, setVolumeMap] = useState<Record<string, number>>({});
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [performanceLogs, setPerformanceLogs] = useState<PerformanceLogEntry[]>([]);
 
   const engineRef = useRef<WebRtcEngine | null>(null);
 
@@ -50,26 +56,41 @@ export function useWebRtc(): UseWebRtcReturn {
     setError(null);
   }, []);
 
+  const clearPerformanceLogs = useCallback(() => {
+    setPerformanceLogs([]);
+  }, []);
+
   // Escuta pacotes PCM de áudio isolado enviados pelo Rust via Tauri Event
   useEffect(() => {
-    if (isTauriEnvironment() && (window as any).__TAURI__?.event) {
-      const unlistenPromise = (window as any).__TAURI__.event.listen(
-        'isolated-audio-chunk',
-        (event: any) => {
-          const { data_base64, bits_per_sample, channels, sample_rate } = event.payload;
-          wasapiAudioBridge.feedBase64Chunk(
-            data_base64,
-            bits_per_sample,
-            channels,
-            sample_rate
-          );
-        }
-      );
+    let unlistenFn: (() => void) | null = null;
+    let cancelled = false;
 
-      return () => {
-        unlistenPromise.then((unlisten: any) => unlisten());
-      };
+    if (isTauriEnvironment()) {
+      listen<any>('isolated-audio-chunk', (event) => {
+        const { data_base64, bits_per_sample, channels, sample_rate } = event.payload;
+        wasapiAudioBridge.feedBase64Chunk(
+          data_base64,
+          bits_per_sample,
+          channels,
+          sample_rate
+        );
+      })
+        .then((unlisten) => {
+          if (cancelled) {
+            unlisten();
+          } else {
+            unlistenFn = unlisten;
+          }
+        })
+        .catch((err) => {
+          console.warn('[useWebRtc] Erro ao registrar listener de áudio:', err);
+        });
     }
+
+    return () => {
+      cancelled = true;
+      if (unlistenFn) unlistenFn();
+    };
   }, []);
 
   const initEngine = useCallback(() => {
@@ -83,6 +104,7 @@ export function useWebRtc(): UseWebRtcReturn {
         setMyPeerId(peerId);
         setIsHost(hostStatus);
         setIsConnected(true);
+        engine.startPerformanceMonitoring();
       },
       onError: (err) => {
         setError(err);
@@ -92,6 +114,9 @@ export function useWebRtc(): UseWebRtcReturn {
       },
       onChatMessage: (msg) => {
         setChatMessages((prev) => [...prev, msg]);
+      },
+      onPerformanceLog: (entry) => {
+        setPerformanceLogs((prev) => [entry, ...prev].slice(0, 50));
       },
     });
 
@@ -208,6 +233,8 @@ export function useWebRtc(): UseWebRtcReturn {
     isWebcamActive,
     localStream,
     chatMessages,
+    performanceLogs,
+    clearPerformanceLogs,
     sendChatMessage,
     connectToRoom,
     disconnectFromRoom,

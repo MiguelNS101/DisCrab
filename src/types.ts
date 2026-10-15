@@ -41,3 +41,21 @@ export interface ChatMessage {
   timestamp: number;
   isSelf: boolean;
 }
+
+export type StreamQualityPreset = '1080p60' | '720p60' | '480p30' | '360p30' | 'auto';
+export type PopupSizePreset = 'compact' | 'medium' | 'large' | 'free';
+
+export interface StreamPopupState {
+  streamId: string;
+  userName: string;
+  title: string;
+  type: 'screen' | 'webcam';
+  isOpen: boolean;
+  isMinimized: boolean;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  quality: StreamQualityPreset;
+  sizePreset: PopupSizePreset;
+}

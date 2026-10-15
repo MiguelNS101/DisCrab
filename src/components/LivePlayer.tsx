@@ -11,6 +11,9 @@ import {
   User,
   Sliders,
   Sparkles,
+  ExternalLink,
+  PictureInPicture2,
+  Activity,
 } from 'lucide-react';
 
 interface LivePlayerProps {
@@ -27,6 +30,8 @@ interface LivePlayerProps {
   volume: number;
   isMuted: boolean;
   isWatched: boolean;
+  isPoppedOut?: boolean;
+  onOpenPopup?: () => void;
   onToggleWatch: () => void;
   onChangeVolume: (vol: number) => void;
   onToggleMute: () => void;
@@ -46,6 +51,8 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   volume,
   isMuted,
   isWatched,
+  isPoppedOut = false,
+  onOpenPopup,
   onToggleWatch,
   onChangeVolume,
   onToggleMute,
@@ -89,7 +96,29 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     >
       {/* Viewport Principal de Vídeo */}
       <div className="relative aspect-video bg-neutral-950 flex items-center justify-center overflow-hidden">
-        {isWatched ? (
+        {isPoppedOut ? (
+          <div className="w-full h-full bg-neutral-950/95 flex flex-col items-center justify-center text-center p-6 space-y-3 border-2 border-dashed border-cyan-500/30">
+            <div className="w-12 h-12 rounded-full bg-cyan-950/60 border border-cyan-500/50 flex items-center justify-center mx-auto text-cyan-400">
+              <ExternalLink className="w-6 h-6 animate-pulse" />
+            </div>
+            <div>
+              <h4 className="text-xs font-mono font-bold text-cyan-300">
+                Aberta em Janela Flutuante (Popup)
+              </h4>
+              <p className="text-[11px] text-neutral-400 font-mono mt-0.5 max-w-xs">
+                Controles de tamanho livre, qualidade e áudio disponíveis na janela destacada.
+              </p>
+            </div>
+            {onOpenPopup && (
+              <button
+                onClick={onOpenPopup}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/60 text-cyan-300 text-xs font-mono font-semibold rounded cursor-pointer transition-all"
+              >
+                Focar Janela Flutuante
+              </button>
+            )}
+          </div>
+        ) : isWatched ? (
           <>
             {stream ? (
               <video
@@ -135,8 +164,17 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
               )}
             </div>
 
-            {/* Botão de Tela Cheia */}
-            <div className="absolute top-2.5 right-2.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+            {/* Botões de Ação Superior Direito (Popup + Tela Cheia) */}
+            <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+              {onOpenPopup && (
+                <button
+                  onClick={onOpenPopup}
+                  className="p-1.5 bg-neutral-950/80 hover:bg-cyan-950 text-neutral-300 hover:text-cyan-300 rounded border border-neutral-800 hover:border-cyan-700 cursor-pointer backdrop-blur"
+                  title="Abrir em Janela Popup Flutuante"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                </button>
+              )}
               <button
                 onClick={toggleFullscreen}
                 className="p-1.5 bg-neutral-950/80 hover:bg-neutral-800 text-neutral-300 rounded border border-neutral-800 cursor-pointer backdrop-blur"
@@ -203,17 +241,31 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
           </div>
         </div>
 
-        {/* Botão de Pausar Visualização */}
-        {isWatched && !isSelf && (
-          <button
-            onClick={onToggleWatch}
-            className="text-[11px] font-mono text-neutral-400 hover:text-neutral-200 flex items-center gap-1 cursor-pointer"
-            title="Economizar banda parando de assistir este stream"
-          >
-            <EyeOff className="w-3.5 h-3.5" />
-            <span>Pausar</span>
-          </button>
-        )}
+        <div className="flex items-center gap-3">
+          {/* Botão de Destacar em Popup */}
+          {isWatched && onOpenPopup && !isPoppedOut && (
+            <button
+              onClick={onOpenPopup}
+              className="text-[11px] font-mono text-cyan-400 hover:text-cyan-300 flex items-center gap-1.5 cursor-pointer bg-cyan-950/40 hover:bg-cyan-950/80 border border-cyan-800/60 px-2 py-1 rounded transition-colors"
+              title="Abrir esta live em janela popup com tamanho e qualidade ajustáveis"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span>Popup</span>
+            </button>
+          )}
+
+          {/* Botão de Pausar Visualização */}
+          {isWatched && !isSelf && (
+            <button
+              onClick={onToggleWatch}
+              className="text-[11px] font-mono text-neutral-400 hover:text-neutral-200 flex items-center gap-1 cursor-pointer"
+              title="Economizar banda parando de assistir este stream"
+            >
+              <EyeOff className="w-3.5 h-3.5" />
+              <span>Pausar</span>
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

@@ -10,6 +10,8 @@ import { WindowSelector } from './components/WindowSelector';
 import { WasapiVisualizer } from './components/WasapiVisualizer';
 import { BroadcastControls } from './components/BroadcastControls';
 import { LivePlayer } from './components/LivePlayer';
+import { FloatingStreamPopup } from './components/FloatingStreamPopup';
+import { PerformanceDrawer } from './components/PerformanceDrawer';
 import { ChatBox } from './components/ChatBox';
 import { RustCodeViewer } from './components/RustCodeViewer';
 import { WindowItem, RoomDetails, StreamItem } from './types';
@@ -17,11 +19,45 @@ import { useWebRtc } from './hooks/useWebRtc';
 import { Radio, Users, AlertCircle, X, Tv } from 'lucide-react';
 
 export default function App() {
-  const [nickname, setNickname] = useState<string>('Jogador_1');
+  // Inicializa o apelido do localStorage para não precisar digitar novamente
+  const [nickname, setNickname] = useState<string>(() => {
+    try {
+      return localStorage.getItem('sc_nickname') || 'Jogador_1';
+    } catch {
+      return 'Jogador_1';
+    }
+  });
+
+  // Salva o apelido sempre que alterado
+  useEffect(() => {
+    try {
+      localStorage.setItem('sc_nickname', nickname);
+    } catch {
+      // ignore
+    }
+  }, [nickname]);
+
   const [roomDetails, setRoomDetails] = useState<RoomDetails | null>(null);
   const [isHost, setIsHost] = useState<boolean>(true);
 
-  // Hook WebRTC nativo P2P com DataChannel Chat integrado
+  // Controle de Popups de Transmissão Flutuantes Individuais
+  const [activePopups, setActivePopups] = useState<Record<string, boolean>>({});
+
+  const togglePopup = (streamId: string) => {
+    setActivePopups((prev) => ({
+      ...prev,
+      [streamId]: !prev[streamId],
+    }));
+  };
+
+  const closePopup = (streamId: string) => {
+    setActivePopups((prev) => ({
+      ...prev,
+      [streamId]: false,
+    }));
+  };
+
+  // Hook WebRTC nativo P2P com DataChannel Chat integrado e telemetria
   const {
     isConnected,
     myPeerId,
@@ -32,6 +68,8 @@ export default function App() {
     isWebcamActive,
     localStream,
     chatMessages,
+    performanceLogs,
+    clearPerformanceLogs,
     sendChatMessage,
     connectToRoom,
     disconnectFromRoom,
@@ -242,6 +280,8 @@ export default function App() {
                     volume={100}
                     isMuted={false}
                     isWatched={true}
+                    isPoppedOut={!!activePopups['self-screen']}
+                    onOpenPopup={() => togglePopup('self-screen')}
                     onToggleWatch={() => {}}
                     onChangeVolume={() => {}}
                     onToggleMute={() => {}}
@@ -265,6 +305,8 @@ export default function App() {
                     volume={stream.volume}
                     isMuted={stream.is_muted}
                     isWatched={stream.is_watched}
+                    isPoppedOut={!!activePopups[stream.id]}
+                    onOpenPopup={() => togglePopup(stream.id)}
                     onToggleWatch={() => handleToggleWatch(stream.id)}
                     onChangeVolume={(vol) => setStreamVolume(stream.id, vol)}
                     onToggleMute={() => setStreamVolume(stream.id, stream.is_muted ? 100 : 0)}
@@ -286,6 +328,63 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {/* Janelas Flutuantes (Popups) de Transmissão com Controle de Tamanho e Qualidade */}
+      {isScreenSharing && activePopups['self-screen'] && (
+        <FloatingStreamPopup
+          id="self-screen"
+          userName={nickname}
+          title={selectedWindow ? selectedWindow.title : 'Tela do Usuário'}
+          type="screen"
+          stream={localStream}
+          resolution={resolution}
+          fps={fps}
+          isSelf={true}
+          hasIsolatedAudio={isolateAudio}
+          processName={selectedWindow?.process_name}
+          volume={100}
+          isMuted={false}
+          initialX={80}
+          initialY={100}
+          onClose={() => closePopup('self-screen')}
+          onChangeVolume={() => {}}
+          onToggleMute={() => {}}
+        />
+      )}
+
+      {peerStreams.map((stream, idx) => {
+        if (!activePopups[stream.id]) return null;
+        return (
+          <FloatingStreamPopup
+            key={`popup-${stream.id}`}
+            id={stream.id}
+            userName={stream.user_name}
+            title={stream.title}
+            type={stream.type}
+            stream={stream.stream}
+            resolution={stream.resolution}
+            fps={stream.fps}
+            isSelf={false}
+            hasIsolatedAudio={stream.isolated_audio}
+            processName={stream.process_name}
+            volume={stream.volume}
+            isMuted={stream.is_muted}
+            initialX={120 + (idx * 50)}
+            initialY={140 + (idx * 50)}
+            onClose={() => closePopup(stream.id)}
+            onChangeVolume={(vol) => setStreamVolume(stream.id, vol)}
+            onToggleMute={() => setStreamVolume(stream.id, stream.is_muted ? 100 : 0)}
+          />
+        );
+      })}
+
+      {/* Monitor Discreto de Desempenho e Telemetria P2P com Identificação de Usuário */}
+      <PerformanceDrawer
+        logs={performanceLogs}
+        peers={peers}
+        onClearLogs={clearPerformanceLogs}
+        myNickname={nickname}
+      />
 
       {/* Modal de Código Rust & WebRTC */}
       <RustCodeViewer
