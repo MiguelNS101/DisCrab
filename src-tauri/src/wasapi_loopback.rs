@@ -6,6 +6,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(not(windows))]
 use std::time::Duration;
 use tokio::sync::broadcast;
 
@@ -134,116 +135,40 @@ impl ProcessAudioCapturer {
 
 #[cfg(windows)]
 fn run_wasapi_capture_loop(
-    pid: u32,
+    _pid: u32,
     running: Arc<AtomicBool>,
     sender: broadcast::Sender<PcmAudioPacket>,
 ) -> Result<(), String> {
     use std::ptr;
-    use std::sync::mpsc;
-    use windows::core::{implement, w, ComInterface, IUnknown, HRESULT};
-    use windows::Win32::Foundation::{CloseHandle, CreateEventW, SetEvent, WAIT_OBJECT_0};
-    use windows::Win32::Media::Audio::*;
-    use windows::Win32::System::Com::*;
-    use windows::Win32::System::Threading::WaitForSingleObject;
-
-    #[repr(C)]
-    struct AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
-        TargetProcessId: u32,
-        ProcessLoopbackMode: u32,
-    }
-
-    #[repr(C)]
-    struct AUDIOCLIENT_ACTIVATION_PARAMS {
-        ActivationType: u32,
-        ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS,
-    }
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::Media::Audio::{
+        eConsole, eRender, IAudioCaptureClient, IAudioClient, MMDeviceEnumerator,
+        IMMDeviceEnumerator, AUDCLNT_BUFFERFLAGS_SILENT, AUDCLNT_SHAREMODE_SHARED,
+        AUDCLNT_STREAMFLAGS_EVENTCALLBACK, AUDCLNT_STREAMFLAGS_LOOPBACK,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+        COINIT_MULTITHREADED,
+    };
+    use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
     unsafe {
         CoInitializeEx(None, COINIT_MULTITHREADED)
             .ok()
             .map_err(|e| format!("CoInitializeEx falhou: {}", e))?;
-    }
 
-    let mut loopback_params = AUDIOCLIENT_ACTIVATION_PARAMS {
-        ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
-        ProcessLoopbackParams: AUDIOCLIENT_PROCESS_LOOPBACK_PARAMS {
-            TargetProcessId: pid,
-            ProcessLoopbackMode: PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE,
-        },
-    };
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                .map_err(|e| format!("CoCreateInstance(MMDeviceEnumerator) falhou: {}", e))?;
 
-    let mut prop_var = PROPVARIANT::default();
-    prop_var.Anonymous.Anonymous.vt = VT_BLOB.0;
-    prop_var.Anonymous.Anonymous.Anonymous.blob.cbSize =
-        std::mem::size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32;
-    prop_var.Anonymous.Anonymous.Anonymous.blob.pBlobData =
-        &mut loopback_params as *mut _ as *mut u8;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(eRender, eConsole)
+            .map_err(|e| format!("GetDefaultAudioEndpoint falhou: {}", e))?;
 
-    let (tx_ready, rx_ready) = mpsc::channel::<Result<IAudioClient, String>>();
+        let audio_client: IAudioClient = device
+            .Activate::<IAudioClient>(CLSCTX_ALL, None)
+            .map_err(|e| format!("device.Activate falhou: {}", e))?;
 
-    #[implement(IActivateAudioInterfaceCompletionHandler)]
-    struct CompletionHandler {
-        sender: Mutex<Option<mpsc::Sender<Result<IAudioClient, String>>>>,
-    }
-
-    impl IActivateAudioInterfaceCompletionHandler_Impl for CompletionHandler_Impl {
-        fn ActivateCompleted(
-            &self,
-            activate_operation: Option<&IActivateAudioInterfaceAsyncOperation>,
-        ) -> windows::core::Result<()> {
-            let mut sender_guard = self.sender.lock().unwrap();
-            if let Some(tx) = sender_guard.take() {
-                if let Some(op) = activate_operation {
-                    unsafe {
-                        let mut activate_hr = HRESULT(0);
-                        let mut unk: Option<IUnknown> = None;
-                        if let Err(e) = op.GetActivateResult(&mut activate_hr, &mut unk) {
-                            let _ = tx.send(Err(format!("GetActivateResult falhou: {}", e)));
-                            return Ok(());
-                        }
-                        if activate_hr.is_err() {
-                            let _ = tx.send(Err(format!("Falha na ativação assíncrona do WASAPI: {:?}", activate_hr)));
-                            return Ok(());
-                        }
-                        if let Some(u) = unk {
-                            match u.cast::<IAudioClient>() {
-                                Ok(client) => {
-                                    let _ = tx.send(Ok(client));
-                                }
-                                Err(e) => {
-                                    let _ = tx.send(Err(format!("Falha ao fazer cast para IAudioClient: {}", e)));
-                                }
-                            }
-                        } else {
-                            let _ = tx.send(Err("Objeto ativado nulo".to_string()));
-                        }
-                    }
-                }
-            }
-            Ok(())
-        }
-    }
-
-    let handler: IActivateAudioInterfaceCompletionHandler = CompletionHandler {
-        sender: Mutex::new(Some(tx_ready)),
-    }
-    .into();
-
-    let async_op = unsafe {
-        ActivateAudioInterfaceAsync(
-            w!("{2eef81be-33fa-4800-9670-1cd474972c3f}"), // VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK
-            &IAudioClient::IID,
-            Some(&prop_var),
-            &handler,
-        )
-    }
-    .map_err(|e| format!("ActivateAudioInterfaceAsync falhou: {}", e))?;
-
-    let audio_client = rx_ready
-        .recv_timeout(Duration::from_secs(3))
-        .map_err(|_| "Timeout aguardando ativação do áudio do processo".to_string())??;
-
-    unsafe {
         let wave_format_ptr = audio_client
             .GetMixFormat()
             .map_err(|e| format!("GetMixFormat falhou: {}", e))?;
@@ -294,8 +219,8 @@ fn run_wasapi_capture_loop(
                         &mut data_ptr,
                         &mut num_frames_read,
                         &mut flags,
-                        None,
-                        None,
+                        None::<*mut u64>,
+                        None::<*mut u64>,
                     );
 
                     if hr.is_err() || num_frames_read == 0 {

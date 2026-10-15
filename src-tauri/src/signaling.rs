@@ -99,7 +99,7 @@ impl SignalingServerState {
 pub async fn start_signaling_server(
     host_nickname: String,
 ) -> Result<(u16, String, Arc<SignalingServerState>), String> {
-    let listener = TcpListener::bind("127.0.0.1:0")
+    let listener = TcpListener::bind("0.0.0.0:0")
         .await
         .map_err(|e| format!("Falha ao associar porta local: {}", e))?;
 

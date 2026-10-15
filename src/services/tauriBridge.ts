@@ -1,4 +1,5 @@
-import { WindowItem, RoomDetails } from '../types';
+import { invoke as tauriCoreInvoke, isTauri } from '@tauri-apps/api/core';
+import { WindowItem } from '../types';
 
 // Utilitário para codificar em Base64 URL-Safe sem padding '='
 export function encodeRoomCodeUrlSafe(str: string): string {
@@ -33,22 +34,47 @@ export function decodeRoomCodeUrlSafe(code: string): { wsUrl: string; token: str
 
 // Verifica se está rodando dentro do Tauri v2 nativo
 export function isTauriEnvironment(): boolean {
-  return typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window);
+  if (typeof window === 'undefined') return false;
+  return (
+    isTauri() ||
+    '__TAURI_INTERNALS__' in window ||
+    '__TAURI__' in window ||
+    'isTauri' in window
+  );
 }
 
 // Chama comando nativo do Tauri ou lança erro se não estiver no ambiente nativo
 export async function invokeTauri<T>(cmd: string, args?: Record<string, any>): Promise<T> {
-  if (isTauriEnvironment()) {
-    const tauri = (window as any).__TAURI__;
-    const invokeFn = tauri?.core?.invoke || tauri?.invoke;
-    if (typeof invokeFn === 'function') {
-      try {
-        return await invokeFn(cmd, args);
-      } catch (err: any) {
-        throw new Error(`Falha no comando nativo '${cmd}': ${err?.message || err}`);
+  const w = typeof window !== 'undefined' ? (window as any) : {};
+  const isNative =
+    isTauri() ||
+    '__TAURI_INTERNALS__' in w ||
+    '__TAURI__' in w ||
+    'isTauri' in w;
+
+  if (isNative) {
+    // 1. Tenta a chamada oficial de @tauri-apps/api/core
+    try {
+      return await tauriCoreInvoke<T>(cmd, args);
+    } catch (coreErr: any) {
+      // 2. Fallback direto para window.__TAURI_INTERNALS__ ou window.__TAURI__
+      const fallbackFn =
+        w.__TAURI_INTERNALS__?.invoke ||
+        w.__TAURI__?.core?.invoke ||
+        w.__TAURI__?.invoke;
+
+      if (typeof fallbackFn === 'function' && fallbackFn !== tauriCoreInvoke) {
+        try {
+          return await fallbackFn(cmd, args);
+        } catch (directErr: any) {
+          throw new Error(`Falha no comando nativo '${cmd}': ${directErr?.message || directErr}`);
+        }
       }
+
+      throw new Error(`Falha no comando nativo '${cmd}': ${coreErr?.message || coreErr}`);
     }
   }
+
   throw new Error(
     `O recurso '${cmd}' requer execução dentro do executável desktop compilado (StreamCompanion.exe). O ambiente web não possui acesso direto à API Win32/WASAPI.`
   );

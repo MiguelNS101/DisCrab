@@ -84,24 +84,36 @@ impl TunnelManager {
             return Ok((mock_subdomain, mock_url));
         }
 
-        let mut child = Command::new(&binary_path)
-            .args([
-                "tunnel",
-                "--url",
-                &format!("http://127.0.0.1:{}", local_port),
-                "--no-autoupdate",
-            ])
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Falha ao executar cloudflared: {}. Certifique-se de que o arquivo existe.", e))?;
+        let mut cmd = Command::new(&binary_path);
+        cmd.args([
+            "tunnel",
+            "--url",
+            &format!("http://127.0.0.1:{}", local_port),
+            "--no-autoupdate",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+
+        let mut child = cmd.spawn().map_err(|e| {
+            format!(
+                "Falha ao executar cloudflared: {}. Certifique-se de que o arquivo existe.",
+                e
+            )
+        })?;
 
         let stderr = child
             .stderr
             .take()
             .ok_or_else(|| "Falha ao capturar stderr do cloudflared".to_string())?;
 
-        let reader = BufReader::new(stderr);
+        let mut reader = BufReader::new(stderr);
         let url_regex = Regex::new(r"https://([a-zA-Z0-9\-]+)\.trycloudflare\.com").unwrap();
 
         let start_time = Instant::now();
@@ -110,7 +122,7 @@ impl TunnelManager {
         let mut captured_subdomain = None;
         let mut captured_url = None;
 
-        for line_result in reader.lines() {
+        for line_result in (&mut reader).lines() {
             if start_time.elapsed() > timeout {
                 break;
             }
@@ -127,6 +139,13 @@ impl TunnelManager {
                     }
                 }
             }
+        }
+
+        if captured_subdomain.is_some() {
+            // Continua drenando o leitor em background para o buffer não encher
+            std::thread::spawn(move || {
+                for _ in reader.lines() {}
+            });
         }
 
         match (captured_subdomain, captured_url) {

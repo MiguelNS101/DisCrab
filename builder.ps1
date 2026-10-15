@@ -5,7 +5,15 @@
 # ==============================================================================
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$Host.UI.RawUI.WindowTitle = "StreamCompanion - One-Click Master Builder"
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+} catch {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
+
+try {
+    $Host.UI.RawUI.WindowTitle = "StreamCompanion - One-Click Master Builder"
+} catch {}
 
 function Write-Step {
     param([string]$Text)
@@ -31,7 +39,7 @@ function Write-Warn {
 
 function Write-Fatal {
     param([string]$Text)
-    Write-Host "    [ERRO CRÍTICO] $Text" -ForegroundColor Red
+    Write-Host "    [ERRO CRITICO] $Text" -ForegroundColor Red
     Write-Host "`nProcesso interrompido. Pressione Enter para sair..."
     Read-Host
     Exit 1
@@ -49,7 +57,8 @@ Write-Host @"
   STREAMCOMPANION - RUST + WASAPI + WEBRTC P2P BUILDER
 "@ -ForegroundColor Cyan
 
-$RootDir = Get-Location
+$RootDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+Set-Location $RootDir
 $TauriDir = Join-Path $RootDir "src-tauri"
 $BinariesDir = Join-Path $TauriDir "binaries"
 $OutputDir = Join-Path $RootDir "PRONTO_PARA_USAR"
@@ -153,23 +162,108 @@ if (-not (Test-Path $cloudflaredTargetFile) -or (Get-Item $cloudflaredTargetFile
 }
 
 # ------------------------------------------------------------------------------
+# ETAPA 2.1: Verificação e Geração de Ícones do Windows (icon.ico)
+# ------------------------------------------------------------------------------
+$IconsDir = Join-Path $TauriDir "icons"
+$IconIco = Join-Path $IconsDir "icon.ico"
+
+if (-not (Test-Path $IconsDir)) {
+    New-Item -ItemType Directory -Path $IconsDir -Force | Out-Null
+}
+
+if (-not (Test-Path $IconIco)) {
+    Write-Info "Gerando icon.ico e PNGs para o Windows Resource Compiler..."
+    $genIconScript = @"
+const fs = require('fs');
+const path = require('path');
+const zlib = require('zlib');
+
+const iconsDir = path.resolve('$($IconsDir.Replace('\', '/'))');
+if (!fs.existsSync(iconsDir)) fs.mkdirSync(iconsDir, { recursive: true });
+
+function createPng(w, h, r, g, b) {
+  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4);
+  ihdr.writeUInt8(8, 8); ihdr.writeUInt8(6, 9);
+  
+  function chunk(type, data) {
+    const len = data.length;
+    const buf = Buffer.alloc(4 + 4 + len + 4);
+    buf.writeUInt32BE(len, 0); buf.write(type, 4, 4, 'ascii');
+    data.copy(buf, 8);
+    let crc = 0xFFFFFFFF;
+    for (let i = 4; i < 8 + len; i++) {
+      let byte = buf[i];
+      for (let j = 0; j < 8; j++) crc = (crc & 1) ? ((crc >>> 1) ^ 0xEDB88320) : (crc >>> 1);
+    }
+    buf.writeInt32BE(~crc, 8 + len);
+    return buf;
+  }
+
+  const rowSize = 1 + w * 4;
+  const raw = Buffer.alloc(h * rowSize);
+  for (let y = 0; y < h; y++) {
+    const off = y * rowSize;
+    raw[off] = 0;
+    for (let x = 0; x < w; x++) {
+      const px = off + 1 + x * 4;
+      raw[px] = r; raw[px+1] = g; raw[px+2] = b; raw[px+3] = 255;
+    }
+  }
+
+  return Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(raw)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+const png32 = createPng(32, 32, 6, 182, 212);
+const png128 = createPng(128, 128, 6, 182, 212);
+
+fs.writeFileSync(path.join(iconsDir, '32x32.png'), png32);
+fs.writeFileSync(path.join(iconsDir, '128x128.png'), png128);
+fs.writeFileSync(path.join(iconsDir, '128x128@2x.png'), png128);
+
+const icoHead = Buffer.from([0, 0, 1, 0, 1, 0]);
+const icoDir = Buffer.alloc(16);
+icoDir.writeUInt8(32, 0); icoDir.writeUInt8(32, 1);
+icoDir.writeUInt16LE(1, 4); icoDir.writeUInt16LE(32, 6);
+icoDir.writeUInt32LE(png32.length, 8); icoDir.writeUInt32LE(22, 12);
+
+const icoFile = Buffer.concat([icoHead, icoDir, png32]);
+fs.writeFileSync(path.join(iconsDir, 'icon.ico'), icoFile);
+fs.writeFileSync(path.join(iconsDir, 'icon.icns'), icoFile);
+console.log('OK');
+"@
+    try {
+        & node -e $genIconScript | Out-Null
+        Write-Success "icon.ico e arquivos de recursos gerados com sucesso."
+    } catch {
+        Write-Warn "Aviso ao gerar icon.ico: $_"
+    }
+} else {
+    Write-Success "icon.ico verificado em src-tauri/icons."
+}
+
+# ------------------------------------------------------------------------------
 # ETAPA 3: Instalação de Dependências Node.js e Tauri CLI
 # ------------------------------------------------------------------------------
 Write-Step "3/5: Instalando Dependências do Frontend e CLI do Tauri"
 
-Write-Info "Executando 'npm install'..."
-& npm install
+Write-Info "Executando 'npm install --legacy-peer-deps'..."
+& npm install --legacy-peer-deps
 if ($LASTEXITCODE -ne 0) {
-    Write-Fatal "Falha ao instalar dependências do npm. Verifique sua conexão com a internet."
+    Write-Warn "Tentando fallback com 'npm install --force'..."
+    & npm install --force
 }
-Write-Success "Dependências do npm instaladas com sucesso."
+if ($LASTEXITCODE -ne 0) {
+    Write-Fatal "Falha ao instalar dependencias do npm. Verifique o log de erro do npm exibido acima."
+}
+Write-Success "Dependencias do npm instaladas com sucesso."
 
 # Verifica se o Tauri CLI está disponível
-Write-Info "Verificando Tauri CLI (cargo-tauri ou @tauri-apps/cli)..."
-$hasCargoTauri = Get-Command cargo-tauri -ErrorAction SilentlyContinue
-if ($null -eq $hasCargoTauri) {
-    Write-Info "Instalando @tauri-apps/cli localmente..."
-    & npm install -D @tauri-apps/cli
+Write-Info "Verificando Tauri CLI (@tauri-apps/cli)..."
+if (-not (Test-Path "$PSScriptRoot/node_modules/.bin/tauri")) {
+    Write-Info "Instalando @tauri-apps/cli@2.0.0 e @tauri-apps/api@2.0.0 de forma exata..."
+    & npm install -E @tauri-apps/api@2.0.0 @tauri-apps/cli@2.0.0 --legacy-peer-deps
 }
 
 # ------------------------------------------------------------------------------
@@ -187,14 +281,10 @@ Write-Success "Frontend React construído na pasta 'dist'."
 Write-Info "Iniciando compilação do Backend Rust com Tauri v2..."
 Write-Info "Isso compilará as APIs WASAPI, Scrap DXGI e Servidor WebSocket com LTO e O3."
 
-if ($null -ne $hasCargoTauri) {
-    & cargo tauri build
-} else {
-    & npx tauri build
-}
+& npx tauri build
 
 if ($LASTEXITCODE -ne 0) {
-    Write-Fatal "Falha na compilação do binário Tauri. Verifique se o Visual Studio C++ Build Tools está instalado."
+    Write-Fatal "Falha na compilacao do binario Tauri. Verifique o log de erro do rustc/cargo exibido acima para o motivo exato."
 }
 Write-Success "Compilação do StreamCompanion finalizada com sucesso!"
 

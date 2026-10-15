@@ -10,7 +10,7 @@ mod window_manager;
 use scrap_capture::{DisplayInfo, ScreenCapturerService};
 use signaling::{start_signaling_server, SignalingServerState};
 use tunnel::{decode_room_code, encode_room_code, TunnelManager};
-use wasapi_loopback::{PcmAudioPacket, ProcessAudioCapturer};
+use wasapi_loopback::ProcessAudioCapturer;
 use window_manager::{enumerate_windows, WindowInfo};
 
 use serde::{Deserialize, Serialize};
@@ -229,7 +229,7 @@ fn main() {
                         &packet.pcm_data,
                     );
 
-                    #[derive(Serialize)]
+                    #[derive(Serialize, Clone)]
                     struct AudioChunkEvent {
                         sample_rate: u32,
                         channels: u16,

@@ -1,34 +1,40 @@
 @echo off
-chcp 65001 >nul
-title StreamCompanion - Automação One-Click Builder
-color 0B
-
+setlocal
+cd /d "%~dp0"
+cls
+echo ====================================================================
+echo   STREAMCOMPANION - CONSTRUTOR AUTOMATIZADO ONE-CLICK (WINDOWS x64)
+echo ====================================================================
 echo.
-echo  ========================================================================
-echo    STREAMCOMPANION - CONSTRUTOR AUTOMATIZADO ONE-CLICK (WINDOWS 10/11)
-echo  ========================================================================
-echo.
-echo  [+] Inicializando o construtor nativo em PowerShell...
-echo  [+] Permissões e políticas de execução ajustadas automaticamente.
-echo.
+echo [1/3] Verificando PowerShell no sistema...
+where powershell.exe >nul 2>&1
+if %ERRORLEVEL% NEQ 0 (
+    echo [ERRO] PowerShell nao foi localizado no Windows PATH.
+    echo Por favor, abra o PowerShell e execute builder.ps1 diretamente.
+    echo.
+    pause
+    exit /b 1
+)
 
-:: Obtém o diretório do script batch
-set "SCRIPT_DIR=%~dp0"
-cd /d "%SCRIPT_DIR%"
-
-:: Executa o script PowerShell mestre com Bypass de ExecutionPolicy
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%builder.ps1"
+echo [2/3] Iniciando o construtor automatizado (builder.ps1)...
+echo.
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0builder.ps1"
 
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo  [!] Ocorreu um erro durante a compilação.
-    echo  [!] Verifique os logs acima para detalhes.
+    echo ====================================================================
+    echo [ERRO] O processo foi encerrado com codigo de erro %ERRORLEVEL%.
+    echo Verifique as mensagens de erro detalhadas acima.
+    echo ====================================================================
     echo.
     pause
     exit /b %ERRORLEVEL%
 )
 
 echo.
-echo  [+] Processo finalizado com sucesso!
+echo ====================================================================
+echo [SUCESSO] StreamCompanion construido com exito!
+echo Verifique a pasta 'PRONTO_PARA_USAR'.
+echo ====================================================================
 echo.
 pause

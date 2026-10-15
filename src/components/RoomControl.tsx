@@ -56,7 +56,8 @@ export const RoomControl: React.FC<RoomControlProps> = ({
           code: res.room_code,
           token: res.token,
           mode: res.mode as any,
-          ws_url: res.public_url ? `wss://${res.public_url.replace(/^https?:\/\//, '')}` : `ws://${res.local_ip}:${res.local_port}`,
+          // Para o Host, a conexão local em loopback 127.0.0.1 é instantânea (0ms) e imune a atrasos de DNS/WAN
+          ws_url: `ws://127.0.0.1:${res.local_port}`,
           subdomain: res.public_url ? res.public_url.replace(/^https?:\/\//, '').replace(/\..*$/, '') : undefined,
           local_ip: res.local_ip,
           local_port: res.local_port,

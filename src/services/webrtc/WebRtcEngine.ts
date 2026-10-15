@@ -61,18 +61,21 @@ export class WebRtcEngine {
   /**
    * Conecta ao WebSocket do Host (via LAN ou Cloudflare Tunnel) e envia o Token
    */
-  public connect(wsUrl: string, token: string, nickname: string): Promise<void> {
+  public connect(wsUrl: string, token: string, nickname: string, retryCount = 0): Promise<void> {
     return new Promise((resolve, reject) => {
       this.disconnect();
 
-      console.log('[WebRTC Engine] Conectando a:', wsUrl);
+      console.log(`[WebRTC Engine] Conectando a: ${wsUrl} (tentativa ${retryCount + 1})`);
       try {
         this.ws = new WebSocket(wsUrl);
       } catch (e: any) {
         return reject(`Falha ao abrir WebSocket: ${e.message}`);
       }
 
+      let connected = false;
+
       this.ws.onopen = () => {
+        connected = true;
         console.log('[WebRTC Engine] WebSocket aberto. Enviando autenticação...');
         // O primeiro frame DEVE ser a autenticação por Token
         this.sendWsMessage({
@@ -93,8 +96,17 @@ export class WebRtcEngine {
 
       this.ws.onerror = (e) => {
         console.error('[WebRTC Engine] Erro no WebSocket:', e);
-        this.callbacks.onError?.('Falha na conexão de rede com o servidor de sinalização.');
-        reject('Erro de conexão WebSocket');
+        if (!connected && retryCount < 3 && wsUrl.includes('trycloudflare')) {
+          console.log(`[WebRTC Engine] Aguardando propagação do túnel Cloudflare... Tentativa ${retryCount + 1}/3`);
+          setTimeout(() => {
+            this.connect(wsUrl, token, nickname, retryCount + 1)
+              .then(resolve)
+              .catch(reject);
+          }, 1500);
+        } else {
+          this.callbacks.onError?.('Falha na conexão de rede com o servidor de sinalização.');
+          reject('Erro de conexão WebSocket');
+        }
       };
 
       this.ws.onclose = () => {
@@ -418,25 +430,18 @@ export class WebRtcEngine {
     const width = resolution === '1440p' ? 2560 : resolution === '1080p' ? 1920 : 1280;
     const height = resolution === '1440p' ? 1440 : resolution === '1080p' ? 1080 : 720;
 
-    let stream: MediaStream;
-    try {
-      if (navigator.mediaDevices && navigator.mediaDevices.getDisplayMedia) {
-        stream = await navigator.mediaDevices.getDisplayMedia({
-          video: {
-            width: { ideal: width },
-            height: { ideal: height },
-            frameRate: { ideal: fps, max: fps },
-          },
-          audio: false, // Desliga áudio do navegador para NÃO capturar o Discord
-        });
-      } else {
-        // Fallback: Canvas de alta performance para exibição
-        stream = this.createSyntheticVideoStream(width, height, fps, screenTitle);
-      }
-    } catch (err) {
-      console.warn('[WebRTC Engine] getDisplayMedia indisponível, usando stream sintético acelerado:', err);
-      stream = this.createSyntheticVideoStream(width, height, fps, screenTitle);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      throw new Error('API navigator.mediaDevices.getDisplayMedia não suportada pelo navegador.');
     }
+
+    const stream = await navigator.mediaDevices.getDisplayMedia({
+      video: {
+        width: { ideal: width },
+        height: { ideal: height },
+        frameRate: { ideal: fps, max: fps },
+      },
+      audio: false, // Desliga áudio do navegador para NÃO capturar o Discord
+    });
 
     // Injeta a trilha de áudio WASAPI isolada do processo alvo (zero eco de Discord!)
     if (useWasapiAudio) {
@@ -575,46 +580,5 @@ export class WebRtcEngine {
       this.ws = null;
     }
     this.cleanup();
-  }
-
-  private createSyntheticVideoStream(w: number, h: number, fps: number, title: string): MediaStream {
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d')!;
-
-    let frame = 0;
-    const draw = () => {
-      ctx.fillStyle = '#0f172a';
-      ctx.fillRect(0, 0, w, h);
-
-      // Grid gamer
-      ctx.strokeStyle = '#1e293b';
-      ctx.lineWidth = 2;
-      for (let x = 0; x < w; x += 40) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, h);
-        ctx.stroke();
-      }
-
-      ctx.fillStyle = '#38bdf8';
-      ctx.font = 'bold 36px monospace';
-      ctx.fillText(title, 40, 80);
-
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = '20px monospace';
-      ctx.fillText(`Stream P2P Nativo · Frame: ${frame++} · ${fps} FPS`, 40, 120);
-
-      // Indicador WASAPI
-      ctx.fillStyle = '#10b981';
-      ctx.fillRect(40, 150, 16, 16);
-      ctx.fillStyle = '#e2e8f0';
-      ctx.font = '16px monospace';
-      ctx.fillText('WASAPI Process Loopback Ativo (Zero Eco Discord)', 66, 164);
-    };
-
-    setInterval(draw, 1000 / fps);
-    return (canvas as any).captureStream(fps);
   }
 }
