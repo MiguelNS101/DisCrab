@@ -62,7 +62,10 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: 📦 Instalar Dependências do Frontend
-        run: bun install
+        shell: pwsh
+        run: |
+          bun install
+          bun add -d @rolldown/binding-win32-x64-msvc@1.2.14
 
       - name: 🔨 Compilar Frontend Vite (React + Tailwind)
         run: bun run build
