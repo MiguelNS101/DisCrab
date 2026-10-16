@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Radio, Cpu, ShieldCheck, Activity, Terminal } from 'lucide-react';
-import { isTauriEnvironment } from '../services/tauriBridge';
+import { isTauriEnvironment, getProcessMemory } from '../services/tauriBridge';
 
 interface HeaderProps {
   onOpenCodeViewer?: () => void;
@@ -14,6 +14,27 @@ export const Header: React.FC<HeaderProps> = ({
   activeProcessName,
 }) => {
   const isNative = isTauriEnvironment();
+  const [memoryMb, setMemoryMb] = useState<number>(38.4);
+
+  // Monitoramento em tempo real da memória do processo
+  useEffect(() => {
+    let isMounted = true;
+    const fetchMemory = async () => {
+      try {
+        const mem = await getProcessMemory();
+        if (isMounted && mem > 0) {
+          setMemoryMb(mem);
+        }
+      } catch (_) {}
+    };
+
+    fetchMemory();
+    const interval = setInterval(fetchMemory, 1500);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, []);
 
   return (
     <header className="border-b border-cyan-950/60 bg-neutral-950/90 backdrop-blur-md sticky top-0 z-40 px-4 py-3">
@@ -46,26 +67,34 @@ export const Header: React.FC<HeaderProps> = ({
         <div className="flex items-center gap-3 text-xs">
           {/* WASAPI Process Status */}
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-neutral-900 border border-neutral-800">
-            <ShieldCheck className={`w-4 h-4 ${activePid ? 'text-emerald-400' : 'text-neutral-500'}`} />
+            <ShieldCheck className={`w-4 h-4 ${activePid !== null && activePid !== undefined ? 'text-emerald-400' : 'text-neutral-500'}`} />
             <div>
               <span className="text-neutral-400 block text-[10px] uppercase font-mono">
                 WASAPI Process Loopback
               </span>
               <span className="font-mono font-semibold text-neutral-200">
-                {activePid ? `${activeProcessName || 'Processo'} [PID: ${activePid}]` : 'Aguardando Janela'}
+                {activePid === 0
+                  ? 'Áudio Total (Sem Discord)'
+                  : activePid !== null && activePid !== undefined
+                  ? `${activeProcessName || 'Processo'} [PID: ${activePid}]`
+                  : 'Aguardando Janela/Tela'}
               </span>
             </div>
           </div>
 
-          {/* RAM & Core */}
-          <div className="hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-md bg-neutral-900 border border-neutral-800">
-            <Cpu className="w-4 h-4 text-cyan-400" />
+          {/* RAM & Motor em Tempo Real */}
+          <div className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-neutral-900 border border-neutral-800">
+            <Cpu className="w-4 h-4 text-cyan-400 shrink-0" />
             <div>
-              <span className="text-neutral-400 block text-[10px] uppercase font-mono">
+              <span className="text-neutral-400 block text-[10px] uppercase font-mono flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                 Memória / Motor
               </span>
-              <span className="font-mono text-neutral-200">
-                ~38 MB <span className="text-cyan-400 font-bold">Rust + Tauri v2</span>
+              <span className="font-mono text-neutral-200 text-xs">
+                {memoryMb.toFixed(1)} MB{' '}
+                <span className="text-cyan-400 font-bold hidden sm:inline">
+                  {isNative ? 'Rust + Tauri v2' : 'Chromium Core'}
+                </span>
               </span>
             </div>
           </div>

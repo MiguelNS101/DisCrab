@@ -68,3 +68,5 @@ export interface StreamPopupState {
   quality: StreamQualityPreset;
   sizePreset: PopupSizePreset;
 }
+
+export type AudioSourceMode = 'selected_window' | 'other_window' | 'all_except_discord';

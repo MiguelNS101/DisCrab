@@ -151,6 +151,13 @@ fn start_process_audio(pid: u32, state: State<'_, AppState>) -> Result<(), Strin
     state.audio_capturer.start(pid)
 }
 
+/// Inicia a captura de áudio simultânea para múltiplos processos (Mixagem WASAPI de múltiplas fontes)
+#[tauri::command]
+fn start_multi_process_audio(pids: Vec<u32>, state: State<'_, AppState>) -> Result<(), String> {
+    println!("[Audio] Iniciando WASAPI Process Loopback para múltiplos PIDs: {:?}", pids);
+    state.audio_capturer.start_multiple(pids)
+}
+
 /// Interrompe a captura de áudio isolada
 #[tauri::command]
 fn stop_process_audio(state: State<'_, AppState>) -> Result<(), String> {
@@ -197,6 +204,53 @@ fn get_local_ip() -> String {
     local_ip_address::local_ip()
         .map(|ip| ip.to_string())
         .unwrap_or_else(|_| "127.0.0.1".to_string())
+}
+
+/// Retorna o uso de memória RAM real do processo em Megabytes (MB)
+#[tauri::command]
+fn get_process_memory() -> f64 {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+        use windows::Win32::System::Threading::GetCurrentProcess;
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        unsafe {
+            if K32GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                &mut counters,
+                std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+            ).as_bool() {
+                let mb = (counters.WorkingSetSize as f64) / (1024.0 * 1024.0);
+                return (mb * 10.0).round() / 10.0;
+            }
+        }
+    }
+    0.0
+}
+
+/// Abre o seletor nativo do sistema para escolher onde salvar o arquivo
+#[tauri::command]
+fn save_file_dialog(app: tauri::AppHandle, default_name: String, base64_data: String) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let file_path = app.dialog().file().set_file_name(&default_name).blocking_save_file();
+    if let Some(path) = file_path {
+        let path_buf = path.as_path().ok_or_else(|| "Caminho de arquivo inválido".to_string())?;
+        let clean_base64 = if let Some(idx) = base64_data.find(',') {
+            &base64_data[idx + 1..]
+        } else {
+            &base64_data
+        };
+        let bytes = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            clean_base64,
+        ).map_err(|e| format!("Falha ao decodificar base64: {}", e))?;
+
+        std::fs::write(path_buf, bytes).map_err(|e| format!("Falha ao salvar arquivo no disco: {}", e))?;
+        println!("[Download] Arquivo salvo com sucesso em: {:?}", path_buf);
+        Ok(Some(path_buf.to_string_lossy().to_string()))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Encerra totalmente o aplicativo e seus processos filhos
@@ -380,6 +434,7 @@ fn main() {
             create_room,
             join_room,
             start_process_audio,
+            start_multi_process_audio,
             stop_process_audio,
             get_current_audio_status,
             list_displays,
@@ -388,6 +443,8 @@ fn main() {
             get_local_ip,
             close_app,
             find_window_pid,
+            get_process_memory,
+            save_file_dialog,
         ])
         .run(tauri::generate_context!())
         .expect("Erro ao executar StreamCompanion");

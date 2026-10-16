@@ -68,74 +68,86 @@ impl ProcessAudioCapturer {
         *pid_lock = None;
     }
 
-    pub fn start(&self, pid: u32) -> Result<(), String> {
+    /// Inicia a captura WASAPI para múltiplos PIDs mixados simultaneamente
+    pub fn start_multiple(&self, pids: Vec<u32>) -> Result<(), String> {
         self.stop(); // Interrompe qualquer captura anterior
 
-        // Breve pausa para que a thread WASAPI anterior finalize e libere os endpoints
+        // Breve pausa para que as threads WASAPI anteriores finalizem e liberem os endpoints
         std::thread::sleep(std::time::Duration::from_millis(30));
 
         let new_flag = Arc::new(AtomicBool::new(true));
+        let primary_pid = pids.first().copied().unwrap_or(0);
         {
             let mut flag_guard = self.active_flag.lock().unwrap();
             *flag_guard = Some(new_flag.clone());
             let mut pid_lock = self.target_pid.lock().unwrap();
-            *pid_lock = Some(pid);
+            *pid_lock = Some(primary_pid);
         }
 
-        let running_flag = new_flag;
-        let sender = self.audio_sender.clone();
+        let effective_pids = if pids.is_empty() { vec![0] } else { pids };
 
-        #[cfg(windows)]
-        {
-            std::thread::Builder::new()
-                .name(format!("wasapi-loopback-pid-{}", pid))
-                .spawn(move || {
-                    if let Err(e) = run_wasapi_capture_loop(pid, running_flag, sender) {
-                        eprintln!("[WASAPI Error] Falha na captura do PID {}: {}", pid, e);
-                    }
-                })
-                .map_err(|e| format!("Falha ao criar thread de captura de áudio: {}", e))?;
-        }
+        for target_pid in effective_pids {
+            let running_flag = new_flag.clone();
+            let sender = self.audio_sender.clone();
 
-        #[cfg(not(windows))]
-        {
-            // Simulação de áudio suave para testes de desenvolvimento fora do Windows
-            std::thread::Builder::new()
-                .name(format!("mock-audio-loopback-pid-{}", pid))
-                .spawn(move || {
-                    let mut sample_index: f32 = 0.0;
-                    while running_flag.load(Ordering::SeqCst) {
-                        let sample_rate = 48000u32;
-                        let chunk_size = 480; // 10ms a 48kHz
-                        let mut pcm_floats = Vec::with_capacity(chunk_size * 2);
-
-                        for _ in 0..chunk_size {
-                            let val = (sample_index * 2.0 * std::f32::consts::PI * 440.0 / 48000.0).sin() * 0.15;
-                            pcm_floats.push(val);
-                            pcm_floats.push(val);
-                            sample_index += 1.0;
+            #[cfg(windows)]
+            {
+                std::thread::Builder::new()
+                    .name(format!("wasapi-loopback-pid-{}", target_pid))
+                    .spawn(move || {
+                        if let Err(e) = run_wasapi_capture_loop(target_pid, running_flag, sender) {
+                            eprintln!("[WASAPI Error] Falha na captura do PID {}: {}", target_pid, e);
                         }
+                    })
+                    .map_err(|e| format!("Falha ao criar thread de captura de áudio para PID {}: {}", target_pid, e))?;
+            }
 
-                        let mut byte_data = Vec::with_capacity(pcm_floats.len() * 4);
-                        for sample in pcm_floats {
-                            byte_data.extend_from_slice(&sample.to_le_bytes());
+            #[cfg(not(windows))]
+            {
+                // Simulação de áudio suave para testes de desenvolvimento fora do Windows
+                std::thread::Builder::new()
+                    .name(format!("mock-audio-loopback-pid-{}", target_pid))
+                    .spawn(move || {
+                        let mut sample_index: f32 = 0.0;
+                        while running_flag.load(Ordering::SeqCst) {
+                            let sample_rate = 48000u32;
+                            let chunk_size = 480; // 10ms a 48kHz
+                            let mut pcm_floats = Vec::with_capacity(chunk_size * 2);
+
+                            for _ in 0..chunk_size {
+                                let freq = 440.0 + (target_pid as f32 % 5.0) * 80.0;
+                                let val = (sample_index * 2.0 * std::f32::consts::PI * freq / 48000.0).sin() * 0.15;
+                                pcm_floats.push(val);
+                                pcm_floats.push(val);
+                                sample_index += 1.0;
+                            }
+
+                            let mut byte_data = Vec::with_capacity(pcm_floats.len() * 4);
+                            for sample in pcm_floats {
+                                byte_data.extend_from_slice(&sample.to_le_bytes());
+                            }
+
+                            let packet = PcmAudioPacket {
+                                sample_rate,
+                                channels: 2,
+                                bits_per_sample: 32,
+                                pcm_data: byte_data,
+                            };
+
+                            let _ = sender.send(packet);
+                            std::thread::sleep(Duration::from_millis(10));
                         }
-
-                        let packet = PcmAudioPacket {
-                            sample_rate,
-                            channels: 2,
-                            bits_per_sample: 32,
-                            pcm_data: byte_data,
-                        };
-
-                        let _ = sender.send(packet);
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                })
-                .map_err(|e| format!("Falha ao criar mock de áudio: {}", e))?;
+                    })
+                    .map_err(|e| format!("Falha ao criar mock de áudio: {}", e))?;
+            }
         }
 
         Ok(())
+    }
+
+    /// Inicia a captura WASAPI para um único PID
+    pub fn start(&self, pid: u32) -> Result<(), String> {
+        self.start_multiple(vec![pid])
     }
 }
 

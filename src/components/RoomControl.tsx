@@ -313,12 +313,13 @@ export const RoomControl: React.FC<RoomControlProps> = ({
             </div>
           </div>
 
-          {/* Campo Nickname e Opções Rápidas */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div className="space-y-1">
-              <div className="flex items-center justify-between text-xs font-mono text-neutral-400">
-                <span>Seu Apelido no Chat/Sala:</span>
-                <span className="text-[10px] text-cyan-400 flex items-center gap-1">
+          {/* Campo Nickname e Opções Rápidas Perfeitamente Alinhadas */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 items-end">
+            {/* Coluna 1: Apelido */}
+            <div className="space-y-1.5 flex flex-col justify-end">
+              <div className="h-6 flex items-center justify-between text-xs font-mono text-neutral-400">
+                <span>Seu Apelido:</span>
+                <span className="text-[10px] text-cyan-400 flex items-center gap-1 font-semibold">
                   <BookmarkCheck className="w-3 h-3" />
                   Salvo
                 </span>
@@ -329,58 +330,75 @@ export const RoomControl: React.FC<RoomControlProps> = ({
                 onChange={(e) => handleNicknameChange(e.target.value)}
                 placeholder="Ex: Ghost_Rider"
                 maxLength={24}
-                className="w-full bg-neutral-950 border border-neutral-800 focus:border-cyan-500 rounded px-3 py-2 text-sm text-neutral-200 font-mono outline-none transition-colors"
+                className="w-full h-11 bg-neutral-950 border border-neutral-800 focus:border-cyan-500 rounded-lg px-3.5 text-xs text-neutral-200 font-mono outline-none transition-colors"
               />
             </div>
 
             {/* Conteúdo Dinâmico da Aba */}
             {tab === 'create' ? (
               <>
-                <div className="space-y-1">
-                  <label className="text-xs font-mono text-neutral-400">Método de Conexão:</label>
-                  <div className="flex gap-2">
+                {/* Coluna 2: Método de Conexão */}
+                <div className="space-y-1.5 flex flex-col justify-end">
+                  <div className="h-6 flex items-center justify-between text-xs font-mono text-neutral-400">
+                    <span>Método de Conexão:</span>
+                    <span className="text-[10px] text-neutral-400">
+                      {useCloudflare ? 'P2P Global (Internet)' : 'P2P Local (LAN)'}
+                    </span>
+                  </div>
+                  <div className="h-11 flex p-1 bg-neutral-950 border border-neutral-800 rounded-lg gap-1.5">
                     <button
                       type="button"
                       onClick={() => setUseCloudflare(true)}
-                      className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded border cursor-pointer font-mono transition-all ${
+                      className={`flex-1 h-full flex items-center justify-center gap-1.5 px-2 text-xs rounded-md cursor-pointer font-mono transition-all ${
                         useCloudflare
-                          ? 'bg-cyan-950/60 border-cyan-500 text-cyan-300 font-bold'
-                          : 'bg-neutral-950 border-neutral-800 text-neutral-400'
+                          ? 'bg-cyan-950/80 border border-cyan-500/60 text-cyan-300 font-bold shadow-sm'
+                          : 'text-neutral-400 hover:text-white'
                       }`}
+                      title="Túnel Cloudflare: Amigos conectam de qualquer lugar pela Internet sem abrir portas"
                     >
-                      <Globe className="w-3.5 h-3.5" />
-                      Cloudflare Tunnel (Internet)
+                      <Globe className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">Internet</span>
                     </button>
                     <button
                       type="button"
                       onClick={() => setUseCloudflare(false)}
-                      className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 text-xs rounded border cursor-pointer font-mono transition-all ${
+                      className={`flex-1 h-full flex items-center justify-center gap-1.5 px-2 text-xs rounded-md cursor-pointer font-mono transition-all ${
                         !useCloudflare
-                          ? 'bg-indigo-950/60 border-indigo-500 text-indigo-300 font-bold'
-                          : 'bg-neutral-950 border-neutral-800 text-neutral-400'
+                          ? 'bg-indigo-950/80 border border-indigo-500/60 text-indigo-300 font-bold shadow-sm'
+                          : 'text-neutral-400 hover:text-white'
                       }`}
+                      title="LAN Direta: Conexão via rede local Wi-Fi ou Ethernet"
                     >
-                      <Wifi className="w-3.5 h-3.5" />
-                      LAN Direta
+                      <Wifi className="w-3.5 h-3.5 shrink-0" />
+                      <span className="truncate">Rede LAN</span>
                     </button>
                   </div>
                 </div>
 
-                <div className="flex items-end">
+                {/* Coluna 3: Botão de Criar Sala */}
+                <div className="space-y-1.5 flex flex-col justify-end">
+                  <div className="h-6 flex items-center justify-between text-xs font-mono text-neutral-400">
+                    <span>Ação Host:</span>
+                    <span className="text-[10px] text-emerald-400 font-semibold flex items-center gap-1">
+                      <Sparkles className="w-3 h-3 text-cyan-400" />
+                      Pronto
+                    </span>
+                  </div>
                   <button
                     onClick={handleCreateRoom}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-black font-mono font-bold text-xs uppercase tracking-wider rounded transition-all cursor-pointer shadow-lg shadow-cyan-950/50"
+                    className="w-full h-11 flex items-center justify-center gap-2 px-4 bg-gradient-to-r from-cyan-500 to-indigo-600 hover:from-cyan-400 hover:to-indigo-500 text-black font-mono font-bold text-xs uppercase tracking-wider rounded-lg transition-all cursor-pointer shadow-lg shadow-cyan-950/50"
                   >
-                    <Sparkles className="w-4 h-4 text-neutral-950" />
-                    Criar Sala & Gerar Código
+                    <Sparkles className="w-4 h-4 text-neutral-950 shrink-0" />
+                    <span>Criar Sala & Código</span>
                   </button>
                 </div>
               </>
             ) : (
               <>
-                <div className="space-y-1 md:col-span-1">
-                  <div className="flex items-center justify-between text-xs font-mono text-neutral-400">
-                    <span>Código da Sala Base64:</span>
+                {/* Coluna 2: Código da Sala */}
+                <div className="space-y-1.5 flex flex-col justify-end">
+                  <div className="h-6 flex items-center justify-between text-xs font-mono text-neutral-400">
+                    <span>Código da Sala:</span>
                     {lastSavedRoom && (
                       <button
                         type="button"
@@ -397,18 +415,26 @@ export const RoomControl: React.FC<RoomControlProps> = ({
                     type="text"
                     value={inputCode}
                     onChange={(e) => setInputCode(e.target.value)}
-                    placeholder="Cole o código (ex: YWJjLXh5ejo5OTg4)"
-                    className="w-full bg-neutral-950 border border-neutral-800 focus:border-cyan-500 rounded px-3 py-2 text-sm text-neutral-200 font-mono outline-none transition-colors"
+                    placeholder="Cole o código gerado pelo Host"
+                    className="w-full h-11 bg-neutral-950 border border-neutral-800 focus:border-cyan-500 rounded-lg px-3.5 text-xs text-neutral-200 font-mono outline-none transition-colors"
                   />
                 </div>
 
-                <div className="flex items-end gap-2">
+                {/* Coluna 3: Botão de Conectar */}
+                <div className="space-y-1.5 flex flex-col justify-end">
+                  <div className="h-6 flex items-center justify-between text-xs font-mono text-neutral-400">
+                    <span>Ação Peer:</span>
+                    <span className="text-[10px] text-cyan-400 font-semibold flex items-center gap-1">
+                      <KeyRound className="w-3 h-3" />
+                      Conectar
+                    </span>
+                  </div>
                   <button
                     onClick={() => handleJoinRoom()}
-                    className="flex-1 flex items-center justify-center gap-2 px-4 py-2 bg-cyan-500 hover:bg-cyan-400 text-black font-mono font-bold text-xs uppercase tracking-wider rounded transition-all cursor-pointer shadow-lg shadow-cyan-950/50"
+                    className="w-full h-11 flex items-center justify-center gap-2 px-4 bg-cyan-500 hover:bg-cyan-400 text-black font-mono font-bold text-xs uppercase tracking-wider rounded-lg transition-all cursor-pointer shadow-lg shadow-cyan-950/50"
                   >
-                    <ArrowRight className="w-4 h-4" />
-                    Conectar à Sala
+                    <ArrowRight className="w-4 h-4 shrink-0" />
+                    <span>Conectar à Sala</span>
                   </button>
                 </div>
               </>

@@ -11,10 +11,12 @@ import { LivePlayer } from './components/LivePlayer';
 import { FloatingStreamPopup } from './components/FloatingStreamPopup';
 import { PerformanceDrawer } from './components/PerformanceDrawer';
 import { ChatBox } from './components/ChatBox';
-import { WindowItem, RoomDetails, StreamItem, ChatAttachment } from './types';
+import { WindowSelector } from './components/WindowSelector';
+import { WindowItem, RoomDetails, StreamItem, ChatAttachment, AudioSourceMode } from './types';
 import { useWebRtc } from './hooks/useWebRtc';
 import { WebcamPreviewPip } from './components/WebcamPreviewPip';
-import { Radio, Users, AlertCircle, X, Tv } from 'lucide-react';
+import { startNativeProcessAudio, startNativeMultiProcessAudio, isTauriEnvironment } from './services/tauriBridge';
+import { Radio, Users, AlertCircle, X, Tv, ChevronDown, ChevronUp, AppWindow } from 'lucide-react';
 
 export default function App() {
   // Inicializa o apelido do localStorage para não precisar digitar novamente
@@ -80,11 +82,67 @@ export default function App() {
     volumeMap,
   } = useWebRtc();
 
-  // Seleção de janela e áudio WASAPI por processo
+  // Seleção de janela e roteamento de áudio WASAPI por processo
   const [selectedWindow, setSelectedWindow] = useState<WindowItem | null>(null);
+  const [audioSourceMode, setAudioSourceMode] = useState<AudioSourceMode>('selected_window');
+  const [audioCustomWindows, setAudioCustomWindows] = useState<WindowItem[]>([]);
+  const [showWindowSelector, setShowWindowSelector] = useState<boolean>(true);
   const [isolateAudio, setIsolateAudio] = useState<boolean>(true);
   const [fps, setFps] = useState<30 | 60>(60);
   const [resolution, setResolution] = useState<'720p' | '1080p' | '1440p'>('1080p');
+
+  // Adiciona ou remove janela da lista de mixagem de áudio
+  const handleToggleAudioCustomWindow = (win: WindowItem) => {
+    setAudioCustomWindows((prev) => {
+      const exists = prev.some((w) => w.hwnd === win.hwnd);
+      if (exists) {
+        return prev.filter((w) => w.hwnd !== win.hwnd);
+      } else {
+        return [...prev, win];
+      }
+    });
+  };
+
+  const handleClearAudioCustomWindows = () => {
+    setAudioCustomWindows([]);
+  };
+
+  // Calcula a lista de PIDs efetivos para captura/mixagem WASAPI
+  const getEffectiveAudioPids = (): number[] => {
+    if (audioSourceMode === 'all_except_discord') return [0];
+    if (audioSourceMode === 'other_window') {
+      if (audioCustomWindows.length > 0) return audioCustomWindows.map((w) => w.pid);
+      return selectedWindow ? [selectedWindow.pid] : [0];
+    }
+    return selectedWindow ? [selectedWindow.pid] : [0];
+  };
+
+  const getEffectiveAudioPid = (): number => {
+    const pids = getEffectiveAudioPids();
+    return pids[0] ?? 0;
+  };
+
+  const getEffectiveAudioLabel = (): string => {
+    if (audioSourceMode === 'all_except_discord') return 'Todo o PC (Sem Discord)';
+    if (audioSourceMode === 'other_window') {
+      if (audioCustomWindows.length === 0) return 'Outras Janelas (Nenhuma Selecionada)';
+      if (audioCustomWindows.length === 1) {
+        return `${audioCustomWindows[0].process_name} (PID ${audioCustomWindows[0].pid})`;
+      }
+      return `${audioCustomWindows.length} Janelas Mixadas (${audioCustomWindows.map((w) => w.process_name).join(', ')})`;
+    }
+    return selectedWindow ? `${selectedWindow.process_name} (PID ${selectedWindow.pid})` : 'Tela Inteira (Sem Discord)';
+  };
+
+  // Alternância dinâmica de áudio WASAPI em tempo real durante a live (suporte a mixagem de múltiplos PIDs)
+  useEffect(() => {
+    if (isScreenSharing && isolateAudio && isTauriEnvironment()) {
+      const pids = getEffectiveAudioPids();
+      startNativeMultiProcessAudio(pids).catch((err) =>
+        console.warn('[App] Erro ao alternar fontes de áudio nativas:', err)
+      );
+    }
+  }, [audioSourceMode, audioCustomWindows, selectedWindow, isScreenSharing, isolateAudio]);
 
   // Conecta ao WebSocket de sinalização quando a sala for criada ou acessada
   useEffect(() => {
@@ -145,7 +203,15 @@ export default function App() {
       stopScreenShare();
     } else {
       const title = selectedWindow ? selectedWindow.title : 'Tela do Usuário';
+      // Se não houver janela selecionada e o usuário estiver compartilhando tela inteira, define default para sem discord
+      if (!selectedWindow && audioSourceMode === 'selected_window') {
+        setAudioSourceMode('all_except_discord');
+      }
       await startScreenShare(title, fps, resolution, isolateAudio);
+      if (isTauriEnvironment() && isolateAudio) {
+        const pids = getEffectiveAudioPids();
+        await startNativeMultiProcessAudio(pids).catch(() => {});
+      }
     }
   };
 
@@ -157,8 +223,8 @@ export default function App() {
     <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black">
       {/* Top Header */}
       <Header
-        activePid={isScreenSharing && isolateAudio && selectedWindow ? selectedWindow.pid : null}
-        activeProcessName={selectedWindow?.process_name}
+        activePid={isScreenSharing && isolateAudio ? getEffectiveAudioPid() : null}
+        activeProcessName={getEffectiveAudioLabel()}
       />
 
       {/* Main Container */}
@@ -200,12 +266,14 @@ export default function App() {
           }}
         />
 
-        {/* Barra de Transmissão (Screen Share / Webcam / Resolução / FPS) */}
+        {/* Barra de Transmissão (Screen Share / Webcam / Resolução / FPS / Roteamento de Áudio) */}
         <BroadcastControls
           isScreenSharing={isScreenSharing}
           isWebcamActive={isWebcamActive}
           selectedWindow={selectedWindow}
           isolateAudio={isolateAudio}
+          audioSourceMode={audioSourceMode}
+          onChangeAudioSourceMode={setAudioSourceMode}
           fps={fps}
           resolution={resolution}
           onToggleScreenShare={handleToggleScreenShare}
@@ -213,7 +281,41 @@ export default function App() {
           onToggleIsolateAudio={setIsolateAudio}
           onChangeFps={setFps}
           onChangeResolution={setResolution}
+          activeAudioLabel={getEffectiveAudioLabel()}
         />
+
+        {/* Alternador e Painel do Seletor de Janela & Áudio WASAPI */}
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <button
+              type="button"
+              onClick={() => setShowWindowSelector(!showWindowSelector)}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-xs font-mono text-cyan-300 transition-colors cursor-pointer"
+            >
+              <AppWindow className="w-3.5 h-3.5 text-cyan-400" />
+              <span>{showWindowSelector ? 'Ocultar Seletor de Janela & Áudio' : 'Selecionar Janela & Configurar Áudio WASAPI'}</span>
+              {showWindowSelector ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
+
+            <span className="text-xs font-mono text-neutral-400">
+              Fonte Atual: <strong className="text-cyan-300">{getEffectiveAudioLabel()}</strong>
+            </span>
+          </div>
+
+          {showWindowSelector && (
+            <WindowSelector
+              selectedWindow={selectedWindow}
+              onSelectWindow={setSelectedWindow}
+              isolateAudio={isolateAudio}
+              onToggleIsolateAudio={setIsolateAudio}
+              audioSourceMode={audioSourceMode}
+              onChangeAudioSourceMode={setAudioSourceMode}
+              audioCustomWindows={audioCustomWindows}
+              onToggleAudioCustomWindow={handleToggleAudioCustomWindow}
+              onClearAudioCustomWindows={handleClearAudioCustomWindows}
+            />
+          )}
+        </div>
 
 
         {/* Linha 3: Transmissões em Tempo Real e Chat WebRTC P2P */}
@@ -410,6 +512,7 @@ export default function App() {
         isolateAudio={isolateAudio}
         onToggleIsolateAudio={setIsolateAudio}
         isBroadcasting={isScreenSharing}
+        activeAudioLabel={getEffectiveAudioLabel()}
       />
 
       {/* Footer */}
