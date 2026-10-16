@@ -1,13 +1,33 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { Send, MessageSquare, Users, ShieldAlert, Sparkles, CheckCheck } from 'lucide-react';
-import { ChatMessage } from '../types';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import {
+  Send,
+  MessageSquare,
+  ShieldAlert,
+  Paperclip,
+  Image as ImageIcon,
+  File as FileIcon,
+  Download,
+  X,
+  ExternalLink,
+  UploadCloud,
+  CheckCircle2,
+} from 'lucide-react';
+import { ChatMessage, ChatAttachment } from '../types';
 
 interface ChatBoxProps {
   messages: ChatMessage[];
-  onSendMessage: (text: string) => void;
+  onSendMessage: (text: string, attachment?: ChatAttachment) => void;
   isConnected: boolean;
   peerCount: number;
   myNickname: string;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
 export const ChatBox: React.FC<ChatBoxProps> = ({
@@ -19,19 +39,101 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
 }) => {
   const [inputText, setInputText] = useState('');
   const [sendError, setSendError] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<ChatAttachment | null>(null);
+  const [previewModalImg, setPreviewModalImg] = useState<string | null>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [isSending, setIsSending] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const imageInputRef = useRef<HTMLInputElement | null>(null);
 
   // Auto-scroll ao receber nova mensagem
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, selectedFile]);
 
-  const handleSend = (e?: React.FormEvent) => {
+  const processFile = useCallback((file: File) => {
+    setSendError(null);
+
+    // Limite de 20MB para transferência P2P via chunks
+    if (file.size > 20 * 1024 * 1024) {
+      setSendError('Arquivo muito grande! O limite para envio direto P2P é de 20MB.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      const isImg = file.type.startsWith('image/');
+      setSelectedFile({
+        name: file.name,
+        type: file.type || 'application/octet-stream',
+        size: file.size,
+        dataUrl,
+        isImage: isImg,
+      });
+    };
+    reader.onerror = () => {
+      setSendError('Falha ao processar o arquivo selecionado.');
+    };
+    reader.readAsDataURL(file);
+  }, []);
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      processFile(file);
+      e.target.value = '';
+    }
+  };
+
+  // Suporte a colar imagens diretamente da área de transferência (Ctrl+V)
+  const handlePaste = useCallback(
+    (e: React.ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].type.startsWith('image/')) {
+          const file = items[i].getAsFile();
+          if (file) {
+            e.preventDefault();
+            processFile(file);
+            break;
+          }
+        }
+      }
+    },
+    [processFile]
+  );
+
+  // Suporte a Drag & Drop de arquivos e fotos sobre o chat
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      processFile(files[0]);
+    }
+  };
+
+  const handleSend = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setSendError(null);
 
     const trimmed = inputText.trim();
-    if (!trimmed) return;
+    if (!trimmed && !selectedFile) return;
 
     if (!isConnected) {
       setSendError('Você precisa criar ou entrar em uma sala antes de enviar mensagens.');
@@ -39,15 +141,21 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
     }
 
     if (peerCount === 0) {
-      setSendError('Nenhum outro peer está na sala para receber mensagens P2P no momento. Compartilhe o Código da Sala com um amigo.');
+      setSendError(
+        'Nenhum outro peer está na sala para receber mensagens P2P no momento. Compartilhe o Código da Sala com um amigo.'
+      );
       return;
     }
 
+    setIsSending(true);
     try {
-      onSendMessage(trimmed);
+      onSendMessage(trimmed, selectedFile || undefined);
       setInputText('');
+      setSelectedFile(null);
     } catch (err: any) {
       setSendError(err?.message || 'Falha ao transmitir mensagem via RTCDataChannel.');
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -59,7 +167,25 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
   };
 
   return (
-    <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl p-4 shadow-xl flex flex-col h-80 sm:h-96">
+    <div
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      className={`bg-neutral-900/90 border rounded-xl p-4 shadow-xl flex flex-col h-80 sm:h-96 relative transition-colors ${
+        isDragOver ? 'border-cyan-400 bg-neutral-900/95 ring-2 ring-cyan-500/30' : 'border-neutral-800'
+      }`}
+    >
+      {/* Overlay de Drag & Drop */}
+      {isDragOver && (
+        <div className="absolute inset-0 bg-neutral-950/90 backdrop-blur-sm z-30 flex flex-col items-center justify-center p-6 text-center rounded-xl border-2 border-dashed border-cyan-400">
+          <UploadCloud className="w-12 h-12 text-cyan-400 animate-bounce mb-2" />
+          <h4 className="font-mono font-bold text-sm text-cyan-200">Solte o arquivo ou imagem aqui</h4>
+          <p className="font-mono text-xs text-neutral-400 mt-1">
+            Envio direto via WebRTC P2P DataChannel (até 20MB)
+          </p>
+        </div>
+      )}
+
       {/* Cabeçalho do Chat */}
       <div className="flex items-center justify-between pb-3 border-b border-neutral-800 shrink-0">
         <div className="flex items-center gap-2">
@@ -90,13 +216,13 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
       </div>
 
       {/* Lista de Mensagens */}
-      <div className="flex-1 overflow-y-auto py-3 space-y-2 pr-1 text-xs font-mono">
+      <div className="flex-1 overflow-y-auto py-3 space-y-2.5 pr-1 text-xs font-mono">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-center text-neutral-500 text-xs px-4">
             <MessageSquare className="w-8 h-8 text-neutral-700 mb-2 opacity-50" />
             <p className="font-semibold text-neutral-400">Nenhuma mensagem no chat</p>
             <p className="text-[11px] text-neutral-600 mt-1">
-              As mensagens são transmitidas diretamente ponto a ponto entre os computadores conectados via RTCDataChannel criptografado, sem passar por banco de dados.
+              Envie textos, imagens (ou cole com Ctrl+V) e arquivos via DataChannel sem passar por servidores intermediários.
             </p>
           </div>
         ) : (
@@ -120,13 +246,67 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
                 </div>
 
                 <div
-                  className={`max-w-[85%] rounded-lg px-3 py-2 text-xs break-words shadow-sm ${
+                  className={`max-w-[85%] rounded-lg p-2.5 text-xs break-words shadow-sm space-y-1.5 ${
                     msg.isSelf
                       ? 'bg-cyan-950/70 border border-cyan-800/80 text-cyan-100'
                       : 'bg-neutral-950 border border-neutral-800 text-neutral-200'
                   }`}
                 >
-                  {msg.text}
+                  {/* Texto da Mensagem */}
+                  {msg.text && <p className="leading-relaxed whitespace-pre-wrap">{msg.text}</p>}
+
+                  {/* Anexo de Imagem */}
+                  {msg.attachment?.isImage && (
+                    <div className="mt-1 rounded overflow-hidden border border-neutral-800 bg-neutral-900/50">
+                      <img
+                        src={msg.attachment.dataUrl}
+                        alt={msg.attachment.name}
+                        onClick={() => setPreviewModalImg(msg.attachment!.dataUrl)}
+                        className="max-h-48 max-w-full rounded cursor-pointer hover:opacity-95 transition-opacity object-contain bg-black/40"
+                      />
+                      <div className="flex items-center justify-between px-2 py-1 text-[10px] text-neutral-400 bg-neutral-950/60">
+                        <span className="truncate max-w-[150px]">{msg.attachment.name}</span>
+                        <div className="flex items-center gap-2">
+                          <span>{formatBytes(msg.attachment.size)}</span>
+                          <a
+                            href={msg.attachment.dataUrl}
+                            download={msg.attachment.name}
+                            className="text-cyan-400 hover:text-white"
+                            title="Baixar imagem"
+                          >
+                            <Download className="w-3 h-3" />
+                          </a>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Anexo de Arquivo Genérico */}
+                  {msg.attachment && !msg.attachment.isImage && (
+                    <div className="flex items-center justify-between gap-3 p-2 rounded bg-neutral-900 border border-neutral-800 mt-1">
+                      <div className="flex items-center gap-2 overflow-hidden">
+                        <FileIcon className="w-4 h-4 text-cyan-400 shrink-0" />
+                        <div className="overflow-hidden">
+                          <span className="block truncate font-semibold text-neutral-200">
+                            {msg.attachment.name}
+                          </span>
+                          <span className="text-[10px] text-neutral-400">
+                            {formatBytes(msg.attachment.size)}
+                          </span>
+                        </div>
+                      </div>
+
+                      <a
+                        href={msg.attachment.dataUrl}
+                        download={msg.attachment.name}
+                        className="flex items-center gap-1 px-2.5 py-1 bg-cyan-500 hover:bg-cyan-400 text-black font-bold text-[11px] rounded transition-colors shrink-0"
+                        title="Baixar arquivo recebido"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Baixar</span>
+                      </a>
+                    </div>
+                  )}
                 </div>
               </div>
             );
@@ -135,7 +315,7 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
         <div ref={messagesEndRef} />
       </div>
 
-      {/* Alerta de Erro se Houver Falha Real */}
+      {/* Alerta de Erro se Houver Falha */}
       {sendError && (
         <div className="mb-2 p-2 rounded bg-red-950/70 border border-red-800 text-red-300 text-[11px] font-mono flex items-center justify-between gap-2 shrink-0">
           <div className="flex items-center gap-1.5 overflow-hidden">
@@ -151,19 +331,97 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
         </div>
       )}
 
-      {/* Caixa de Entrada de Texto */}
-      <form onSubmit={handleSend} className="flex items-center gap-2 pt-2 border-t border-neutral-800 shrink-0">
+      {/* Pré-visualização do Anexo Selecionado para Envio */}
+      {selectedFile && (
+        <div className="mb-2 p-2 rounded bg-neutral-950 border border-cyan-500/50 flex items-center justify-between gap-2 text-xs font-mono shrink-0">
+          <div className="flex items-center gap-2 overflow-hidden">
+            {selectedFile.isImage ? (
+              <img
+                src={selectedFile.dataUrl}
+                alt={selectedFile.name}
+                className="w-9 h-9 rounded object-cover border border-neutral-700 shrink-0"
+              />
+            ) : (
+              <FileIcon className="w-6 h-6 text-cyan-400 shrink-0" />
+            )}
+            <div className="overflow-hidden">
+              <span className="block truncate text-neutral-200 font-semibold text-[11px]">
+                {selectedFile.name}
+              </span>
+              <span className="text-[10px] text-cyan-400 flex items-center gap-1">
+                <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                {formatBytes(selectedFile.size)} · Pronto para envio P2P
+              </span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setSelectedFile(null)}
+            className="p-1 text-neutral-400 hover:text-red-400 rounded transition-colors cursor-pointer"
+            title="Remover anexo"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
+      {/* Caixa de Entrada de Texto e Botões */}
+      <form onSubmit={handleSend} className="flex items-center gap-1.5 pt-2 border-t border-neutral-800 shrink-0">
+        {/* Input Oculto de Imagens */}
+        <input
+          ref={imageInputRef}
+          type="file"
+          onChange={handleFileChange}
+          className="hidden"
+          accept="image/*"
+        />
+
+        {/* Input Oculto de Arquivos Gerais */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          onChange={handleFileChange}
+          className="hidden"
+          accept="*/*"
+        />
+
+        {/* Botão de Enviar Imagem */}
+        <button
+          type="button"
+          onClick={() => imageInputRef.current?.click()}
+          disabled={!isConnected}
+          className="p-2 rounded-lg bg-neutral-950 hover:bg-neutral-800 text-neutral-400 hover:text-cyan-400 disabled:opacity-50 disabled:cursor-not-allowed border border-neutral-800 transition-colors cursor-pointer shrink-0"
+          title="Enviar imagem (ou cole com Ctrl+V)"
+        >
+          <ImageIcon className="w-4 h-4" />
+        </button>
+
+        {/* Botão de Enviar Arquivo */}
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={!isConnected}
+          className="p-2 rounded-lg bg-neutral-950 hover:bg-neutral-800 text-neutral-400 hover:text-cyan-400 disabled:opacity-50 disabled:cursor-not-allowed border border-neutral-800 transition-colors cursor-pointer shrink-0"
+          title="Enviar arquivo (PDF, ZIP, vídeos, documentos)"
+        >
+          <Paperclip className="w-4 h-4" />
+        </button>
+
         <input
           type="text"
           value={inputText}
           onChange={(e) => setInputText(e.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder={
             !isConnected
-              ? 'Conecte-se a uma sala para enviar mensagens...'
+              ? 'Conecte-se a uma sala para enviar...'
               : peerCount === 0
-              ? 'Aguardando amigos entrarem na sala...'
-              : 'Digite sua mensagem e pressione Enter...'
+              ? 'Aguardando amigos entrarem...'
+              : selectedFile
+              ? 'Adicione uma legenda ou envie...'
+              : 'Mensagem, anexe ou cole foto (Ctrl+V)...'
           }
           disabled={!isConnected}
           className="flex-1 bg-neutral-950 border border-neutral-800 focus:border-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg px-3 py-2 text-xs font-mono text-neutral-200 outline-none transition-colors"
@@ -171,13 +429,46 @@ export const ChatBox: React.FC<ChatBoxProps> = ({
 
         <button
           type="submit"
-          disabled={!isConnected || !inputText.trim()}
-          className="flex items-center justify-center p-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:bg-neutral-800 disabled:text-neutral-500 text-black transition-all cursor-pointer shadow-md shadow-cyan-950/50"
-          title="Enviar mensagem via WebRTC DataChannel"
+          disabled={!isConnected || (!inputText.trim() && !selectedFile) || isSending}
+          className="flex items-center justify-center p-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:bg-neutral-800 disabled:text-neutral-500 text-black transition-all cursor-pointer shadow-md shadow-cyan-950/50 shrink-0"
+          title="Enviar via WebRTC DataChannel P2P"
         >
           <Send className="w-4 h-4" />
         </button>
       </form>
+
+      {/* Modal Lightbox de Visualização de Imagem */}
+      {previewModalImg && (
+        <div
+          className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={() => setPreviewModalImg(null)}
+        >
+          <div className="relative max-w-4xl max-h-[90vh]" onClick={(e) => e.stopPropagation()}>
+            <img
+              src={previewModalImg}
+              alt="Visualização"
+              className="max-w-full max-h-[85vh] rounded-lg border border-neutral-800 shadow-2xl object-contain"
+            />
+            <div className="absolute top-2 right-2 flex items-center gap-2">
+              <a
+                href={previewModalImg}
+                download="imagem-chat.png"
+                className="p-1.5 rounded-full bg-neutral-900/90 border border-neutral-700 text-white hover:bg-cyan-600 transition-colors cursor-pointer shadow-lg"
+                title="Baixar imagem"
+              >
+                <Download className="w-4 h-4" />
+              </a>
+              <button
+                onClick={() => setPreviewModalImg(null)}
+                className="p-1.5 rounded-full bg-neutral-900/90 border border-neutral-700 text-white hover:bg-red-600 transition-colors cursor-pointer shadow-lg"
+                title="Fechar"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

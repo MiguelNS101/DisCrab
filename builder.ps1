@@ -63,6 +63,11 @@ $TauriDir = Join-Path $RootDir "src-tauri"
 $BinariesDir = Join-Path $TauriDir "binaries"
 $OutputDir = Join-Path $RootDir "PRONTO_PARA_USAR"
 
+# Encerra instâncias antigas para evitar lock de arquivos e garantir exclusão/substituição limpa
+Stop-Process -Name "StreamCompanion" -Force -ErrorAction SilentlyContinue
+Stop-Process -Name "stream-companion" -Force -ErrorAction SilentlyContinue
+Stop-Process -Name "cloudflared" -Force -ErrorAction SilentlyContinue
+
 # ------------------------------------------------------------------------------
 # ETAPA 1: Verificação de Ferramentas Essenciais do Sistema
 # ------------------------------------------------------------------------------
@@ -128,6 +133,71 @@ if (-not $wv2Installed) {
     }
 } else {
     Write-Success "Microsoft Edge WebView2 Runtime verificado e pronto."
+}
+
+# 1.4 Windows SDK & Visual Studio Resource Compiler (rc.exe)
+Write-Info "Verificando compilador de recursos do Windows (rc.exe)..."
+$rcCmd = Get-Command rc.exe -ErrorAction SilentlyContinue
+if (-not $rcCmd) {
+    # 1. Tenta carregar o ambiente oficial do Visual Studio via Launch-VsDevShell caso exista
+    $vsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vsWhere) {
+        $vsInstallPath = & $vsWhere -latest -products * -property installationPath
+        if ($vsInstallPath) {
+            $devShell = Join-Path $vsInstallPath "Common7\Tools\Launch-VsDevShell.ps1"
+            if (Test-Path $devShell) {
+                try {
+                    & $devShell -Arch amd64 -HostArch amd64 -SkipAutomaticLocation | Out-Null
+                    Write-Success "Ambiente de compilação Visual Studio carregado."
+                } catch {}
+            }
+        }
+    }
+
+    # 2. Se rc.exe ainda não estiver no PATH, localiza nas pastas do Windows Kits e exporta
+    $rcCmd = Get-Command rc.exe -ErrorAction SilentlyContinue
+    if (-not $rcCmd) {
+        $kitsRoots = @(
+            "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+            "${env:ProgramFiles}\Windows Kits\10\bin",
+            "C:\Program Files (x86)\Windows Kits\10\bin",
+            "C:\Program Files\Windows Kits\10\bin",
+            "D:\Program Files (x86)\Windows Kits\10\bin",
+            "D:\Windows Kits\10\bin",
+            "E:\Program Files (x86)\Windows Kits\10\bin",
+            "E:\Windows Kits\10\bin",
+            "F:\Program Files (x86)\Windows Kits\10\bin",
+            "F:\Windows Kits\10\bin"
+        )
+        $foundRc = $null
+        foreach ($kit in $kitsRoots) {
+            if (Test-Path $kit) {
+                $versions = Get-ChildItem -Path $kit -Directory | Sort-Object Name -Descending
+                foreach ($ver in $versions) {
+                    $cand = Join-Path $ver.FullName "x64\rc.exe"
+                    if (Test-Path $cand) {
+                        $foundRc = $cand
+                        break
+                    }
+                }
+                if ($foundRc) { break }
+            }
+        }
+
+        if ($foundRc) {
+            $rcDir = Split-Path $foundRc -Parent
+            $env:PATH = "$rcDir;$env:PATH"
+            $env:RC = $foundRc
+            $env:RC_x86_64_pc_windows_msvc = $foundRc
+            Write-Success "rc.exe localizado e adicionado ao ambiente: $foundRc"
+        } else {
+            Write-Info "rc.exe será configurado automaticamente pelo build.rs do StreamCompanion."
+        }
+    } else {
+        Write-Success "rc.exe detectado e pronto no PATH."
+    }
+} else {
+    Write-Success "rc.exe verificado no PATH."
 }
 
 # ------------------------------------------------------------------------------
@@ -353,7 +423,7 @@ COMO INICIAR:
 1. Dê dois cliques em 'StreamCompanion.exe' ou use o instalador gerado.
 2. Digite seu apelido e clique em 'Criar Sala (Host)' para gerar seu Código da Sala.
 3. Envie o código gerado para seus amigos colarem no app deles.
-4. Escolha o jogo no seletor de janelas e inicie a transmissão!
+4. Clique em 'Transmitir Tela' e escolha a janela desejada (áudio 100% isolado daquela janela) ou a tela inteira (áudio completo do PC com exclusão total do Discord)!
 
 Divirta-se!
 ================================================================================

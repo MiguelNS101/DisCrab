@@ -6,16 +6,14 @@
 import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { RoomControl } from './components/RoomControl';
-import { WindowSelector } from './components/WindowSelector';
-import { WasapiVisualizer } from './components/WasapiVisualizer';
 import { BroadcastControls } from './components/BroadcastControls';
 import { LivePlayer } from './components/LivePlayer';
 import { FloatingStreamPopup } from './components/FloatingStreamPopup';
 import { PerformanceDrawer } from './components/PerformanceDrawer';
 import { ChatBox } from './components/ChatBox';
-import { RustCodeViewer } from './components/RustCodeViewer';
-import { WindowItem, RoomDetails, StreamItem } from './types';
+import { WindowItem, RoomDetails, StreamItem, ChatAttachment } from './types';
 import { useWebRtc } from './hooks/useWebRtc';
+import { WebcamPreviewPip } from './components/WebcamPreviewPip';
 import { Radio, Users, AlertCircle, X, Tv } from 'lucide-react';
 
 export default function App() {
@@ -67,6 +65,7 @@ export default function App() {
     isScreenSharing,
     isWebcamActive,
     localStream,
+    localWebcamStream,
     chatMessages,
     performanceLogs,
     clearPerformanceLogs,
@@ -87,9 +86,6 @@ export default function App() {
   const [fps, setFps] = useState<30 | 60>(60);
   const [resolution, setResolution] = useState<'720p' | '1080p' | '1440p'>('1080p');
 
-  // Modal para inspecionar os arquivos da Parte 1, Parte 2 e Parte 3
-  const [isCodeViewerOpen, setIsCodeViewerOpen] = useState<boolean>(false);
-
   // Conecta ao WebSocket de sinalização quando a sala for criada ou acessada
   useEffect(() => {
     if (roomDetails && !isConnected) {
@@ -100,27 +96,47 @@ export default function App() {
   }, [roomDetails, isConnected, connectToRoom, nickname]);
 
   // Monta a lista de streams estritamente REAIS a partir dos peers conectados
-  const peerStreams: StreamItem[] = peers
-    .filter((p) => p.hasScreen || p.hasWebcam)
-    .map((p) => ({
-      id: p.id,
-      user_name: p.nickname,
-      type: (p.hasScreen ? 'screen' : 'webcam') as 'screen' | 'webcam',
-      title: p.screenTitle || (p.hasScreen ? 'Tela do Amigo' : 'Webcam'),
-      resolution: '1080p',
-      fps: 60,
-      volume: volumeMap[p.id] ?? 100,
-      is_muted: (volumeMap[p.id] ?? 100) === 0,
-      is_watched: !!p.screenStream,
-      isolated_audio: p.hasIsolatedAudio,
-      process_name: p.hasIsolatedAudio ? 'WASAPI Process' : undefined,
-      stream: p.screenStream || p.webcamStream,
-    }));
+  const peerStreams: StreamItem[] = [];
+  for (const p of peers) {
+    if (p.hasScreen) {
+      peerStreams.push({
+        id: `${p.id}-screen`,
+        user_name: p.nickname,
+        type: 'screen',
+        title: p.screenTitle || 'Tela do Amigo',
+        resolution: '1080p',
+        fps: 60,
+        volume: volumeMap[`${p.id}-screen`] ?? volumeMap[p.id] ?? 100,
+        is_muted: (volumeMap[`${p.id}-screen`] ?? volumeMap[p.id] ?? 100) === 0,
+        is_watched: !!p.screenStream,
+        isolated_audio: p.hasIsolatedAudio,
+        process_name: p.hasIsolatedAudio ? 'WASAPI Process' : undefined,
+        stream: p.screenStream,
+      });
+    }
+    if (p.hasWebcam) {
+      peerStreams.push({
+        id: `${p.id}-webcam`,
+        user_name: p.nickname,
+        type: 'webcam',
+        title: 'Câmera do Amigo',
+        resolution: '720p',
+        fps: 30,
+        volume: volumeMap[`${p.id}-webcam`] ?? 100,
+        is_muted: (volumeMap[`${p.id}-webcam`] ?? 100) === 0,
+        is_watched: !!p.webcamStream,
+        isolated_audio: false,
+        stream: p.webcamStream,
+      });
+    }
+  }
 
-  const handleToggleWatch = (peerId: string) => {
-    const peer = peers.find((p) => p.id === peerId);
+  const handleToggleWatch = (streamId: string) => {
+    const rawPeerId = streamId.replace('-screen', '').replace('-webcam', '');
+    const peer = peers.find((p) => p.id === rawPeerId || p.id === streamId);
     if (peer) {
-      requestPeerStream(peer.id, peer.hasScreen ? 'screen' : 'webcam');
+      const type = streamId.endsWith('-webcam') ? 'webcam' : 'screen';
+      requestPeerStream(peer.id, type);
     }
   };
 
@@ -133,15 +149,14 @@ export default function App() {
     }
   };
 
-  const handleSendMessage = (text: string) => {
-    sendChatMessage(text, nickname);
+  const handleSendMessage = (text: string, attachment?: ChatAttachment) => {
+    sendChatMessage(text, nickname, attachment);
   };
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black">
       {/* Top Header */}
       <Header
-        onOpenCodeViewer={() => setIsCodeViewerOpen(true)}
         activePid={isScreenSharing && isolateAudio && selectedWindow ? selectedWindow.pid : null}
         activeProcessName={selectedWindow?.process_name}
       />
@@ -200,31 +215,6 @@ export default function App() {
           onChangeResolution={setResolution}
         />
 
-        {/* Linha 2: Seletor de Janelas & Telemetria WASAPI */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          <div className="lg:col-span-7">
-            <WindowSelector
-              selectedWindow={selectedWindow}
-              onSelectWindow={setSelectedWindow}
-              isolateAudio={isolateAudio}
-              onToggleIsolateAudio={setIsolateAudio}
-              fps={fps}
-              onChangeFps={setFps}
-              resolution={resolution}
-              onChangeResolution={setResolution}
-              isBroadcasting={isScreenSharing}
-              onToggleBroadcast={handleToggleScreenShare}
-            />
-          </div>
-
-          <div className="lg:col-span-5 flex flex-col justify-between">
-            <WasapiVisualizer
-              selectedWindow={selectedWindow}
-              isolateAudio={isolateAudio}
-              isBroadcasting={isScreenSharing}
-            />
-          </div>
-        </div>
 
         {/* Linha 3: Transmissões em Tempo Real e Chat WebRTC P2P */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
@@ -234,7 +224,7 @@ export default function App() {
               <div className="flex items-center gap-2">
                 <Radio className="w-4 h-4 text-cyan-400" />
                 <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-200 font-mono">
-                  Transmissões Ativas ({peerStreams.length + (isScreenSharing ? 1 : 0)})
+                  Transmissões Ativas ({peerStreams.length + (isScreenSharing ? 1 : 0) + (isWebcamActive && localWebcamStream ? 1 : 0)})
                 </h2>
               </div>
               <div className="flex items-center gap-3 text-xs font-mono text-neutral-400">
@@ -248,7 +238,7 @@ export default function App() {
             </div>
 
             {/* Se não houver transmissões ativas */}
-            {!isScreenSharing && peerStreams.length === 0 ? (
+            {!isScreenSharing && (!isWebcamActive || !localWebcamStream) && peerStreams.length === 0 ? (
               <div className="bg-neutral-900/60 border border-neutral-800 rounded-xl p-8 text-center space-y-3">
                 <div className="w-12 h-12 rounded-full bg-neutral-950 border border-neutral-800 flex items-center justify-center mx-auto text-neutral-600">
                   <Tv className="w-6 h-6" />
@@ -258,13 +248,13 @@ export default function App() {
                     Nenhuma transmissão ativa no momento
                   </h3>
                   <p className="text-xs text-neutral-500 font-mono max-w-md mx-auto mt-1">
-                    Inicie sua transmissão no botão "Transmitir Tela" ou aguarde os amigos conectados na sala abrirem suas transmissões de tela ou webcam.
+                    Inicie sua transmissão no botão "Transmitir Tela" ou "Ligar Webcam", ou aguarde os amigos conectados abrirem suas lives.
                   </p>
                 </div>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Transmissão do Próprio Usuário (Local) */}
+                {/* Transmissão de Tela do Próprio Usuário (Local) */}
                 {isScreenSharing && (
                   <LivePlayer
                     id="self-screen"
@@ -282,6 +272,29 @@ export default function App() {
                     isWatched={true}
                     isPoppedOut={!!activePopups['self-screen']}
                     onOpenPopup={() => togglePopup('self-screen')}
+                    onToggleWatch={() => {}}
+                    onChangeVolume={() => {}}
+                    onToggleMute={() => {}}
+                  />
+                )}
+
+                {/* Webcam do Próprio Usuário (Local Preview) */}
+                {isWebcamActive && localWebcamStream && (
+                  <LivePlayer
+                    id="self-webcam"
+                    userName={nickname}
+                    title="Sua Câmera (Preview)"
+                    type="webcam"
+                    stream={localWebcamStream}
+                    resolution="720p"
+                    fps={30}
+                    isSelf={true}
+                    hasIsolatedAudio={false}
+                    volume={0}
+                    isMuted={true}
+                    isWatched={true}
+                    isPoppedOut={!!activePopups['self-webcam']}
+                    onOpenPopup={() => togglePopup('self-webcam')}
                     onToggleWatch={() => {}}
                     onChangeVolume={() => {}}
                     onToggleMute={() => {}}
@@ -378,18 +391,25 @@ export default function App() {
         );
       })}
 
-      {/* Monitor Discreto de Desempenho e Telemetria P2P com Identificação de Usuário */}
+      {/* Telinha de Preview da Webcam para o Usuário Transmitindo */}
+      {isWebcamActive && localWebcamStream && (
+        <WebcamPreviewPip
+          stream={localWebcamStream}
+          nickname={nickname}
+          onStopWebcam={toggleWebcam}
+        />
+      )}
+
+      {/* Monitor Discreto de Desempenho e Telemetria P2P com Identificação de Usuário e WASAPI */}
       <PerformanceDrawer
         logs={performanceLogs}
         peers={peers}
         onClearLogs={clearPerformanceLogs}
         myNickname={nickname}
-      />
-
-      {/* Modal de Código Rust & WebRTC */}
-      <RustCodeViewer
-        isOpen={isCodeViewerOpen}
-        onClose={() => setIsCodeViewerOpen(false)}
+        selectedWindow={selectedWindow}
+        isolateAudio={isolateAudio}
+        onToggleIsolateAudio={setIsolateAudio}
+        isBroadcasting={isScreenSharing}
       />
 
       {/* Footer */}

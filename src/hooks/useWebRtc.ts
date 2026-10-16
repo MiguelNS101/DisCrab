@@ -3,7 +3,7 @@ import { WebRtcEngine, RemotePeer } from '../services/webrtc/WebRtcEngine';
 import { wasapiAudioBridge } from '../services/webrtc/AudioBridge';
 import { isTauriEnvironment } from '../services/tauriBridge';
 
-import { ChatMessage } from '../types';
+import { ChatMessage, ChatAttachment } from '../types';
 
 import { listen } from '@tauri-apps/api/event';
 import { PerformanceLogEntry } from '../services/webrtc/WebRtcEngine';
@@ -18,10 +18,11 @@ export interface UseWebRtcReturn {
   isScreenSharing: boolean;
   isWebcamActive: boolean;
   localStream: MediaStream | null;
+  localWebcamStream: MediaStream | null;
   chatMessages: ChatMessage[];
   performanceLogs: PerformanceLogEntry[];
   clearPerformanceLogs: () => void;
-  sendChatMessage: (text: string, senderName: string) => void;
+  sendChatMessage: (text: string, senderName: string, attachment?: ChatAttachment) => void;
   connectToRoom: (wsUrl: string, token: string, nickname: string) => Promise<void>;
   disconnectFromRoom: () => void;
   startScreenShare: (
@@ -46,6 +47,7 @@ export function useWebRtc(): UseWebRtcReturn {
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isWebcamActive, setIsWebcamActive] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [localWebcamStream, setLocalWebcamStream] = useState<MediaStream | null>(null);
   const [volumeMap, setVolumeMap] = useState<Record<string, number>>({});
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [performanceLogs, setPerformanceLogs] = useState<PerformanceLogEntry[]>([]);
@@ -124,14 +126,14 @@ export function useWebRtc(): UseWebRtcReturn {
     return engine;
   }, []);
 
-  const sendChatMessage = useCallback((text: string, senderName: string) => {
+  const sendChatMessage = useCallback((text: string, senderName: string, attachment?: ChatAttachment) => {
     if (!engineRef.current) {
       const errMsg = 'Você não está conectado a nenhuma sala para enviar mensagens.';
       setError(errMsg);
       throw new Error(errMsg);
     }
     try {
-      const sentMsg = engineRef.current.sendChatMessage(text, senderName);
+      const sentMsg = engineRef.current.sendChatMessage(text, senderName, attachment);
       setChatMessages((prev) => [...prev, sentMsg]);
     } catch (err: any) {
       setError(err?.message || 'Falha ao transmitir mensagem via P2P DataChannel');
@@ -164,6 +166,7 @@ export function useWebRtc(): UseWebRtcReturn {
     setIsScreenSharing(false);
     setIsWebcamActive(false);
     setLocalStream(null);
+    setLocalWebcamStream(null);
     setChatMessages([]);
   }, []);
 
@@ -198,10 +201,12 @@ export function useWebRtc(): UseWebRtcReturn {
     const engine = initEngine();
     if (isWebcamActive) {
       engine.stopWebcam();
+      setLocalWebcamStream(null);
       setIsWebcamActive(false);
     } else {
       try {
-        await engine.startWebcam();
+        const stream = await engine.startWebcam();
+        setLocalWebcamStream(stream);
         setIsWebcamActive(true);
       } catch (err: any) {
         setError(`Falha ao ligar webcam: ${err.message}`);
@@ -232,6 +237,7 @@ export function useWebRtc(): UseWebRtcReturn {
     isScreenSharing,
     isWebcamActive,
     localStream,
+    localWebcamStream,
     chatMessages,
     performanceLogs,
     clearPerformanceLogs,

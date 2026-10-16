@@ -70,7 +70,7 @@ pub struct PeerSummary {
     pub is_host: bool,
 }
 
-struct PeerSession {
+pub struct PeerSession {
     pub id: String,
     pub nickname: String,
     pub is_host: bool,

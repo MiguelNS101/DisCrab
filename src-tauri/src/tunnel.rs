@@ -11,6 +11,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[allow(dead_code)]
 pub struct TunnelHandle {
     pub child: Child,
     pub subdomain: String,
@@ -34,8 +35,22 @@ impl TunnelManager {
         let mut lock = self.current_tunnel.lock().unwrap();
         if let Some(mut handle) = lock.take() {
             println!("[Tunnel] Encerrando cloudflared...");
+            let pid = handle.child.id();
             let _ = handle.child.kill();
             let _ = handle.child.wait();
+
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/PID", &pid.to_string(), "/T"])
+                    .creation_flags(0x08000000)
+                    .status();
+                let _ = Command::new("taskkill")
+                    .args(["/F", "/IM", "cloudflared.exe", "/T"])
+                    .creation_flags(0x08000000)
+                    .status();
+            }
         }
     }
 

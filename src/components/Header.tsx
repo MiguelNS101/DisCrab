@@ -3,7 +3,7 @@ import { Radio, Cpu, ShieldCheck, Activity, Terminal } from 'lucide-react';
 import { isTauriEnvironment } from '../services/tauriBridge';
 
 interface HeaderProps {
-  onOpenCodeViewer: () => void;
+  onOpenCodeViewer?: () => void;
   activePid?: number | null;
   activeProcessName?: string;
 }
@@ -70,15 +70,16 @@ export const Header: React.FC<HeaderProps> = ({
             </div>
           </div>
 
-          {/* Code Viewer Modal Trigger */}
-          <button
-            onClick={onOpenCodeViewer}
-            className="flex items-center gap-2 px-3 py-1.5 rounded-md bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 font-mono transition-all text-xs cursor-pointer shadow-sm shadow-cyan-950"
-            title="Ver arquivos do Backend Rust da Parte 1"
-          >
-            <Terminal className="w-3.5 h-3.5" />
-            <span>Código Rust (Parte 1)</span>
-          </button>
+          {onOpenCodeViewer && (
+            <button
+              onClick={onOpenCodeViewer}
+              className="hidden items-center gap-2 px-3 py-1.5 rounded-md bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 font-mono transition-all text-xs cursor-pointer shadow-sm shadow-cyan-950"
+              title="Ver arquivos do Backend Rust"
+            >
+              <Terminal className="w-3.5 h-3.5" />
+              <span>Código</span>
+            </button>
+          )}
         </div>
       </div>
     </header>

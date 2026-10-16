@@ -105,3 +105,18 @@ export async function startNativeProcessAudio(pid: number): Promise<void> {
 export async function stopNativeProcessAudio(): Promise<void> {
   return await invokeTauri('stop_process_audio');
 }
+
+// Localiza o PID da janela pelo label retornado pelo Chromium (ex: window:12345:0) ou título
+export async function findWindowPid(label: string): Promise<number | null> {
+  try {
+    return await invokeTauri<number | null>('find_window_pid', { label });
+  } catch (err) {
+    console.warn('[tauriBridge] Erro ao buscar PID da janela:', err);
+    return null;
+  }
+}
+
+// Encerra completamente o app e subprocessos liberando locks de arquivos
+export async function closeNativeApp(): Promise<void> {
+  return await invokeTauri('close_app');
+}

@@ -33,6 +33,14 @@ export interface StreamItem {
   stream?: MediaStream | null;
 }
 
+export interface ChatAttachment {
+  name: string;
+  type: string;
+  size: number;
+  dataUrl: string;
+  isImage: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   senderId: string;
@@ -40,6 +48,7 @@ export interface ChatMessage {
   text: string;
   timestamp: number;
   isSelf: boolean;
+  attachment?: ChatAttachment;
 }
 
 export type StreamQualityPreset = '1080p60' | '720p60' | '480p30' | '360p30' | 'auto';

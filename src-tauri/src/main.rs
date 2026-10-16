@@ -15,7 +15,7 @@ use window_manager::{enumerate_windows, WindowInfo};
 
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 
 /// Estrutura de Retorno ao Criar uma Sala
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -199,7 +199,100 @@ fn get_local_ip() -> String {
         .unwrap_or_else(|_| "127.0.0.1".to_string())
 }
 
+/// Encerra totalmente o aplicativo e seus processos filhos
+#[tauri::command]
+fn close_app(state: State<'_, AppState>) {
+    state.tunnel_manager.stop();
+    state.audio_capturer.stop();
+    state.screen_capturer.stop();
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/IM", "cloudflared.exe", "/T"])
+            .creation_flags(0x08000000)
+            .status();
+    }
+    std::process::exit(0);
+}
+
+/// Localiza o PID de uma janela baseado no label retornado pelo seletor nativo do navegador (ex: "window:12345:0") ou título
+#[tauri::command]
+fn find_window_pid(label: String) -> Option<u32> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
+
+        let lower = label.to_lowercase();
+        // 1. Tenta extrair HWND se o label estiver no formato "window:123456:0"
+        if let Some(pos) = lower.find("window:") {
+            let rest = &label[pos + 7..];
+            let hwnd_str = rest.split(':').next().unwrap_or(rest).trim();
+            if let Ok(hwnd_val) = hwnd_str.parse::<isize>() {
+                let mut pid = 0u32;
+                unsafe {
+                    GetWindowThreadProcessId(HWND(hwnd_val as *mut _), Some(&mut pid));
+                }
+                if pid > 0 {
+                    println!("[Window] PID identificado via HWND {}: PID {}", hwnd_val, pid);
+                    return Some(pid);
+                }
+            }
+        }
+
+        // 2. Procura nas janelas ativas por título ou processo
+        let windows = crate::window_manager::enumerate_windows();
+
+        // Correspondência exata
+        if let Some(w) = windows.iter().find(|w| w.title.to_lowercase() == lower) {
+            println!("[Window] PID identificado por título exato: PID {} ({})", w.pid, w.process_name);
+            return Some(w.pid);
+        }
+
+        // Correspondência parcial
+        if let Some(w) = windows.iter().find(|w| {
+            (!w.title.is_empty() && lower.contains(&w.title.to_lowercase()))
+                || (!lower.is_empty() && w.title.to_lowercase().contains(&lower))
+                || (!w.process_name.is_empty() && lower.contains(&w.process_name.to_lowercase()))
+        }) {
+            println!("[Window] PID identificado por correspondência: PID {} ({})", w.pid, w.process_name);
+            return Some(w.pid);
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn assign_to_job_object() {
+    use windows::Win32::System::JobObjects::{
+        CreateJobObjectW, SetInformationJobObject, JobObjectExtendedLimitInformation,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        AssignProcessToJobObject,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcess;
+
+    unsafe {
+        if let Ok(job) = CreateJobObjectW(None, None) {
+            let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let res = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const std::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if res.is_ok() {
+                let _ = AssignProcessToJobObject(job, GetCurrentProcess());
+            }
+        }
+    }
+}
+
 fn main() {
+    #[cfg(windows)]
+    assign_to_job_object();
+
     let (audio_capturer, mut audio_rx) = ProcessAudioCapturer::new();
     let audio_capturer_arc = Arc::new(audio_capturer);
     let screen_capturer_arc = Arc::new(ScreenCapturerService::new());
@@ -220,35 +313,67 @@ fn main() {
             let handle = app.handle().clone();
 
             // Thread em background que transmite os pacotes PCM isolados para a WebView do Tauri
-            // O frontend utiliza essa trilha para injetar no MediaStream do WebRTC
             std::thread::spawn(move || {
-                while let Ok(packet) = audio_rx.blocking_recv() {
-                    // Empacota em JSON payload ou buffer base64 para o frontend
-                    let base64_pcm = base64::Engine::encode(
-                        &base64::engine::general_purpose::STANDARD,
-                        &packet.pcm_data,
-                    );
+                loop {
+                    match audio_rx.blocking_recv() {
+                        Ok(packet) => {
+                            let base64_pcm = base64::Engine::encode(
+                                &base64::engine::general_purpose::STANDARD,
+                                &packet.pcm_data,
+                            );
 
-                    #[derive(Serialize, Clone)]
-                    struct AudioChunkEvent {
-                        sample_rate: u32,
-                        channels: u16,
-                        bits_per_sample: u16,
-                        data_base64: String,
+                            #[derive(Serialize, Clone)]
+                            struct AudioChunkEvent {
+                                sample_rate: u32,
+                                channels: u16,
+                                bits_per_sample: u16,
+                                data_base64: String,
+                            }
+
+                            let payload = AudioChunkEvent {
+                                sample_rate: packet.sample_rate,
+                                channels: packet.channels,
+                                bits_per_sample: packet.bits_per_sample,
+                                data_base64: base64_pcm,
+                            };
+
+                            let _ = handle.emit("isolated-audio-chunk", payload);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // Continua normalmente se houver descarte por lag
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            break;
+                        }
                     }
-
-                    let payload = AudioChunkEvent {
-                        sample_rate: packet.sample_rate,
-                        channels: packet.channels,
-                        bits_per_sample: packet.bits_per_sample,
-                        data_base64: base64_pcm,
-                    };
-
-                    let _ = handle.emit("isolated-audio-chunk", payload);
                 }
             });
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed = event {
+                println!("[Shutdown] Encerrando StreamCompanion e liberando processos...");
+                let app = window.app_handle();
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.tunnel_manager.stop();
+                    state.audio_capturer.stop();
+                    state.screen_capturer.stop();
+                }
+
+                #[cfg(windows)]
+                {
+                    use std::os::windows::process::CommandExt;
+                    // Garante que o cloudflared.exe seja totalmente encerrado para não travar a pasta
+                    let _ = std::process::Command::new("taskkill")
+                        .args(["/F", "/IM", "cloudflared.exe", "/T"])
+                        .creation_flags(0x08000000)
+                        .status();
+                }
+
+                std::process::exit(0);
+            }
         })
         .invoke_handler(tauri::generate_handler![
             list_windows,
@@ -261,6 +386,8 @@ fn main() {
             start_screen_capture,
             stop_screen_capture,
             get_local_ip,
+            close_app,
+            find_window_pid,
         ])
         .run(tauri::generate_context!())
         .expect("Erro ao executar StreamCompanion");

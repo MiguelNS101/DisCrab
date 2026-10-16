@@ -218,91 +218,60 @@ export const RoomControl: React.FC<RoomControlProps> = ({
 
       {/* Se já estiver conectado na sala */}
       {isConnected && roomDetails ? (
-        <div className="space-y-4">
-          <div className="flex items-center justify-between flex-wrap gap-2">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span className="font-mono text-xs uppercase tracking-wider text-emerald-400 font-semibold">
-                Sessão Ativa · {isHost ? 'Você é o Host da Sala' : 'Conectado como Peer'}
+        <div className="flex items-center justify-between flex-wrap gap-3">
+          <div className="flex items-center gap-3">
+            <span className="relative flex h-2.5 w-2.5">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+              <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+            </span>
+            <div className="flex items-center gap-2 font-mono text-xs">
+              <span className="text-emerald-400 font-bold uppercase tracking-wider">
+                {isHost ? 'Host da Sala' : 'Conectado'}
+              </span>
+              <span className="text-neutral-500">·</span>
+              <span className="text-neutral-300 font-semibold">{nickname}</span>
+              <span className="text-neutral-500">·</span>
+              <span className="text-[11px] text-neutral-400 flex items-center gap-1">
+                {roomDetails.mode === 'cloudflare' ? (
+                  <Globe className="w-3 h-3 text-cyan-400" />
+                ) : (
+                  <Wifi className="w-3 h-3 text-indigo-400" />
+                )}
+                {roomDetails.mode === 'cloudflare' ? 'WAN Cloudflare' : 'Rede LAN'}
               </span>
             </div>
-
-            <button
-              onClick={handleLeaveRoom}
-              className="flex items-center gap-1.5 px-3 py-1 bg-red-950/40 hover:bg-red-900/60 border border-red-700/50 text-red-300 text-xs rounded font-mono transition-colors cursor-pointer"
-            >
-              <LogOut className="w-3.5 h-3.5" />
-              Sair da Sala
-            </button>
           </div>
 
-          {/* Cartão de Exibição do Código da Sala com Compartilhamento */}
-          <div className="bg-neutral-950 border border-cyan-900/40 rounded-lg p-4">
-            <div className="flex items-center justify-between text-xs text-neutral-400 mb-1 flex-wrap gap-2">
-              <span className="font-mono text-cyan-400 flex items-center gap-1.5 font-bold">
-                <KeyRound className="w-3.5 h-3.5" />
-                CÓDIGO DA SALA (Envie para seus amigos):
-              </span>
-              <div className="flex items-center gap-2 font-mono text-[11px]">
-                <span className="text-neutral-400">
-                  Token: <strong className="text-white">{roomDetails.token}</strong>
-                </span>
-                {lastSavedRoom === roomDetails.code && (
-                  <span className="text-emerald-400 flex items-center gap-1 text-[10px] bg-emerald-950/60 border border-emerald-900 px-1.5 py-0.2 rounded">
-                    <BookmarkCheck className="w-3 h-3" />
-                    Salvo
-                  </span>
-                )}
-              </div>
-            </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Botão de Copiar Código da Sala */}
+            <button
+              onClick={handleCopyCode}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800/80 hover:bg-neutral-700/80 text-neutral-200 text-xs rounded font-mono transition-all cursor-pointer border border-neutral-700"
+              title="Copiar código da sala para a área de transferência"
+            >
+              {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              {copiedCode ? 'Código Copiado!' : 'Copiar Código'}
+            </button>
 
-            <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
-              <div className="flex-1 min-w-[200px] bg-neutral-900 border border-neutral-800 rounded px-3 py-2 font-mono text-sm sm:text-base font-bold text-cyan-300 tracking-wider overflow-x-auto select-all">
-                {roomDetails.code}
-              </div>
+            {/* Botão de Compartilhar Sala */}
+            <button
+              onClick={handleShareRoom}
+              className="flex items-center gap-1.5 px-3.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-black font-bold text-xs rounded font-mono transition-all cursor-pointer shadow-md shadow-cyan-950"
+              title="Compartilhar convite da sala"
+            >
+              {copiedShare ? <Check className="w-3.5 h-3.5 text-emerald-950" /> : <Share2 className="w-3.5 h-3.5" />}
+              {copiedShare ? 'Link Copiado!' : 'Compartilhar Sala'}
+            </button>
 
-              {/* Botão de Copiar Código */}
-              <button
-                onClick={handleCopyCode}
-                className="flex items-center gap-1.5 px-3.5 py-2 bg-neutral-800 hover:bg-neutral-700 text-neutral-200 hover:text-white font-semibold text-xs rounded transition-all cursor-pointer font-mono border border-neutral-700"
-                title="Copiar apenas o código alfanumérico da sala"
-              >
-                {copiedCode ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
-                {copiedCode ? 'Código Copiado!' : 'Copiar'}
-              </button>
-
-              {/* Botão de Compartilhar Sala (Link + Código) */}
-              <button
-                onClick={handleShareRoom}
-                className="flex items-center gap-1.5 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-black font-semibold text-xs rounded transition-all cursor-pointer font-mono shadow-md shadow-cyan-950"
-                title="Compartilhar link de convite direto para entrar na sala"
-              >
-                {copiedShare ? <Check className="w-4 h-4 text-emerald-950" /> : <Share2 className="w-4 h-4" />}
-                {copiedShare ? 'Link Copiado!' : 'Compartilhar Sala'}
-              </button>
-            </div>
-
-            {/* Informações técnicas do túnel */}
-            <div className="mt-3 pt-3 border-t border-neutral-900 flex flex-wrap items-center justify-between gap-3 text-[11px] font-mono text-neutral-400">
-              <div className="flex items-center gap-1.5">
-                {roomDetails.mode === 'cloudflare' ? (
-                  <Globe className="w-3.5 h-3.5 text-cyan-400" />
-                ) : (
-                  <Wifi className="w-3.5 h-3.5 text-indigo-400" />
-                )}
-                <span>
-                  Tipo:{' '}
-                  <strong className="text-neutral-200">
-                    {roomDetails.mode === 'cloudflare' ? 'Cloudflare Quick Tunnel' : 'LAN Direta'}
-                  </strong>
-                </span>
-              </div>
-
-              <div>
-                Endpoint WebSocket:{' '}
-                <span className="text-neutral-300 underline">{roomDetails.ws_url}</span>
-              </div>
-            </div>
+            {/* Sair da Sala */}
+            <button
+              onClick={handleLeaveRoom}
+              className="flex items-center gap-1 px-2.5 py-1.5 bg-red-950/40 hover:bg-red-900/60 border border-red-800/60 text-red-300 text-xs rounded font-mono transition-colors cursor-pointer"
+              title="Sair da sala e desconectar WebRTC"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Sair
+            </button>
           </div>
         </div>
       ) : (

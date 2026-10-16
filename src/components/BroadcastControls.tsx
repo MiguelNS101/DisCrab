@@ -87,23 +87,6 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
           )}
         </button>
 
-        {/* Interruptor de Áudio Isolado WASAPI */}
-        <button
-          onClick={() => onToggleIsolateAudio(!isolateAudio)}
-          className={`flex items-center gap-2 px-3 py-2 rounded-lg font-mono text-xs transition-all cursor-pointer border ${
-            isolateAudio
-              ? 'bg-emerald-950/60 border-emerald-500 text-emerald-300 font-bold'
-              : 'bg-neutral-950 border-neutral-800 text-neutral-500'
-          }`}
-          title="Captura exclusiva pelo PID com ActivateAudioInterfaceAsync"
-        >
-          {isolateAudio ? (
-            <Volume2 className="w-4 h-4 text-emerald-400" />
-          ) : (
-            <VolumeX className="w-4 h-4" />
-          )}
-          <span>WASAPI Process Audio</span>
-        </button>
       </div>
 
       {/* Opções de Qualidade de Transmissão */}

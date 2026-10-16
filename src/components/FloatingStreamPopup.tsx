@@ -72,21 +72,24 @@ export const FloatingStreamPopup: React.FC<FloatingStreamPopupProps> = ({
 
   // Vincula o MediaStream ao elemento <video>
   useEffect(() => {
-    if (videoRef.current && stream) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.play().catch((err) => {
-        console.warn('[FloatingPopup] Autoplay prevenido:', err);
+    const el = videoRef.current;
+    if (el && stream) {
+      el.srcObject = stream;
+      el.muted = isSelf ? true : isMuted;
+      el.volume = isSelf ? 0 : Math.min(1.0, isMuted ? 0 : volume / 100);
+      el.play().catch((err) => {
+        console.warn('[FloatingPopup] Autoplay restrito pelo navegador, aguardando clique:', err);
       });
     }
-  }, [stream]);
+  }, [stream, isSelf, isMuted, volume]);
 
   // Volume
   useEffect(() => {
     if (videoRef.current) {
-      videoRef.current.muted = isMuted;
-      videoRef.current.volume = Math.min(1.0, isMuted ? 0 : volume / 100);
+      videoRef.current.muted = isSelf ? true : isMuted;
+      videoRef.current.volume = isSelf ? 0 : Math.min(1.0, isMuted ? 0 : volume / 100);
     }
-  }, [volume, isMuted]);
+  }, [volume, isMuted, isSelf]);
 
   // Define dimensões com base no preset
   useEffect(() => {

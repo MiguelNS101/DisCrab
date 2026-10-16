@@ -5,8 +5,15 @@
  */
 
 import { wasapiAudioBridge } from './AudioBridge';
+import {
+  isTauriEnvironment,
+  fetchSystemWindows,
+  startNativeProcessAudio,
+  stopNativeProcessAudio,
+  findWindowPid,
+} from '../tauriBridge';
 
-import { ChatMessage } from '../../types';
+import { ChatMessage, ChatAttachment } from '../../types';
 
 export const RTC_CONFIGURATION: RTCConfiguration = {
   iceServers: [
@@ -60,7 +67,23 @@ export class WebRtcEngine {
   private ws: WebSocket | null = null;
   private myPeerId: string | null = null;
   private isHost = false;
-  private peers: Map<string, { pc: RTCPeerConnection; info: RemotePeer; dc?: RTCDataChannel }> = new Map();
+  private peers: Map<
+    string,
+    {
+      pc: RTCPeerConnection;
+      info: RemotePeer;
+      dc?: RTCDataChannel;
+      sendersMap: Map<string, RTCRtpSender>;
+    }
+  > = new Map();
+  private incomingChunksMap = new Map<
+    string,
+    {
+      chunks: string[];
+      total: number;
+      msg: { id: string; senderName: string; text: string; timestamp: number; attachmentMeta: any };
+    }
+  >();
   private callbacks: EngineEventCallback = {};
 
   // Streams locais
@@ -186,6 +209,15 @@ export class WebRtcEngine {
           peer.info.screenTitle = msg.screen_title;
           peer.info.hasWebcam = msg.has_webcam;
           peer.info.hasIsolatedAudio = msg.has_isolated_audio;
+          (peer.info as any).webcamTrackId = msg.webcam_track_id;
+          (peer.info as any).screenTrackId = msg.screen_track_id;
+
+          if (!msg.has_screen) {
+            peer.info.screenStream = undefined;
+          }
+          if (!msg.has_webcam) {
+            peer.info.webcamStream = undefined;
+          }
           this.emitPeersChange();
         }
         break;
@@ -226,8 +258,21 @@ export class WebRtcEngine {
       hasIsolatedAudio: false,
     };
 
-    const peerEntry = { pc, info, dc: undefined as RTCDataChannel | undefined };
+    const peerEntry = {
+      pc,
+      info,
+      dc: undefined as RTCDataChannel | undefined,
+      sendersMap: new Map<string, RTCRtpSender>(),
+    };
     this.peers.set(peerId, peerEntry);
+
+    // Pré-configura transceivers de áudio e vídeo bidirecionais para garantir SDP completo
+    try {
+      pc.addTransceiver('video', { direction: 'sendrecv' });
+      pc.addTransceiver('audio', { direction: 'sendrecv' });
+    } catch (e) {
+      console.warn('[WebRTC] Transceivers padrão já inicializados:', e);
+    }
 
     // Configuração do RTCDataChannel para Chat de Texto P2P direto
     if (initiator) {
@@ -281,31 +326,50 @@ export class WebRtcEngine {
       }
     };
 
-    // Se já estivermos transmitindo tela, injeta faixas de vídeo e áudio imediatamente
+    // Se já estivermos transmitindo tela ou webcam, anexa faixas via senders dedicados
     if (this.isBroadcastingScreen && this.localScreenStream) {
-      this.localScreenStream.getTracks().forEach((track) => {
-        pc.addTrack(track, this.localScreenStream!);
-      });
+      this.attachTracksForPeer(peerId, 'screen');
+    }
+    if (this.isBroadcastingWebcam && this.localWebcamStream) {
+      this.attachTracksForPeer(peerId, 'webcam');
     }
 
-    // Recepção de Streams de Vídeo e Áudio
+    // Recepção de Streams de Vídeo e Áudio com separação de Tela vs Webcam
     pc.ontrack = (event) => {
       console.log(`[WebRTC] Faixa recebida do peer ${peerId}: ${event.track.kind} (${event.track.id})`);
-      
-      if (!info.screenStream) {
-        info.screenStream = event.streams[0] || new MediaStream();
+
+      const streamId = event.streams[0]?.id || '';
+      const isWebcam =
+        streamId.toLowerCase().includes('webcam') ||
+        event.track.id === (info as any).webcamTrackId;
+
+      if (isWebcam) {
+        if (!info.webcamStream) {
+          info.webcamStream = new MediaStream();
+        }
+        if (!info.webcamStream.getTracks().some((t) => t.id === event.track.id)) {
+          info.webcamStream.addTrack(event.track);
+          info.webcamStream = new MediaStream(info.webcamStream.getTracks());
+        }
+        info.hasWebcam = true;
+        this.callbacks.onRemoteStream?.(peerId, 'webcam', info.webcamStream);
+      } else {
+        if (!info.screenStream) {
+          info.screenStream = new MediaStream();
+        }
+        if (!info.screenStream.getTracks().some((t) => t.id === event.track.id)) {
+          info.screenStream.addTrack(event.track);
+          info.screenStream = new MediaStream(info.screenStream.getTracks());
+        }
+        if (event.track.kind === 'video') {
+          info.hasScreen = true;
+        }
+        if (event.track.kind === 'audio') {
+          info.hasIsolatedAudio = true;
+        }
+        this.callbacks.onRemoteStream?.(peerId, 'screen', info.screenStream);
       }
 
-      // Adiciona a faixa se ainda não estiver anexada
-      if (!info.screenStream.getTracks().some((t) => t.id === event.track.id)) {
-        info.screenStream.addTrack(event.track);
-      }
-
-      if (event.track.kind === 'audio') {
-        info.hasIsolatedAudio = true;
-      }
-
-      this.callbacks.onRemoteStream?.(peerId, 'screen', info.screenStream);
       this.emitPeersChange();
     };
 
@@ -332,7 +396,7 @@ export class WebRtcEngine {
   private setupDataChannel(
     dc: RTCDataChannel,
     peerId: string,
-    peerEntry: { pc: RTCPeerConnection; info: RemotePeer; dc?: RTCDataChannel }
+    peerEntry: { pc: RTCPeerConnection; info: RemotePeer; dc?: RTCDataChannel; sendersMap: Map<string, RTCRtpSender> }
   ) {
     peerEntry.dc = dc;
 
@@ -359,11 +423,49 @@ export class WebRtcEngine {
             id: data.id || Math.random().toString(36).substring(2),
             senderId: peerId,
             senderName: data.senderName || peerEntry.info.nickname || 'Amigo',
-            text: data.text,
+            text: data.text || '',
             timestamp: data.timestamp || Date.now(),
             isSelf: false,
+            attachment: data.attachment,
           };
           this.callbacks.onChatMessage?.(chatMsg);
+        } else if (data.type === 'chat_chunk') {
+          const { msgId, chunkIndex, totalChunks, chunkData, senderName, text, timestamp, attachmentMeta } = data;
+          if (!this.incomingChunksMap.has(msgId)) {
+            this.incomingChunksMap.set(msgId, {
+              chunks: new Array(totalChunks),
+              total: totalChunks,
+              msg: { id: msgId, senderName, text, timestamp, attachmentMeta },
+            });
+          }
+          const item = this.incomingChunksMap.get(msgId)!;
+          item.chunks[chunkIndex] = chunkData;
+
+          let received = 0;
+          for (let i = 0; i < item.total; i++) {
+            if (item.chunks[i] !== undefined) received++;
+          }
+
+          if (received === item.total) {
+            const fullDataUrl = item.chunks.join('');
+            const chatMsg: ChatMessage = {
+              id: item.msg.id,
+              senderId: peerId,
+              senderName: item.msg.senderName || peerEntry.info.nickname || 'Amigo',
+              text: item.msg.text || '',
+              timestamp: item.msg.timestamp || Date.now(),
+              isSelf: false,
+              attachment: {
+                name: item.msg.attachmentMeta.name,
+                type: item.msg.attachmentMeta.type,
+                size: item.msg.attachmentMeta.size,
+                isImage: item.msg.attachmentMeta.isImage,
+                dataUrl: fullDataUrl,
+              },
+            };
+            this.incomingChunksMap.delete(msgId);
+            this.callbacks.onChatMessage?.(chatMsg);
+          }
         }
       } catch (e) {
         console.error('[WebRTC DataChannel] Erro ao decodificar mensagem de texto:', e);
@@ -372,12 +474,12 @@ export class WebRtcEngine {
   }
 
   /**
-   * Envia uma mensagem de texto via WebRTC P2P DataChannel para todos os peers conectados
+   * Envia uma mensagem de texto e/ou anexo (imagem/arquivo) via WebRTC P2P DataChannel para todos os peers conectados
    */
-  public sendChatMessage(text: string, senderName: string): ChatMessage {
+  public sendChatMessage(text: string, senderName: string, attachment?: ChatAttachment): ChatMessage {
     const trimmed = text.trim();
-    if (!trimmed) {
-      throw new Error('A mensagem não pode ser vazia.');
+    if (!trimmed && !attachment) {
+      throw new Error('A mensagem ou o arquivo anexado não pode ser vazio.');
     }
 
     if (this.peers.size === 0) {
@@ -391,30 +493,61 @@ export class WebRtcEngine {
       text: trimmed,
       timestamp: Date.now(),
       isSelf: true,
+      attachment,
     };
-
-    const payload = JSON.stringify({
-      type: 'chat',
-      id: chatMsg.id,
-      text: chatMsg.text,
-      senderName: chatMsg.senderName,
-      timestamp: chatMsg.timestamp,
-    });
 
     let sentCount = 0;
     let failedPeers: string[] = [];
 
-    for (const [peerId, peerEntry] of this.peers.entries()) {
-      if (peerEntry.dc && peerEntry.dc.readyState === 'open') {
-        try {
-          peerEntry.dc.send(payload);
+    // Se houver anexo, faz envio fragmentado (chunks de 16KB) para evitar limites de buffer do RTCDataChannel
+    if (attachment && attachment.dataUrl) {
+      const CHUNK_SIZE = 16 * 1024;
+      const dataUrl = attachment.dataUrl;
+      const totalChunks = Math.ceil(dataUrl.length / CHUNK_SIZE);
+
+      for (const [peerId, peerEntry] of this.peers.entries()) {
+        if (peerEntry.dc && peerEntry.dc.readyState === 'open') {
           sentCount++;
-        } catch (e: any) {
-          console.error(`[WebRTC DataChannel] Falha ao enviar para ${peerId}:`, e);
+          this.sendChunksToChannel(peerEntry.dc, {
+            msgId: chatMsg.id,
+            senderName: chatMsg.senderName,
+            text: chatMsg.text,
+            timestamp: chatMsg.timestamp,
+            attachmentMeta: {
+              name: attachment.name,
+              type: attachment.type,
+              size: attachment.size,
+              isImage: attachment.isImage,
+            },
+            dataUrl,
+            totalChunks,
+            chunkSize: CHUNK_SIZE,
+          });
+        } else {
           failedPeers.push(peerEntry.info.nickname);
         }
-      } else {
-        failedPeers.push(peerEntry.info.nickname);
+      }
+    } else {
+      const payload = JSON.stringify({
+        type: 'chat',
+        id: chatMsg.id,
+        text: chatMsg.text,
+        senderName: chatMsg.senderName,
+        timestamp: chatMsg.timestamp,
+      });
+
+      for (const [peerId, peerEntry] of this.peers.entries()) {
+        if (peerEntry.dc && peerEntry.dc.readyState === 'open') {
+          try {
+            peerEntry.dc.send(payload);
+            sentCount++;
+          } catch (e: any) {
+            console.error(`[WebRTC DataChannel] Falha ao enviar para ${peerId}:`, e);
+            failedPeers.push(peerEntry.info.nickname);
+          }
+        } else {
+          failedPeers.push(peerEntry.info.nickname);
+        }
       }
     }
 
@@ -425,6 +558,38 @@ export class WebRtcEngine {
     }
 
     return chatMsg;
+  }
+
+  private async sendChunksToChannel(dc: RTCDataChannel, payload: any) {
+    const { msgId, senderName, text, timestamp, attachmentMeta, dataUrl, totalChunks, chunkSize } = payload;
+    for (let i = 0; i < totalChunks; i++) {
+      if (dc.readyState !== 'open') break;
+
+      const chunkData = dataUrl.substring(i * chunkSize, (i + 1) * chunkSize);
+      const chunkMsg = JSON.stringify({
+        type: 'chat_chunk',
+        msgId,
+        chunkIndex: i,
+        totalChunks,
+        chunkData,
+        senderName,
+        text,
+        timestamp,
+        attachmentMeta,
+      });
+
+      // Se o buffer do canal estiver cheio (>64KB), aguarda liberar para não estourar SCTP
+      while (dc.bufferedAmount > 64 * 1024 && dc.readyState === 'open') {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+
+      try {
+        dc.send(chunkMsg);
+      } catch (err) {
+        console.error('[WebRTC DataChannel] Erro ao enviar chunk de arquivo:', err);
+        break;
+      }
+    }
   }
 
   private async handleRemoteSignal(fromPeerId: string, payload: any) {
@@ -476,6 +641,7 @@ export class WebRtcEngine {
     useWasapiAudio = true
   ): Promise<MediaStream> {
     this.stopScreenShare();
+    wasapiAudioBridge.resetClock();
     this.screenTitle = screenTitle;
 
     const width = resolution === '1440p' ? 2560 : resolution === '1080p' ? 1920 : 1280;
@@ -485,23 +651,74 @@ export class WebRtcEngine {
       throw new Error('API navigator.mediaDevices.getDisplayMedia não suportada pelo navegador.');
     }
 
+    // Solicita o seletor nativo de tela ou janela com captura de áudio habilitada
     const stream = await navigator.mediaDevices.getDisplayMedia({
       video: {
         width: { ideal: width },
         height: { ideal: height },
         frameRate: { ideal: fps, max: fps },
       },
-      audio: false, // Desliga áudio do navegador para NÃO capturar o Discord
+      audio: true, // Habilita áudio de janela e sistema nativo
     });
 
-    // Injeta a trilha de áudio WASAPI isolada do processo alvo (zero eco de Discord!)
-    if (useWasapiAudio) {
+    const videoTrack = stream.getVideoTracks()[0];
+    const settings = (videoTrack?.getSettings?.() || {}) as any;
+    const displaySurface = settings.displaySurface; // 'window' ou 'monitor'
+    const label = videoTrack?.label || '';
+
+    // Auto-detecta se o usuário selecionou uma JANELA ou TELA INTEIRA
+    const isWindowChosen = displaySurface === 'window' || label.toLowerCase().startsWith('window:');
+
+    if (isTauriEnvironment() && useWasapiAudio) {
+      if (isWindowChosen) {
+        // MODO JANELA: Localiza o PID da janela selecionada para isolar 100% o áudio dela
+        try {
+          const matchedPid = await findWindowPid(label);
+          if (matchedPid && matchedPid > 0) {
+            console.log(`[WASAPI] MODO JANELA: Processo alvo vinculado com sucesso (PID: ${matchedPid})`);
+            await startNativeProcessAudio(matchedPid);
+          } else {
+            console.log('[WASAPI] MODO JANELA: PID não resolvido diretamente, usando exclusão do Discord');
+            await startNativeProcessAudio(0);
+          }
+        } catch (e) {
+          console.warn('[WASAPI] Erro ao identificar janela:', e);
+          await startNativeProcessAudio(0);
+        }
+      } else {
+        // MODO TELA COMPLETA: Envia áudio completo do PC EXCLUINDO o Discord
+        console.log('[WASAPI] MODO TELA: Capturando áudio completo do PC com exclusão total do Discord');
+        try {
+          await startNativeProcessAudio(0);
+        } catch (e) {
+          console.warn('[WASAPI] Erro ao iniciar captura global sem Discord:', e);
+        }
+      }
+
+      // CRÍTICO: Remove as faixas de áudio não filtradas do navegador (que capturam áudio bruto de tudo)
+      stream.getAudioTracks().forEach((track) => {
+        track.stop();
+        stream.removeTrack(track);
+      });
+
+      // Injeta a faixa de áudio WASAPI filtrada (ou somente da janela ou do PC sem Discord)
       const wasapiAudioTrack = wasapiAudioBridge.getAudioTrack();
       if (wasapiAudioTrack) {
+        wasapiAudioTrack.enabled = true;
         stream.addTrack(wasapiAudioTrack);
-        console.log('[WebRTC Engine] Trilha de áudio WASAPI injetada no MediaStream');
+        console.log('[WebRTC Engine] Trilha de áudio WASAPI isolada/filtrada injetada com sucesso no MediaStream');
       }
     }
+
+    // Habilita e valida todas as faixas de áudio presentes no stream
+    stream.getAudioTracks().forEach((track) => {
+      track.enabled = true;
+      console.log(`[WebRTC Engine] Áudio ativado: [${track.kind}] label='${track.label}', id='${track.id}'`);
+    });
+
+    videoTrack.onended = () => {
+      this.stopScreenShare();
+    };
 
     this.localScreenStream = stream;
     this.isBroadcastingScreen = true;
@@ -520,7 +737,32 @@ export class WebRtcEngine {
       this.localScreenStream.getTracks().forEach((t) => t.stop());
       this.localScreenStream = null;
     }
+    wasapiAudioBridge.resetClock();
+    if (isTauriEnvironment()) {
+      stopNativeProcessAudio().catch(() => {});
+    }
     this.isBroadcastingScreen = false;
+
+    // Remove os senders de tela dos peers sem afetar a webcam
+    for (const [peerId, peerEntry] of this.peers.entries()) {
+      let changed = false;
+      const vSender = peerEntry.sendersMap.get('screen_video');
+      if (vSender) {
+        try { peerEntry.pc.removeTrack(vSender); } catch (_) {}
+        peerEntry.sendersMap.delete('screen_video');
+        changed = true;
+      }
+      const aSender = peerEntry.sendersMap.get('screen_audio');
+      if (aSender) {
+        try { peerEntry.pc.removeTrack(aSender); } catch (_) {}
+        peerEntry.sendersMap.delete('screen_audio');
+        changed = true;
+      }
+      if (changed) {
+        this.renegotiatePeer(peerId);
+      }
+    }
+
     this.broadcastStreamStatus();
   }
 
@@ -551,37 +793,90 @@ export class WebRtcEngine {
       this.localWebcamStream = null;
     }
     this.isBroadcastingWebcam = false;
+
+    // Remove os senders de webcam dos peers sem afetar a tela
+    for (const [peerId, peerEntry] of this.peers.entries()) {
+      let changed = false;
+      const vSender = peerEntry.sendersMap.get('webcam_video');
+      if (vSender) {
+        try { peerEntry.pc.removeTrack(vSender); } catch (_) {}
+        peerEntry.sendersMap.delete('webcam_video');
+        changed = true;
+      }
+      const aSender = peerEntry.sendersMap.get('webcam_audio');
+      if (aSender) {
+        try { peerEntry.pc.removeTrack(aSender); } catch (_) {}
+        peerEntry.sendersMap.delete('webcam_audio');
+        changed = true;
+      }
+      if (changed) {
+        this.renegotiatePeer(peerId);
+      }
+    }
+
     this.broadcastStreamStatus();
+  }
+
+  private renegotiatePeer(peerId: string) {
+    const peerEntry = this.peers.get(peerId);
+    if (!peerEntry) return;
+    const { pc } = peerEntry;
+    if (pc.signalingState === 'stable') {
+      pc.createOffer()
+        .then((offer) => pc.setLocalDescription(offer))
+        .then(() => {
+          this.sendWsMessage({
+            type: 'webrtc_signal',
+            to_peer_id: peerId,
+            payload: { sdp: pc.localDescription },
+          });
+        })
+        .catch((err) => console.error('[WebRTC] Erro ao renegociar:', err));
+    }
   }
 
   private attachTracksForPeer(peerId: string, streamType: string) {
     const peerEntry = this.peers.get(peerId);
     if (!peerEntry) return;
-    const { pc } = peerEntry;
+    const { pc, sendersMap } = peerEntry;
 
     const stream = streamType === 'webcam' ? this.localWebcamStream : this.localScreenStream;
     if (!stream) return;
 
+    let needsRenegotiation = false;
+
     stream.getTracks().forEach((track) => {
-      // Evita duplicar faixas já adicionadas
-      const senders = pc.getSenders();
-      const alreadyAdded = senders.some((s) => s.track?.id === track.id);
-      if (!alreadyAdded) {
-        pc.addTrack(track, stream);
+      track.enabled = true;
+      const key = `${streamType}_${track.kind}`;
+      const existingSender = sendersMap.get(key);
+
+      if (existingSender) {
+        existingSender.replaceTrack(track).catch((err) => {
+          console.warn(`[WebRTC] replaceTrack falhou para ${key}:`, err);
+        });
+      } else {
+        try {
+          const sender = pc.addTrack(track, stream);
+          sendersMap.set(key, sender);
+          needsRenegotiation = true;
+        } catch (err) {
+          console.warn(`[WebRTC] pc.addTrack falhou para ${key}:`, err);
+        }
       }
     });
 
-    // Renegocia se necessário
-    pc.createOffer()
-      .then((offer) => pc.setLocalDescription(offer))
-      .then(() => {
-        this.sendWsMessage({
-          type: 'webrtc_signal',
-          to_peer_id: peerId,
-          payload: { sdp: pc.localDescription },
-        });
-      })
-      .catch((err) => console.error('[WebRTC] Erro ao renegociar faixa:', err));
+    if (needsRenegotiation || pc.signalingState === 'stable') {
+      pc.createOffer()
+        .then((offer) => pc.setLocalDescription(offer))
+        .then(() => {
+          this.sendWsMessage({
+            type: 'webrtc_signal',
+            to_peer_id: peerId,
+            payload: { sdp: pc.localDescription },
+          });
+        })
+        .catch((err) => console.error('[WebRTC] Erro ao renegociar faixa:', err));
+    }
   }
 
   private broadcastStreamStatus() {
@@ -591,7 +886,9 @@ export class WebRtcEngine {
       peer_id: this.myPeerId,
       has_screen: this.isBroadcastingScreen,
       screen_title: this.isBroadcastingScreen ? this.screenTitle : null,
+      screen_track_id: this.localScreenStream?.getVideoTracks()[0]?.id,
       has_webcam: this.isBroadcastingWebcam,
+      webcam_track_id: this.localWebcamStream?.getVideoTracks()[0]?.id,
       has_isolated_audio: this.isBroadcastingScreen,
     });
   }

@@ -63,22 +63,24 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
 
   // Vincula o MediaStream nativo da RTCPeerConnection ao elemento <video>
   useEffect(() => {
-    if (videoRef.current && stream && isWatched) {
-      videoRef.current.srcObject = stream;
-      videoRef.current.play().catch((err) => {
-        console.warn('[LivePlayer] Autoplay bloqueado pelo navegador, aguardando clique:', err);
+    const el = videoRef.current;
+    if (el && stream && isWatched) {
+      el.srcObject = stream;
+      el.muted = isSelf ? true : isMuted;
+      el.volume = isSelf ? 0 : Math.min(1.0, isMuted ? 0 : volume / 100);
+      el.play().catch((err) => {
+        console.warn('[LivePlayer] Autoplay restrito pelo navegador, aguardando interação do usuário:', err);
       });
     }
-  }, [stream, isWatched]);
+  }, [stream, isWatched, isSelf, isMuted, volume]);
 
   // Aplica o volume ao elemento de vídeo
   useEffect(() => {
     if (videoRef.current) {
-      videoRef.current.muted = isMuted;
-      // Volume padrão do HTML5 vai até 1.0; se passar disso, o AudioNode lida com o boost
-      videoRef.current.volume = Math.min(1.0, isMuted ? 0 : volume / 100);
+      videoRef.current.muted = isSelf ? true : isMuted;
+      videoRef.current.volume = isSelf ? 0 : Math.min(1.0, isMuted ? 0 : volume / 100);
     }
-  }, [volume, isMuted]);
+  }, [volume, isMuted, isSelf]);
 
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
@@ -125,7 +127,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 ref={videoRef}
                 autoPlay
                 playsInline
-                className="w-full h-full object-contain bg-black"
+                className={`w-full h-full object-contain bg-black ${type === 'webcam' && isSelf ? 'scale-x-[-1]' : ''}`}
               />
             ) : (
               /* Simulação animada ultra suave quando em preview */
