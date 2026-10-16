@@ -32,11 +32,16 @@ jobs:
       - name: 📥 Clonar Repositório
         uses: actions/checkout@v4
 
-      # Configuração do Node.js sem cache estrito para nunca falhar por falta de lockfile
+      # Configura Node.js e Bun para compatibilidade máxima no Windows
       - name: ⚙️ Configurar Node.js (v20)
         uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      - name: 🥟 Configurar Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - name: 🦀 Instalar Rust Toolchain (MSVC)
         uses: dtolnay/rust-toolchain@stable
@@ -57,17 +62,10 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: 📦 Instalar Dependências do Frontend
-        shell: pwsh
-        run: |
-          if (Test-Path package-lock.json) { Remove-Item -Force package-lock.json }
-          npm install --include=optional
-          if (!(Test-Path "node_modules/@rolldown/binding-win32-x64-msvc")) {
-            Write-Host "Garantindo binding nativo do Windows para o rolldown..."
-            npm install @rolldown/binding-win32-x64-msvc --no-save --ignore-scripts
-          }
+        run: bun install
 
       - name: 🔨 Compilar Frontend Vite (React + Tailwind)
-        run: npm run build
+        run: bun run build
 
       - name: 🚀 Compilar Executável Nativo Windows via Tauri v2 CLI
         run: npx @tauri-apps/cli build
