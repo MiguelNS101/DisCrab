@@ -117,16 +117,41 @@ O arquivo `.exe` pronto para uso estará localizado na pasta:
 
 ---
 
-## 🤖 Pipeline Automática no GitHub Actions
+## 🤖 Pipeline Automática no GitHub Actions & Como Criar Release com .exe
 
-O repositório inclui uma pipeline de CI/CD pronta em `.github/workflows/build-exe.yml` que compila o `.exe` diretamente nas máquinas Windows do GitHub.
+O repositório inclui uma pipeline de CI/CD completa e pré-configurada em `.github/workflows/build-exe.yml` para compilar o executável nativo do Windows (`.exe`) e publicar automaticamente na aba **Releases** do GitHub.
 
-### Como gerar o `.exe` pelo GitHub:
-1. Faça o push do código para o seu repositório no GitHub.
-2. Acesse a aba **Actions** no seu repositório.
-3. Selecione o workflow **"Compilar Executável Windows (StreamCompanion)"** e clique no botão **"Run workflow"**.
-4. Quando a execução terminar (cerca de 5 a 8 minutos), clique na build concluída e baixe o artefato **`StreamCompanion-Windows-Release`** contendo o executável.
-5. Se você criar uma tag (ex: `git tag v1.0.0 && git push --tags`), a pipeline cria automaticamente uma **Release** no GitHub com o `.exe` anexado para download público!
+### ⚙️ Passo Importante: Habilitar Permissões de Release no GitHub
+Para que o GitHub Actions consiga criar a Release e anexar o `.exe` na sua conta, é necessário ativar a permissão de escrita:
+1. No seu repositório no GitHub, clique na aba **Settings** (Configurações).
+2. No menu lateral esquerdo, clique em **Actions** ➔ **General**.
+3. Role até a seção **Workflow permissions** e marque a opção:
+   - 🔘 **Read and write permissions** (Permissões de leitura e escrita).
+4. Marque também a caixinha **Allow GitHub Actions to create and approve pull requests**.
+5. Clique em **Save**.
+
+---
+
+### 📦 Como Gerar a Release com o .exe (2 Formas Fáceis):
+
+#### Opção A: Pelo Próprio Navegador (Sem comandos de terminal)
+1. Vá na aba **Actions** do seu repositório no GitHub.
+2. No menu lateral esquerdo, clique em **"Compilar Executável Windows (StreamCompanion)"**.
+3. À direita, clique no botão **"Run workflow"**.
+4. Deixe marcada a opção **"Publicar Release no GitHub com os arquivos .exe?"** e digite a versão desejada no campo (ex: `v1.0.0`).
+5. Clique no botão verde **Run workflow**.
+6. Aguarde a compilação (cerca de 5 a 8 minutos). Ao finalizar, vá na aba **Releases** do repositório: sua Release estará criada com o arquivo **`StreamCompanion-Portable.exe`** e o instalador prontos para qualquer pessoa baixar!
+
+#### Opção B: Via Tag Git no seu Computador
+```bash
+# Crie uma tag de versão e envie para o GitHub
+git tag v1.0.0
+git push origin v1.0.0
+```
+Ao enviar uma tag começando com `v` (ex: `v1.0.0`, `v1.0.1`), o GitHub dispara a build automaticamente e cria a Release oficial com os executáveis anexados.
+
+#### Opção C: Baixar o .exe sem criar Release (Artefato Temporário)
+Mesmo se você não quiser criar uma Release formal, toda vez que você fizer `git push` no repositório, o GitHub compila o projeto. Basta ir na aba **Actions**, clicar na execução da build e baixar o arquivo zip na seção **Artifacts** no final da página!
 
 ---
 

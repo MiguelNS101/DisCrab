@@ -7,7 +7,19 @@ on:
   pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Publicar Release no GitHub com os arquivos .exe?'
+        required: true
+        type: boolean
+        default: true
+      release_tag:
+        description: 'Nome da Tag da Release (ex: v1.0.0)'
+        required: false
+        type: string
+        default: 'v1.0.0'
 
+# Permissão obrigatória para que o GitHub Actions consiga criar Releases e fazer upload de binários
 permissions:
   contents: write
 
@@ -20,11 +32,11 @@ jobs:
       - name: 📥 Clonar Repositório
         uses: actions/checkout@v4
 
+      # Configuração do Node.js sem cache estrito para nunca falhar por falta de lockfile
       - name: ⚙️ Configurar Node.js (v20)
         uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: 'npm'
 
       - name: 🦀 Instalar Rust Toolchain (MSVC)
         uses: dtolnay/rust-toolchain@stable
@@ -40,7 +52,7 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             src-tauri/target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
 
@@ -53,25 +65,48 @@ jobs:
       - name: 🚀 Compilar Executável Nativo Windows via Tauri v2 CLI
         run: npx @tauri-apps/cli build
 
-      - name: 📤 Publicar Artefato do Executável (.exe e instalador)
+      # Organiza os executáveis gerados em uma pasta limpa para garantir que os nomes estejam corretos
+      - name: 📂 Preparar Binários para Download e Release
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release_assets
+          
+          # Copia executável standalone direto
+          $exeFiles = Get-ChildItem -Path src-tauri/target/release -Filter "*.exe" -File
+          foreach ($file in $exeFiles) {
+            if ($file.Name -notlike "*build*" -and $file.Name -notlike "*tauri*") {
+              Write-Host "Encontrado executavel: $($file.FullName)"
+              Copy-Item -Path $file.FullName -Destination "release_assets/StreamCompanion-Portable.exe" -Force
+            }
+          }
+          
+          # Copia instaladores NSIS e MSI se gerados
+          if (Test-Path "src-tauri/target/release/bundle/nsis") {
+            Copy-Item -Path "src-tauri/target/release/bundle/nsis/*.exe" -Destination "release_assets/" -Force -ErrorAction SilentlyContinue
+          }
+          if (Test-Path "src-tauri/target/release/bundle/msi") {
+            Copy-Item -Path "src-tauri/target/release/bundle/msi/*.msi" -Destination "release_assets/" -Force -ErrorAction SilentlyContinue
+          }
+          
+          Write-Host "Arquivos prontos em release_assets:"
+          Get-ChildItem -Path release_assets
+
+      - name: 📤 Publicar Artefato (.exe para Download no Actions)
         uses: actions/upload-artifact@v4
         with:
-          name: StreamCompanion-Windows-Release
-          path: |
-            src-tauri/target/release/StreamCompanion.exe
-            src-tauri/target/release/stream-companion.exe
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
+          name: StreamCompanion-Windows-Binaries
+          path: release_assets/
           if-no-files-found: warn
 
-      - name: 🏷️ Criar Release no GitHub (se for tag v*)
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: 🏷️ Criar ou Atualizar Release no GitHub com .exe
+        if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.create_release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            src-tauri/target/release/StreamCompanion.exe
-            src-tauri/target/release/bundle/nsis/*.exe
-            src-tauri/target/release/bundle/msi/*.msi
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.0.0') }}
+          name: StreamCompanion ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.0.0') }}
+          files: release_assets/*
           draft: false
           prerelease: false
           generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
