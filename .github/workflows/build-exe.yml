@@ -57,7 +57,13 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: 📦 Instalar Dependências do Frontend
-        run: npm install
+        shell: pwsh
+        run: |
+          # Remove lockfile gerado em Linux para evitar bug de dependências opcionais do npm (issue #4828)
+          if (Test-Path package-lock.json) { Remove-Item -Force package-lock.json }
+          npm install
+          # Garante o binding nativo do Windows para o bundler rolldown/vite
+          npm install -D @rolldown/binding-win32-x64-msvc --no-save
 
       - name: 🔨 Compilar Frontend Vite (React + Tailwind)
         run: npm run build
