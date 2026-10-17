@@ -96,6 +96,10 @@ jobs:
             Copy-Item -Path "src-tauri/target/release/bundle/msi/*.msi" -Destination "release_assets/" -Force -ErrorAction SilentlyContinue
           }
           
+          # Baixa o binário oficial do cloudflared.exe para acompanhar o release
+          Write-Host "Baixando cloudflared.exe oficial da Cloudflare..."
+          curl.exe -L -s -o "release_assets/cloudflared.exe" "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe"
+          
           Write-Host "Arquivos prontos em release_assets:"
           Get-ChildItem -Path release_assets
 

@@ -84,20 +84,58 @@ impl TunnelManager {
         Ok(exe_dir.join("cloudflared.exe"))
     }
 
+    /// Garante que o cloudflared.exe existe no disco ou realiza download automático oficial
+    pub fn ensure_binary_exists() -> Result<PathBuf, String> {
+        let binary_path = Self::resolve_binary_path()?;
+        if binary_path.exists() {
+            return Ok(binary_path);
+        }
+
+        println!("[Tunnel] cloudflared.exe não encontrado em {:?}. Iniciando download automático oficial...", binary_path);
+
+        #[cfg(windows)]
+        {
+            let download_url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe";
+            let target_str = binary_path.to_string_lossy().to_string();
+
+            // 1. Tenta curl.exe nativo do Windows 10/11
+            let status = Command::new("curl.exe")
+                .args(["-L", "-s", "-o", &target_str, download_url])
+                .status();
+
+            if status.map(|s| s.success()).unwrap_or(false) && binary_path.exists() {
+                println!("[Tunnel] Download do cloudflared.exe concluído com sucesso via curl!");
+                return Ok(binary_path);
+            }
+
+            // 2. Fallback: PowerShell Invoke-WebRequest
+            let ps_script = format!(
+                "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
+                download_url, target_str
+            );
+            let status_ps = Command::new("powershell.exe")
+                .args(["-NoProfile", "-Command", &ps_script])
+                .status();
+
+            if status_ps.map(|s| s.success()).unwrap_or(false) && binary_path.exists() {
+                println!("[Tunnel] Download do cloudflared.exe concluído com sucesso via PowerShell!");
+                return Ok(binary_path);
+            }
+        }
+
+        if binary_path.exists() {
+            Ok(binary_path)
+        } else {
+            Err("O executável cloudflared.exe não foi encontrado na pasta do app. Para usar o túnel Cloudflare pela Internet, coloque o cloudflared.exe na mesma pasta do StreamCompanion.exe ou utilize a aba Rede Local (LAN).".to_string())
+        }
+    }
+
     /// Inicia o Cloudflare Quick Tunnel apontando para a porta local do WebSocket
     pub fn start_quick_tunnel(&self, local_port: u16) -> Result<(String, String), String> {
         self.stop();
 
-        let binary_path = Self::resolve_binary_path()?;
+        let binary_path = Self::ensure_binary_exists()?;
         println!("[Tunnel] Iniciando túnel para 127.0.0.1:{} via {:?}", local_port, binary_path);
-
-        // Se o binário não existir no disco, cria um mock de subdomínio para testes de desenvolvimento
-        if !binary_path.exists() {
-            println!("[Tunnel] Aviso: Binário cloudflared.exe não encontrado em {:?}. Modo demonstração ativado.", binary_path);
-            let mock_subdomain = format!("sc-{}", nanoid_hex(8));
-            let mock_url = format!("https://{}.trycloudflare.com", mock_subdomain);
-            return Ok((mock_subdomain, mock_url));
-        }
 
         let mut cmd = Command::new(&binary_path);
         cmd.args([

@@ -16,11 +16,22 @@ export function decodeRoomCodeUrlSafe(code: string): { wsUrl: string; token: str
   const decoded = atob(base64);
   const parts = decoded.split(':');
   
-  if (parts.length === 2) {
-    // Cloudflare tunnel: subdominio:token
+  if (parts[0] === 'web' && parts.length === 2) {
+    // Sala hospedada no servidor Web /ws
+    const wsProtocol = typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = typeof window !== 'undefined' ? window.location.host : 'localhost:3000';
     return {
-      wsUrl: `wss://${parts[0]}.trycloudflare.com`,
+      wsUrl: `${wsProtocol}//${host}/ws`,
       token: parts[1],
+    };
+  } else if (parts.length === 2) {
+    // Cloudflare tunnel ou domínio personalizado: subdominio:token
+    const target = parts[0];
+    const token = parts[1];
+    const wsUrl = target.includes('.') ? (target.startsWith('ws') ? target : `wss://${target}`) : `wss://${target}.trycloudflare.com`;
+    return {
+      wsUrl,
+      token,
     };
   } else if (parts.length === 3) {
     // LAN: ip:porta:token

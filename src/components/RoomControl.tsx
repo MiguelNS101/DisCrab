@@ -121,9 +121,41 @@ export const RoomControl: React.FC<RoomControlProps> = ({
         setErrorMsg(`Erro ao criar sala nativa: ${err?.message || err}`);
       }
     } else {
-      setErrorMsg(
-        'A criação do Servidor WebSocket local e do túnel Cloudflare em background requer a execução no aplicativo desktop compilado (StreamCompanion.exe). No navegador, utilize a aba "Entrar na Sala (Peer)" para se conectar com um Código de Sala gerado por um Host.'
-      );
+      // Modo Web / Full-Stack: Cria a sala no servidor de sinalização Web
+      try {
+        const resp = await fetch('/api/create-room', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ hostNickname: nickname.trim() }),
+        });
+        if (!resp.ok) {
+          throw new Error(`Servidor respondeu com código ${resp.status}`);
+        }
+        const data = await resp.json();
+        const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const details: RoomDetails = {
+          code: data.room_code,
+          token: data.token,
+          mode: 'cloudflare',
+          ws_url: `${wsProtocol}//${window.location.host}/ws`,
+          local_ip: window.location.hostname,
+          local_port: parseInt(window.location.port || (window.location.protocol === 'https:' ? '443' : '80'), 10),
+          created_at: Date.now(),
+        };
+
+        setRoomDetails(details);
+        setIsHost(true);
+        setIsConnected(true);
+
+        try {
+          localStorage.setItem('sc_last_room_code', data.room_code);
+          setLastSavedRoom(data.room_code);
+        } catch {
+          // ignore
+        }
+      } catch (err: any) {
+        setErrorMsg(`Falha ao criar sala no servidor web: ${err?.message || err}`);
+      }
     }
   };
 

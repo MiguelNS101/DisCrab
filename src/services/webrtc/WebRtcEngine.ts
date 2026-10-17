@@ -104,6 +104,14 @@ export class WebRtcEngine {
     return new Promise((resolve, reject) => {
       this.disconnect();
 
+      // Alerta preventivo contra bloqueio de Mixed Content pelo navegador
+      if (typeof window !== 'undefined' && window.location.protocol === 'https:' && wsUrl.startsWith('ws://')) {
+        const errorMsg =
+          'Bloqueado pelo Navegador (Mixed Content): Páginas HTTPS não podem conectar em ws:// inseguro. Para conexões LAN locais por IP, utilize o aplicativo desktop compilado (StreamCompanion.exe), ou no navegador utilize uma sala com WSS seguro (Cloudflare Tunnel ou Servidor Web).';
+        this.callbacks.onError?.(errorMsg);
+        return reject(errorMsg);
+      }
+
       console.log(`[WebRTC Engine] Conectando a: ${wsUrl} (tentativa ${retryCount + 1})`);
       try {
         this.ws = new WebSocket(wsUrl);
@@ -135,16 +143,25 @@ export class WebRtcEngine {
 
       this.ws.onerror = (e) => {
         console.error('[WebRTC Engine] Erro no WebSocket:', e);
-        if (!connected && retryCount < 3 && wsUrl.includes('trycloudflare')) {
-          console.log(`[WebRTC Engine] Aguardando propagação do túnel Cloudflare... Tentativa ${retryCount + 1}/3`);
+        if (!connected && retryCount < 5 && wsUrl.includes('trycloudflare')) {
+          console.log(`[WebRTC Engine] Aguardando propagação do túnel Cloudflare... Tentativa ${retryCount + 1}/5`);
+          this.callbacks.onError?.(`Aguardando propagação do túnel Cloudflare... Tentativa ${retryCount + 1}/5`);
           setTimeout(() => {
             this.connect(wsUrl, token, nickname, retryCount + 1)
               .then(resolve)
               .catch(reject);
-          }, 1500);
+          }, 2000);
         } else {
-          this.callbacks.onError?.('Falha na conexão de rede com o servidor de sinalização.');
-          reject('Erro de conexão WebSocket');
+          let detailedMsg = `Não foi possível conectar ao servidor (${wsUrl}).`;
+          if (wsUrl.includes('trycloudflare')) {
+            detailedMsg += ' O túnel Cloudflare pode estar inativo ou o Host fechou a sala. Verifique se o Host está com o app aberto e com o cloudflared.exe ativo.';
+          } else if (wsUrl.includes('127.0.0.1') || wsUrl.includes('localhost')) {
+            detailedMsg += ' Servidor local não respondeu. Certifique-se de que o Host iniciou a sala antes de tentar entrar.';
+          } else {
+            detailedMsg += ' Verifique se o Host está com a sala aberta, se o código digitado está correto e se o firewall permite a conexão.';
+          }
+          this.callbacks.onError?.(detailedMsg);
+          reject(detailedMsg);
         }
       };
 
