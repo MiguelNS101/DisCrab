@@ -296,7 +296,9 @@ async fn handle_connection(
                     broadcast_to_others(
                         &state,
                         &old_id,
-                        SignalingMessage::PeerLeft { peer_id: old_id },
+                        SignalingMessage::PeerLeft {
+                            peer_id: old_id.clone(),
+                        },
                     )
                     .await;
                 }
