@@ -223,10 +223,11 @@ async fn handle_connection(
         }
     });
 
-    // Keep-Alive ativo do servidor a cada 15s para manter túneis Cloudflare e NAT abertos
+    // Keep-Alive ativo do servidor a cada 15s (pula o tick imediato t=0ms)
     let tx_ping = tx.clone();
     let ping_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(15));
+        interval.tick().await; // Consome o primeiro tick imediato do Tokio
         loop {
             interval.tick().await;
             if tx_ping.send(Message::Ping(vec![1, 2, 3, 4])).is_err() {
@@ -235,18 +236,50 @@ async fn handle_connection(
         }
     });
 
-    // 1. O primeiro frame DEVE ser uma mensagem de autenticação
+    // 1. Aguarda a mensagem de autenticação (ignorando frames de controle Ping/Pong do protocolo WebSocket)
     let mut authenticated_peer_id: Option<String> = None;
     let mut my_conn_seq: u64 = 0;
 
-    if let Some(Ok(Message::Text(text))) = ws_receiver.next().await {
+    let auth_text_opt = tokio::time::timeout(Duration::from_secs(15), async {
+        while let Some(Ok(frame)) = ws_receiver.next().await {
+            match frame {
+                Message::Text(t) => {
+                    // Se por acaso vier um ping JSON antes do auth, ignora e continua aguardando auth
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&t) {
+                        if val.get("type").and_then(|v| v.as_str()) == Some("ping") {
+                            let pong = SignalingMessage::Pong;
+                            if let Ok(txt) = serde_json::to_string(&pong) {
+                                let _ = tx.send(Message::Text(txt));
+                            }
+                            continue;
+                        }
+                    }
+                    return Some(t);
+                }
+                Message::Ping(data) => {
+                    let _ = tx.send(Message::Pong(data));
+                }
+                Message::Pong(_) => {
+                    // Ignora Pong de controle e continua aguardando o frame Text de Auth
+                }
+                Message::Close(_) => return None,
+                _ => {}
+            }
+        }
+        None
+    })
+    .await
+    .ok()
+    .flatten();
+
+    if let Some(text) = auth_text_opt {
         if let Ok(SignalingMessage::Auth {
             token,
             nickname,
             client_id,
         }) = serde_json::from_str::<SignalingMessage>(&text)
         {
-            if token.trim() == state.token {
+            if token.trim().eq_ignore_ascii_case(&state.token) {
                 my_conn_seq = {
                     let mut seq = state.seq_counter.lock().await;
                     *seq += 1;
