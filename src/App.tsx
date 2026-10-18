@@ -16,7 +16,7 @@ import { WindowItem, RoomDetails, StreamItem, ChatAttachment, AudioSourceMode } 
 import { useWebRtc } from './hooks/useWebRtc';
 import { WebcamPreviewPip } from './components/WebcamPreviewPip';
 import { startNativeProcessAudio, startNativeMultiProcessAudio, isTauriEnvironment } from './services/tauriBridge';
-import { Radio, Users, AlertCircle, X, Tv, ChevronDown, ChevronUp, AppWindow } from 'lucide-react';
+import { Radio, Users, AlertCircle, X, Tv, ChevronDown, ChevronUp, AppWindow, RefreshCw } from 'lucide-react';
 
 export default function App() {
   // Inicializa o apelido do localStorage para não precisar digitar novamente
@@ -57,10 +57,11 @@ export default function App() {
     }));
   };
 
-  // Hook WebRTC nativo P2P com DataChannel Chat integrado e telemetria
+  // Hook WebRTC nativo P2P com DataChannel Chat integrado, auto-reconexão e memória de volume
   const {
     isConnected,
-    myPeerId,
+    isReconnecting,
+    reconnectAttempt,
     peers,
     error: rtcError,
     clearError,
@@ -74,12 +75,15 @@ export default function App() {
     sendChatMessage,
     connectToRoom,
     disconnectFromRoom,
+    reconnectAllPeers,
+    resetPeerConnection,
     startScreenShare,
     stopScreenShare,
     toggleWebcam,
     requestPeerStream,
+    getStreamVolume,
     setStreamVolume,
-    volumeMap,
+    toggleStreamMute,
   } = useWebRtc();
 
   // Seleção de janela e roteamento de áudio WASAPI por processo
@@ -144,28 +148,32 @@ export default function App() {
     }
   }, [audioSourceMode, audioCustomWindows, selectedWindow, isScreenSharing, isolateAudio]);
 
-  // Conecta ao WebSocket de sinalização quando a sala for criada ou acessada
+  // Conecta ao WebSocket de sinalização sempre que uma sala é criada ou acessada
   useEffect(() => {
-    if (roomDetails && !isConnected) {
+    if (roomDetails) {
       connectToRoom(roomDetails.ws_url, roomDetails.token, nickname).catch((err) => {
         console.error('[App] Erro na conexão WebRTC:', err);
       });
     }
-  }, [roomDetails, isConnected, connectToRoom, nickname]);
+  }, [roomDetails?.created_at]);
 
   // Monta a lista de streams estritamente REAIS a partir dos peers conectados
-  const peerStreams: StreamItem[] = [];
+  const peerStreams: (StreamItem & { peerId: string; connectionState: RTCPeerConnectionState })[] = [];
   for (const p of peers) {
     if (p.hasScreen) {
+      const sId = `${p.id}-screen`;
+      const savedVol = getStreamVolume(sId, p.nickname, 'screen');
       peerStreams.push({
-        id: `${p.id}-screen`,
+        id: sId,
+        peerId: p.id,
+        connectionState: p.connectionState,
         user_name: p.nickname,
         type: 'screen',
         title: p.screenTitle || 'Tela do Amigo',
         resolution: '1080p',
         fps: 60,
-        volume: volumeMap[`${p.id}-screen`] ?? volumeMap[p.id] ?? 100,
-        is_muted: (volumeMap[`${p.id}-screen`] ?? volumeMap[p.id] ?? 100) === 0,
+        volume: savedVol,
+        is_muted: savedVol === 0,
         is_watched: !!p.screenStream,
         isolated_audio: p.hasIsolatedAudio,
         process_name: p.hasIsolatedAudio ? 'WASAPI Process' : undefined,
@@ -173,15 +181,19 @@ export default function App() {
       });
     }
     if (p.hasWebcam) {
+      const wId = `${p.id}-webcam`;
+      const savedVol = getStreamVolume(wId, p.nickname, 'webcam');
       peerStreams.push({
-        id: `${p.id}-webcam`,
+        id: wId,
+        peerId: p.id,
+        connectionState: p.connectionState,
         user_name: p.nickname,
         type: 'webcam',
         title: 'Câmera do Amigo',
         resolution: '720p',
         fps: 30,
-        volume: volumeMap[`${p.id}-webcam`] ?? 100,
-        is_muted: (volumeMap[`${p.id}-webcam`] ?? 100) === 0,
+        volume: savedVol,
+        is_muted: savedVol === 0,
         is_watched: !!p.webcamStream,
         isolated_audio: false,
         stream: p.webcamStream,
@@ -229,6 +241,24 @@ export default function App() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
+        {/* Banner de Reconexão Automática Transparente em Caso de Oscilação */}
+        {isReconnecting && (
+          <div className="bg-amber-950/80 border border-amber-700 rounded-xl p-3.5 flex items-center justify-between gap-3 shadow-lg text-xs font-mono">
+            <div className="flex items-center gap-2.5">
+              <RefreshCw className="w-4 h-4 text-amber-400 animate-spin shrink-0" />
+              <span className="text-amber-200">
+                Oscilação de rede detectada. Reconectando automaticamente à sala sem fechar suas lives (tentativa {reconnectAttempt})...
+              </span>
+            </div>
+            <button
+              onClick={reconnectAllPeers}
+              className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/60 text-amber-200 rounded cursor-pointer transition-colors shrink-0"
+            >
+              Reconectar Agora
+            </button>
+          </div>
+        )}
+
         {/* Alerta de Erro Real (Sem Mensagens Falsas) */}
         {rtcError && (
           <div className="bg-red-950/80 border border-red-800 rounded-xl p-4 flex items-start justify-between gap-3 shadow-lg shadow-red-950/40 text-xs font-mono">
@@ -239,13 +269,27 @@ export default function App() {
                 <p className="text-red-300 mt-0.5 leading-relaxed">{rtcError}</p>
               </div>
             </div>
-            <button
-              onClick={clearError}
-              className="text-red-400 hover:text-white p-1 rounded hover:bg-red-900/40 cursor-pointer"
-              title="Fechar erro"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-2">
+              {roomDetails && (
+                <button
+                  onClick={() => {
+                    clearError();
+                    connectToRoom(roomDetails.ws_url, roomDetails.token, nickname).catch(() => {});
+                  }}
+                  className="px-2.5 py-1 bg-red-900/60 hover:bg-red-800 border border-red-700 text-red-100 rounded cursor-pointer flex items-center gap-1"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>Tentar Reconectar</span>
+                </button>
+              )}
+              <button
+                onClick={clearError}
+                className="text-red-400 hover:text-white p-1 rounded hover:bg-red-900/40 cursor-pointer"
+                title="Fechar erro"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
 
@@ -336,6 +380,19 @@ export default function App() {
                 </span>
                 <span>·</span>
                 <span className="text-emerald-400">P2P WebRTC Direto</span>
+                {isConnected && peers.length > 0 && (
+                  <>
+                    <span>·</span>
+                    <button
+                      onClick={reconnectAllPeers}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-cyan-700 text-cyan-300 rounded cursor-pointer transition-colors"
+                      title="Forçar reset e ressincronização de todas as conexões P2P na sala sem fechar o app"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      <span>Resetar P2P</span>
+                    </button>
+                  </>
+                )}
               </div>
             </div>
 
@@ -421,10 +478,12 @@ export default function App() {
                     isMuted={stream.is_muted}
                     isWatched={stream.is_watched}
                     isPoppedOut={!!activePopups[stream.id]}
+                    connectionState={stream.connectionState}
                     onOpenPopup={() => togglePopup(stream.id)}
                     onToggleWatch={() => handleToggleWatch(stream.id)}
-                    onChangeVolume={(vol) => setStreamVolume(stream.id, vol)}
-                    onToggleMute={() => setStreamVolume(stream.id, stream.is_muted ? 100 : 0)}
+                    onChangeVolume={(vol) => setStreamVolume(stream.id, vol, stream.user_name, stream.type)}
+                    onToggleMute={() => toggleStreamMute(stream.id, stream.user_name, stream.type)}
+                    onResetConnection={() => resetPeerConnection(stream.peerId)}
                   />
                 ))}
               </div>
@@ -487,8 +546,8 @@ export default function App() {
             initialX={120 + (idx * 50)}
             initialY={140 + (idx * 50)}
             onClose={() => closePopup(stream.id)}
-            onChangeVolume={(vol) => setStreamVolume(stream.id, vol)}
-            onToggleMute={() => setStreamVolume(stream.id, stream.is_muted ? 100 : 0)}
+            onChangeVolume={(vol) => setStreamVolume(stream.id, vol, stream.user_name, stream.type)}
+            onToggleMute={() => toggleStreamMute(stream.id, stream.user_name, stream.type)}
           />
         );
       })}

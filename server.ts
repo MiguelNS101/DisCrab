@@ -13,7 +13,15 @@ app.use(express.json());
 interface PeerSession {
   id: string;
   nickname: string;
+  client_id?: string;
   is_host: boolean;
+  has_screen: boolean;
+  screen_title?: string | null;
+  screen_track_id?: string;
+  has_webcam: boolean;
+  webcam_track_id?: string;
+  has_isolated_audio: boolean;
+  connection_seq: number;
   ws: WebSocket;
 }
 
@@ -26,9 +34,16 @@ interface Room {
 }
 
 const rooms = new Map<string, Room>();
+let globalConnectionSeq = 0;
 
 function generateId(prefix = 'p'): string {
   return `${prefix}_${Math.random().toString(36).substring(2, 9)}`;
+}
+
+function sanitizeClientId(raw?: string): string {
+  if (!raw) return Math.random().toString(36).substring(2, 10);
+  const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24);
+  return cleaned || Math.random().toString(36).substring(2, 10);
 }
 
 function generateToken(): string {
@@ -40,7 +55,6 @@ function generateToken(): string {
   return res;
 }
 
-// Codifica em Base64 URL-Safe
 function encodeBase64UrlSafe(str: string): string {
   return Buffer.from(str)
     .toString('base64')
@@ -49,7 +63,6 @@ function encodeBase64UrlSafe(str: string): string {
     .replace(/=+$/, '');
 }
 
-// API REST para criação de sala no modo Web / Full-Stack
 app.post('/api/create-room', (req, res) => {
   const { hostNickname } = req.body;
   const nickname = (hostNickname || 'Host').trim();
@@ -79,27 +92,43 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', activeRooms: rooms.size });
 });
 
-// Gerenciamento WebSocket de Sinalização WebRTC P2P
-wss.on('connection', (ws: WebSocket, req) => {
+wss.on('connection', (ws: WebSocket) => {
   let authenticatedPeerId: string | null = null;
   let activeToken: string | null = null;
+  let myConnSeq = 0;
 
-  console.log('[Signaling Server] Novo cliente conectado via WebSocket');
+  const pingTimer = setInterval(() => {
+    if (ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.ping();
+      } catch {}
+    }
+  }, 15000);
 
   ws.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
 
       switch (msg.type) {
+        case 'ping': {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'pong' }));
+          }
+          break;
+        }
+
         case 'auth': {
           const token = (msg.token || '').trim();
           const nickname = (msg.nickname || 'Anônimo').trim();
+          const clientId = msg.client_id ? String(msg.client_id) : undefined;
+
+          globalConnectionSeq += 1;
+          myConnSeq = globalConnectionSeq;
 
           let room = rooms.get(token);
           let isHost = false;
 
           if (!room) {
-            // Se a sala ainda não existe com esse token, cria dinamicamente (primeiro a entrar é o Host)
             isHost = true;
             room = {
               code: encodeBase64UrlSafe(`web:${token}`),
@@ -109,30 +138,87 @@ wss.on('connection', (ws: WebSocket, req) => {
               createdAt: Date.now(),
             };
             rooms.set(token, room);
-            console.log(`[Signaling Server] Sala iniciada automaticamente para o token ${token} por ${nickname}`);
-          } else if (room.peers.size === 0) {
+            console.log(`[Signaling Server] Sala iniciada para o token ${token} por ${nickname}`);
+          }
+
+          const peerId = clientId ? `peer-${sanitizeClientId(clientId)}` : generateId('peer');
+          let preservedScreen = false;
+          let preservedTitle: string | null | undefined = undefined;
+          let preservedScreenTrackId: string | undefined = undefined;
+          let preservedWebcam = false;
+          let preservedWebcamTrackId: string | undefined = undefined;
+          let preservedIsolatedAudio = false;
+          let wasHost = false;
+
+          // Verifica sessão anterior do mesmo cliente/peer e preserva seu estado de live
+          for (const [oldId, oldPeer] of Array.from(room.peers.entries())) {
+            const sameClient = (clientId && oldPeer.client_id === clientId) || oldId === peerId;
+            if (sameClient) {
+              preservedScreen = oldPeer.has_screen;
+              preservedTitle = oldPeer.screen_title;
+              preservedScreenTrackId = oldPeer.screen_track_id;
+              preservedWebcam = oldPeer.has_webcam;
+              preservedWebcamTrackId = oldPeer.webcam_track_id;
+              preservedIsolatedAudio = oldPeer.has_isolated_audio;
+              wasHost = oldPeer.is_host;
+              room.peers.delete(oldId);
+              if (oldPeer.ws !== ws) {
+                try {
+                  oldPeer.ws.close();
+                } catch {}
+              }
+              if (oldId !== peerId) {
+                const leaveMsg = JSON.stringify({
+                  type: 'peer_left',
+                  peer_id: oldId,
+                });
+                for (const [, otherPeer] of room.peers) {
+                  if (otherPeer.ws.readyState === WebSocket.OPEN) {
+                    otherPeer.ws.send(leaveMsg);
+                  }
+                }
+              }
+            }
+          }
+
+          if (room.peers.size === 0 || wasHost) {
             isHost = true;
           }
 
-          const peerId = generateId('peer');
           authenticatedPeerId = peerId;
           activeToken = token;
 
-          const existingPeersSummary = Array.from(room.peers.values()).map((p) => ({
-            id: p.id,
-            nickname: p.nickname,
-            is_host: p.is_host,
-          }));
+          const existingPeersSummary = Array.from(room.peers.values())
+            .filter((p) => p.id !== peerId)
+            .map((p) => ({
+              id: p.id,
+              nickname: p.nickname,
+              is_host: p.is_host,
+              has_screen: p.has_screen,
+              screen_title: p.screen_title,
+              screen_track_id: p.screen_track_id,
+              has_webcam: p.has_webcam,
+              webcam_track_id: p.webcam_track_id,
+              has_isolated_audio: p.has_isolated_audio,
+            }));
 
-          // Salva sessão do peer
-          room.peers.set(peerId, {
+          const newSession: PeerSession = {
             id: peerId,
             nickname,
+            client_id: clientId,
             is_host: isHost,
+            has_screen: preservedScreen,
+            screen_title: preservedTitle,
+            screen_track_id: preservedScreenTrackId,
+            has_webcam: preservedWebcam,
+            webcam_track_id: preservedWebcamTrackId,
+            has_isolated_audio: preservedIsolatedAudio,
+            connection_seq: myConnSeq,
             ws,
-          });
+          };
 
-          // Responde auth_ok para o próprio peer
+          room.peers.set(peerId, newSession);
+
           ws.send(
             JSON.stringify({
               type: 'auth_ok',
@@ -142,13 +228,18 @@ wss.on('connection', (ws: WebSocket, req) => {
             })
           );
 
-          // Notifica os outros membros da sala
           const joinedMsg = JSON.stringify({
             type: 'peer_joined',
             peer: {
               id: peerId,
               nickname,
               is_host: isHost,
+              has_screen: preservedScreen,
+              screen_title: preservedTitle,
+              screen_track_id: preservedScreenTrackId,
+              has_webcam: preservedWebcam,
+              webcam_track_id: preservedWebcamTrackId,
+              has_isolated_audio: preservedIsolatedAudio,
             },
           });
 
@@ -179,16 +270,28 @@ wss.on('connection', (ws: WebSocket, req) => {
         }
 
         case 'stream_status': {
-          if (!activeToken) return;
+          if (!activeToken || !authenticatedPeerId) return;
           const room = rooms.get(activeToken);
           if (!room) return;
+
+          const mySession = room.peers.get(authenticatedPeerId);
+          if (mySession) {
+            mySession.has_screen = !!msg.has_screen;
+            mySession.screen_title = msg.screen_title;
+            mySession.screen_track_id = msg.screen_track_id;
+            mySession.has_webcam = !!msg.has_webcam;
+            mySession.webcam_track_id = msg.webcam_track_id;
+            mySession.has_isolated_audio = !!msg.has_isolated_audio;
+          }
 
           const broadcastMsg = JSON.stringify({
             type: 'stream_status',
             peer_id: authenticatedPeerId,
             has_screen: !!msg.has_screen,
             screen_title: msg.screen_title,
+            screen_track_id: msg.screen_track_id,
             has_webcam: !!msg.has_webcam,
+            webcam_track_id: msg.webcam_track_id,
             has_isolated_audio: !!msg.has_isolated_audio,
           });
 
@@ -227,33 +330,32 @@ wss.on('connection', (ws: WebSocket, req) => {
   });
 
   ws.on('close', () => {
+    clearInterval(pingTimer);
     if (activeToken && authenticatedPeerId) {
       const room = rooms.get(activeToken);
       if (room) {
-        room.peers.delete(authenticatedPeerId);
-        console.log(`[Signaling Server] Peer ${authenticatedPeerId} saiu da sala ${activeToken}`);
+        const existing = room.peers.get(authenticatedPeerId);
+        // Só remove se este socket ainda for a conexão mais recente daquele peerId
+        if (existing && existing.connection_seq === myConnSeq) {
+          room.peers.delete(authenticatedPeerId);
+          console.log(`[Signaling Server] Peer ${authenticatedPeerId} saiu da sala ${activeToken}`);
 
-        const leaveMsg = JSON.stringify({
-          type: 'peer_left',
-          peer_id: authenticatedPeerId,
-        });
+          const leaveMsg = JSON.stringify({
+            type: 'peer_left',
+            peer_id: authenticatedPeerId,
+          });
 
-        for (const [_, otherPeer] of room.peers) {
-          if (otherPeer.ws.readyState === WebSocket.OPEN) {
-            otherPeer.ws.send(leaveMsg);
+          for (const [, otherPeer] of room.peers) {
+            if (otherPeer.ws.readyState === WebSocket.OPEN) {
+              otherPeer.ws.send(leaveMsg);
+            }
           }
-        }
-
-        if (room.peers.size === 0) {
-          rooms.delete(activeToken);
-          console.log(`[Signaling Server] Sala ${activeToken} vazia e encerrada.`);
         }
       }
     }
   });
 });
 
-// Integração Vite Middleware no desenvolvimento
 async function startServer() {
   const isProd = process.env.NODE_ENV === 'production';
   const port = parseInt(process.env.PORT || '3000', 10);

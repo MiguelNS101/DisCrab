@@ -6,14 +6,12 @@ import {
   Minimize2,
   Eye,
   EyeOff,
-  Radio,
   Gamepad2,
   User,
-  Sliders,
   Sparkles,
   ExternalLink,
-  PictureInPicture2,
-  Activity,
+  BookmarkCheck,
+  RefreshCw,
 } from 'lucide-react';
 
 interface LivePlayerProps {
@@ -31,14 +29,15 @@ interface LivePlayerProps {
   isMuted: boolean;
   isWatched: boolean;
   isPoppedOut?: boolean;
+  connectionState?: RTCPeerConnectionState;
   onOpenPopup?: () => void;
   onToggleWatch: () => void;
   onChangeVolume: (vol: number) => void;
   onToggleMute: () => void;
+  onResetConnection?: () => void;
 }
 
 export const LivePlayer: React.FC<LivePlayerProps> = ({
-  id,
   userName,
   title,
   type,
@@ -52,35 +51,102 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   isMuted,
   isWatched,
   isPoppedOut = false,
+  connectionState,
   onOpenPopup,
   onToggleWatch,
   onChangeVolume,
   onToggleMute,
+  onResetConnection,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [savedVolumeFlash, setSavedVolumeFlash] = useState(false);
+  const flashTimerRef = useRef<any>(null);
+
+  // Web Audio API para amplificação real acima de 100% (101% até 150% boost)
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const boostGainRef = useRef<GainNode | null>(null);
+  const boostSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
 
   // Vincula o MediaStream nativo da RTCPeerConnection ao elemento <video>
   useEffect(() => {
     const el = videoRef.current;
     if (el && stream && isWatched) {
-      el.srcObject = stream;
+      if (el.srcObject !== stream) {
+        el.srcObject = stream;
+      }
       el.muted = isSelf ? true : isMuted;
-      el.volume = isSelf ? 0 : Math.min(1.0, isMuted ? 0 : volume / 100);
+      el.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
       el.play().catch((err) => {
         console.warn('[LivePlayer] Autoplay restrito pelo navegador, aguardando interação do usuário:', err);
       });
     }
   }, [stream, isWatched, isSelf, isMuted, volume]);
 
-  // Aplica o volume ao elemento de vídeo
+  // Aplica o volume salvo (0% a 100% nativo + 101% a 150% via GainNode WebAudio)
   useEffect(() => {
     if (videoRef.current) {
       videoRef.current.muted = isSelf ? true : isMuted;
-      videoRef.current.volume = isSelf ? 0 : Math.min(1.0, isMuted ? 0 : volume / 100);
+      videoRef.current.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
     }
-  }, [volume, isMuted, isSelf]);
+
+    // Se volume > 100 e houver faixa de áudio no stream remoto, aplica ganho extra
+    if (!isSelf && !isMuted && volume > 100 && stream && stream.getAudioTracks().length > 0 && isWatched) {
+      try {
+        if (!audioCtxRef.current) {
+          const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+          audioCtxRef.current = new AudioCtx();
+        }
+        const ctx = audioCtxRef.current;
+        if (ctx.state === 'suspended') {
+          ctx.resume().catch(() => {});
+        }
+        if (!boostSourceRef.current) {
+          boostSourceRef.current = ctx.createMediaStreamSource(stream);
+          boostGainRef.current = ctx.createGain();
+          boostSourceRef.current.connect(boostGainRef.current);
+          boostGainRef.current.connect(ctx.destination);
+        }
+        if (boostGainRef.current) {
+          // Adiciona somente a diferença acima de 100% (0.0 a 0.5 extra)
+          boostGainRef.current.gain.value = (volume - 100) / 100;
+        }
+      } catch {
+        // fallback silencioso para volume padrão 100%
+      }
+    } else if (boostGainRef.current) {
+      boostGainRef.current.gain.value = 0;
+    }
+  }, [volume, isMuted, isSelf, stream, isWatched]);
+
+  useEffect(() => {
+    return () => {
+      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+      try {
+        boostSourceRef.current?.disconnect();
+        boostGainRef.current?.disconnect();
+        audioCtxRef.current?.close();
+      } catch {}
+    };
+  }, []);
+
+  const handleVolumeUpdate = (newVol: number) => {
+    const clamped = Math.max(0, Math.min(150, Math.round(newVol)));
+    onChangeVolume(clamped);
+    setSavedVolumeFlash(true);
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => setSavedVolumeFlash(false), 1400);
+  };
+
+  // Permite ajustar a altura do áudio girando a roda do mouse sobre o controle de volume
+  const handleVolumeWheel = (e: React.WheelEvent) => {
+    if (isSelf) return;
+    e.preventDefault();
+    const step = e.deltaY < 0 ? 5 : -5;
+    const base = isMuted ? 0 : volume;
+    handleVolumeUpdate(base + step);
+  };
 
   const toggleFullscreen = () => {
     if (!containerRef.current) return;
@@ -108,7 +174,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 Aberta em Janela Flutuante (Popup)
               </h4>
               <p className="text-[11px] text-neutral-400 font-mono mt-0.5 max-w-xs">
-                Controles de tamanho livre, qualidade e áudio disponíveis na janela destacada.
+                Controles de tamanho livre, qualidade e áudio salvos disponíveis na janela destacada.
               </p>
             </div>
             {onOpenPopup && (
@@ -130,9 +196,9 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 className={`w-full h-full object-contain bg-black ${type === 'webcam' && isSelf ? 'scale-x-[-1]' : ''}`}
               />
             ) : (
-              /* Simulação animada ultra suave quando em preview */
+              /* Estado aguardando stream ou reconectando */
               <div className="w-full h-full relative bg-gradient-to-br from-neutral-950 via-neutral-900 to-cyan-950/40 flex items-center justify-center">
-                <div className="text-center space-y-2 p-4">
+                <div className="text-center space-y-2.5 p-4">
                   {type === 'screen' ? (
                     <Gamepad2 className="w-12 h-12 text-cyan-400 mx-auto animate-pulse" />
                   ) : (
@@ -145,14 +211,23 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                     </span>
                     <span>{resolution}</span>
                     <span>{fps} FPS</span>
-                    <span className="text-cyan-400">&lt;28ms RTT</span>
                   </div>
+                  {onResetConnection && !isSelf && (
+                    <button
+                      onClick={onResetConnection}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-cyan-300 text-[11px] font-mono rounded cursor-pointer transition-colors mt-1"
+                      title="Forçar ressincronização da transmissão P2P"
+                    >
+                      <RefreshCw className="w-3 h-3" />
+                      Ressincronizar Stream
+                    </button>
+                  )}
                 </div>
               </div>
             )}
 
             {/* Overlays Superior */}
-            <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 z-10">
+            <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 z-10 flex-wrap">
               <span className="text-[10px] font-mono font-bold bg-neutral-950/80 backdrop-blur border border-neutral-800 px-2 py-0.5 rounded text-white flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
                 {userName} {isSelf && '(Você)'}
@@ -164,10 +239,26 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                   WASAPI {processName ? `[${processName}]` : 'Isolado'}
                 </span>
               )}
+
+              {!isSelf && connectionState && connectionState !== 'connected' && (
+                <span className="text-[10px] font-mono bg-amber-950/90 border border-amber-700 text-amber-300 px-2 py-0.5 rounded backdrop-blur flex items-center gap-1">
+                  <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                  Reconectando P2P...
+                </span>
+              )}
             </div>
 
-            {/* Botões de Ação Superior Direito (Popup + Tela Cheia) */}
+            {/* Botões de Ação Superior Direito (Reset P2P + Popup + Tela Cheia) */}
             <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+              {!isSelf && onResetConnection && (
+                <button
+                  onClick={onResetConnection}
+                  className="p-1.5 bg-neutral-950/80 hover:bg-amber-950 text-neutral-300 hover:text-amber-300 rounded border border-neutral-800 hover:border-amber-700 cursor-pointer backdrop-blur"
+                  title="Resetar e Reconectar este Stream P2P"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              )}
               {onOpenPopup && (
                 <button
                   onClick={onOpenPopup}
@@ -200,50 +291,101 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 {title} ({resolution} · {fps} FPS)
               </p>
             </div>
-            <button
-              onClick={onToggleWatch}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-mono font-semibold rounded cursor-pointer transition-all shadow-sm"
-            >
-              <Eye className="w-3.5 h-3.5" />
-              Assistir Live (On-Demand)
-            </button>
+            <div className="flex items-center justify-center gap-2">
+              <button
+                onClick={onToggleWatch}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-mono font-semibold rounded cursor-pointer transition-all shadow-sm"
+              >
+                <Eye className="w-3.5 h-3.5" />
+                Assistir Live (On-Demand)
+              </button>
+              {onResetConnection && !isSelf && (
+                <button
+                  onClick={onResetConnection}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 hover:text-cyan-300 text-xs font-mono rounded cursor-pointer transition-all"
+                  title="Resetar conexão P2P com este participante"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
           </div>
         )}
       </div>
 
-      {/* Controles de Áudio & Volume Individual */}
-      <div className="p-3 bg-neutral-950/80 border-t border-neutral-800 flex items-center justify-between gap-3">
+      {/* Controles de Áudio & Volume Individual com Memória Persistente */}
+      <div
+        onWheel={handleVolumeWheel}
+        className="p-3 bg-neutral-950/80 border-t border-neutral-800 flex items-center justify-between gap-3"
+      >
         <div className="flex items-center gap-2">
           <button
             onClick={onToggleMute}
+            disabled={isSelf}
             className={`p-1.5 rounded border cursor-pointer transition-colors ${
-              isMuted
+              isSelf
+                ? 'bg-neutral-900/50 border-neutral-800 text-neutral-600 cursor-not-allowed'
+                : isMuted
                 ? 'bg-red-950/60 border-red-800 text-red-400'
                 : 'bg-neutral-900 border-neutral-800 text-neutral-300 hover:text-white'
             }`}
-            title={isMuted ? 'Desmutar' : 'Mutar'}
+            title={
+              isSelf
+                ? 'Sua própria transmissão fica mutada localmente para evitar eco'
+                : isMuted
+                ? 'Desmutar (restaurar volume salvo)'
+                : 'Mutar áudio'
+            }
           >
-            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4 text-cyan-400" />}
+            {isMuted || isSelf ? (
+              <VolumeX className="w-4 h-4" />
+            ) : (
+              <Volume2 className="w-4 h-4 text-cyan-400" />
+            )}
           </button>
 
-          {/* Slider de Volume Individual (0% até 150% boost) */}
+          {/* Slider de Volume Individual (0% até 150% boost) com salvamento automático */}
           <div className="flex items-center gap-2">
             <input
               type="range"
               min={0}
               max={150}
-              value={isMuted ? 0 : volume}
-              onChange={(e) => onChangeVolume(Number(e.target.value))}
-              disabled={isMuted}
+              value={isSelf ? 0 : isMuted ? 0 : volume}
+              onChange={(e) => handleVolumeUpdate(Number(e.target.value))}
+              onDoubleClick={() => !isSelf && handleVolumeUpdate(100)}
+              disabled={isSelf}
+              title="Arraste ou use a roda do mouse para ajustar a altura do áudio (duplo clique volta para 100%). Salvo automaticamente."
               className="w-24 sm:w-28 accent-cyan-400 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
             />
-            <span className="text-[10px] font-mono text-neutral-400 w-8">
-              {isMuted ? '0%' : `${volume}%`}
+            <span
+              onClick={() => !isSelf && handleVolumeUpdate(100)}
+              title="Volume salvo automaticamente para esta transmissão (clique para resetar em 100%)"
+              className={`text-[10px] font-mono w-10 cursor-pointer select-none transition-colors ${
+                !isSelf && volume > 100
+                  ? 'text-amber-400 font-bold'
+                  : 'text-neutral-300 hover:text-cyan-300'
+              }`}
+            >
+              {isSelf ? 'Local' : isMuted ? '0%' : `${volume}%`}
             </span>
+
+            {!isSelf && (
+              <span
+                className={`inline-flex items-center gap-0.5 text-[10px] font-mono px-1.5 py-0.5 rounded border transition-all ${
+                  savedVolumeFlash
+                    ? 'bg-emerald-950/80 border-emerald-700 text-emerald-300'
+                    : 'bg-neutral-900/70 border-neutral-800 text-neutral-500'
+                }`}
+                title={`Altura do áudio (${isMuted ? '0%' : `${volume}%`}) guardada para ${userName}`}
+              >
+                <BookmarkCheck className="w-3 h-3 text-cyan-400" />
+                <span className="hidden sm:inline">{savedVolumeFlash ? 'Salvo!' : 'Salvo'}</span>
+              </span>
+            )}
           </div>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
           {/* Botão de Destacar em Popup */}
           {isWatched && onOpenPopup && !isPoppedOut && (
             <button

@@ -328,40 +328,60 @@ export const FloatingStreamPopup: React.FC<FloatingStreamPopupProps> = ({
           </div>
 
           {/* Barra de Controles Inferior no Vídeo */}
-          <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-neutral-950/90 via-neutral-950/60 to-transparent p-2.5 flex items-center justify-between gap-3 opacity-90 group-hover:opacity-100 transition-opacity">
+          <div
+            onWheel={(e) => {
+              if (isSelf) return;
+              e.preventDefault();
+              const step = e.deltaY < 0 ? 5 : -5;
+              const base = isMuted ? 0 : volume;
+              onChangeVolume(Math.max(0, Math.min(150, base + step)));
+            }}
+            className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-neutral-950/90 via-neutral-950/60 to-transparent p-2.5 flex items-center justify-between gap-3 opacity-90 group-hover:opacity-100 transition-opacity"
+          >
             {/* Controles de Áudio */}
             <div className="flex items-center gap-2">
               <button
                 onClick={onToggleMute}
+                disabled={isSelf}
                 className={`p-1.5 rounded border cursor-pointer transition-colors ${
-                  isMuted
+                  isMuted || isSelf
                     ? 'bg-red-950/80 border-red-800 text-red-400'
                     : 'bg-neutral-900/80 border-neutral-800 text-neutral-300 hover:text-white'
                 }`}
-                title={isMuted ? 'Desmutar' : 'Mutar'}
+                title={isMuted ? 'Desmutar (restaurar volume salvo)' : 'Mutar'}
               >
-                {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5 text-cyan-400" />}
+                {isMuted || isSelf ? (
+                  <VolumeX className="w-3.5 h-3.5" />
+                ) : (
+                  <Volume2 className="w-3.5 h-3.5 text-cyan-400" />
+                )}
               </button>
 
               <input
                 type="range"
                 min={0}
                 max={150}
-                value={isMuted ? 0 : volume}
+                value={isSelf ? 0 : isMuted ? 0 : volume}
                 onChange={(e) => onChangeVolume(Number(e.target.value))}
-                disabled={isMuted}
+                onDoubleClick={() => !isSelf && onChangeVolume(100)}
+                disabled={isSelf}
+                title="Altura do áudio salva automaticamente (use a roda do mouse ou duplo clique para 100%)"
                 className="w-20 sm:w-24 accent-cyan-400 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
               />
-              <span className="text-[10px] text-neutral-400 w-7">
-                {isMuted ? '0%' : `${volume}%`}
+              <span
+                onClick={() => !isSelf && onChangeVolume(100)}
+                className="text-[10px] text-neutral-300 hover:text-cyan-300 w-9 cursor-pointer"
+                title="Volume salvo automaticamente (clique para 100%)"
+              >
+                {isSelf ? 'Local' : isMuted ? '0%' : `${volume}%`}
               </span>
             </div>
 
             {/* Status Discreto de Telemetria P2P */}
             <div className="flex items-center gap-1.5 text-[10px] text-neutral-400">
-              <span className="text-emerald-400">&lt;28ms</span>
+              <span className="text-cyan-400">Vol. Salvo</span>
               <span>·</span>
-              <span>P2P</span>
+              <span className="text-emerald-400">P2P</span>
             </div>
           </div>
         </div>
