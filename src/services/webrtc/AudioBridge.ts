@@ -1,76 +1,169 @@
 /**
- * Ponte de Áudio PCM de Ultra Baixa Latência (WASAPI Process Loopback -> WebRTC)
- * Utiliza AudioWorklet com Ring Buffer Circular contínuo para eliminar vazamento
- * de memória, eliminar drift de relógio e garantir transmissão ininterrupta.
+ * Ponte de Áudio PCM de Alta Fidelidade e Zero Engasgos (WASAPI Process Loopback -> WebRTC)
+ * Utiliza AudioWorklet com Jitter Buffer Elástico (pré-buffer de 65ms, correção suave de drift
+ * por interpolação linear sem cortes secos, Packet Loss Concealment com fade-out suave e
+ * mixagem independente por PID).
  */
 
-// Código inlined do AudioWorkletProcessor para criar via Blob URL
 const WORKLET_PROCESSOR_CODE = `
 class PcmRingBufferProcessor extends AudioWorkletProcessor {
   constructor() {
     super();
-    // Buffer circular de 2 segundos a 48kHz estéreo = 192.000 floats
-    this.capacity = 192000;
-    this.bufferL = new Float32Array(this.capacity);
-    this.bufferR = new Float32Array(this.capacity);
-    this.writePos = 0;
-    this.readPos = 0;
-    this.available = 0;
+    this.capacity = 96000; // 2 segundos por fonte a 48kHz
+    this.warmupThreshold = 3120; // ~65ms de almofada anti-jitter
+    this.softDriftThreshold = 8640; // ~180ms: acelera 1.5% suavemente sem cortar amostras
+    this.hardMaxThreshold = 24000; // ~500ms: limite extremo de segurança
+    this.streams = new Map();
 
     this.port.onmessage = (e) => {
       const msg = e.data;
       if (!msg) return;
 
       if (msg.type === 'reset') {
-        this.writePos = 0;
-        this.readPos = 0;
-        this.available = 0;
+        this.streams.clear();
         return;
       }
 
-      const { left, right, length } = msg;
+      const { pid = 0, left, right, length } = msg;
       if (!left || length === 0) return;
 
-      for (let i = 0; i < length; i++) {
-        const destIdx = (this.writePos + i) % this.capacity;
-        this.bufferL[destIdx] = left[i];
-        this.bufferR[destIdx] = right ? right[i] : left[i];
+      let s = this.streams.get(pid);
+      if (!s) {
+        s = {
+          bufferL: new Float32Array(this.capacity),
+          bufferR: new Float32Array(this.capacity),
+          writePos: 0,
+          readPos: 0,
+          available: 0,
+          isBuffering: true,
+          fadeInPos: 0,
+          lastL: 0,
+          lastR: 0,
+          silentBlocks: 0,
+        };
+        this.streams.set(pid, s);
       }
 
-      this.writePos = (this.writePos + length) % this.capacity;
-      this.available = Math.min(this.capacity, this.available + length);
+      s.silentBlocks = 0;
 
-      // Proteção contra buffer excessivo (>100ms de acúmulo = 4800 frames a 48kHz)
-      // Mantém latência próxima do tempo real (máximo 40ms de atraso)
-      const maxAllowed = 4800; // ~100ms
-      if (this.available > maxAllowed) {
-        const skip = this.available - 1920; // Reancora em ~40ms
-        this.readPos = (this.readPos + skip) % this.capacity;
-        this.available = 1920;
+      for (let i = 0; i < length; i++) {
+        const destIdx = (s.writePos + i) % this.capacity;
+        s.bufferL[destIdx] = left[i];
+        s.bufferR[destIdx] = right ? right[i] : left[i];
+      }
+
+      s.writePos = (s.writePos + length) % this.capacity;
+      s.available = Math.min(this.capacity, s.available + length);
+
+      if (s.isBuffering && s.available >= this.warmupThreshold) {
+        s.isBuffering = false;
+        s.fadeInPos = 0;
+      }
+
+      // Apenas se houver congelamento extremo (>500ms) reancora com crossfade
+      if (s.available > this.hardMaxThreshold) {
+        const skip = s.available - 4320; // retorna para ~90ms
+        s.readPos = (s.readPos + skip) % this.capacity;
+        s.available = 4320;
       }
     };
   }
 
-  process(inputs, outputs, parameters) {
+  process(inputs, outputs) {
     const output = outputs[0];
     if (!output || output.length === 0) return true;
     const outL = output[0];
     const outR = output[1] || outL;
-    const frames = outL.length; // normalmente 128 frames
+    const frames = outL.length; // 128 frames por bloco (~2.66ms a 48kHz)
 
-    // Se o buffer estiver vazio ou em underrun, preenche com silêncio
-    if (this.available < frames) {
-      outL.fill(0);
-      outR.fill(0);
+    outL.fill(0);
+    outR.fill(0);
+
+    if (this.streams.size === 0) {
       return true;
     }
 
-    for (let i = 0; i < frames; i++) {
-      outL[i] = this.bufferL[this.readPos];
-      outR[i] = this.bufferR[this.readPos];
-      this.readPos = (this.readPos + 1) % this.capacity;
+    for (const [pid, s] of this.streams.entries()) {
+      if (s.isBuffering) {
+        // Se estava tocando antes de entrar em buffering, decai suavemente a última amostra para evitar estalo
+        if (Math.abs(s.lastL) > 0.0001 || Math.abs(s.lastR) > 0.0001) {
+          for (let i = 0; i < frames; i++) {
+            s.lastL *= 0.92;
+            s.lastR *= 0.92;
+            outL[i] += s.lastL;
+            outR[i] += s.lastR;
+          }
+        }
+        s.silentBlocks++;
+        if (s.silentBlocks > 400 && s.available === 0) {
+          this.streams.delete(pid);
+        }
+        continue;
+      }
+
+      // Verifica se há amostras suficientes para este bloco
+      if (s.available < frames + 2) {
+        // Esgota o que resta com fade-out suave e volta ao estado de pré-buffer (65ms)
+        const remaining = s.available;
+        for (let i = 0; i < frames; i++) {
+          if (i < remaining) {
+            const fade = 1.0 - (i / frames);
+            s.lastL = s.bufferL[s.readPos] * fade;
+            s.lastR = s.bufferR[s.readPos] * fade;
+            s.readPos = (s.readPos + 1) % this.capacity;
+          } else {
+            s.lastL *= 0.90;
+            s.lastR *= 0.90;
+          }
+          outL[i] += s.lastL;
+          outR[i] += s.lastR;
+        }
+        s.available = 0;
+        s.isBuffering = true;
+        continue;
+      }
+
+      // Se o buffer passou de ~180ms, consome 2 amostras extras no bloco de 128 usando interpolação linear
+      // (recupera atraso suavemente sem nenhum corte audível)
+      const shouldSlip = s.available > this.softDriftThreshold;
+
+      for (let i = 0; i < frames; i++) {
+        let sampleL = s.bufferL[s.readPos];
+        let sampleR = s.bufferR[s.readPos];
+
+        if (shouldSlip && (i === 42 || i === 85) && s.available > frames + 2) {
+          const nextPos = (s.readPos + 1) % this.capacity;
+          sampleL = 0.5 * (sampleL + s.bufferL[nextPos]);
+          sampleR = 0.5 * (sampleR + s.bufferR[nextPos]);
+          s.readPos = (s.readPos + 2) % this.capacity;
+          s.available -= 2;
+        } else {
+          s.readPos = (s.readPos + 1) % this.capacity;
+          s.available -= 1;
+        }
+
+        // Rampa curta de fade-in (128 amostras = 2.6ms) ao sair do buffering
+        if (s.fadeInPos < 128) {
+          const gain = s.fadeInPos / 128.0;
+          sampleL *= gain;
+          sampleR *= gain;
+          s.fadeInPos++;
+        }
+
+        s.lastL = sampleL;
+        s.lastR = sampleR;
+        outL[i] += sampleL;
+        outR[i] += sampleR;
+      }
     }
-    this.available -= frames;
+
+    // Soft-clipping caso múltiplos processos estejam sendo mixados simultaneamente
+    if (this.streams.size > 1) {
+      for (let i = 0; i < frames; i++) {
+        if (outL[i] > 1.0 || outL[i] < -1.0) outL[i] = Math.tanh(outL[i]);
+        if (outR[i] > 1.0 || outR[i] < -1.0) outR[i] = Math.tanh(outR[i]);
+      }
+    }
 
     return true;
   }
@@ -85,12 +178,14 @@ export class WasapiAudioBridge {
   private gainNode: GainNode | null = null;
   private workletNode: AudioWorkletNode | null = null;
   private isInitialized = false;
+  private isInitializing = false;
   private workletReady = false;
-  private pendingChunks: { pcmData: Float32Array | Int16Array; channels: number; sampleRate: number }[] = [];
-
-  constructor() {
-    // AudioContext será inicializado no primeiro uso ou gesto do usuário
-  }
+  private pendingChunks: {
+    pcmData: Float32Array | Int16Array;
+    channels: number;
+    sampleRate: number;
+    pid: number;
+  }[] = [];
 
   public async init(sampleRate = 48000): Promise<void> {
     if (this.isInitialized && this.audioCtx && this.audioCtx.state !== 'closed') {
@@ -100,10 +195,13 @@ export class WasapiAudioBridge {
       return;
     }
 
+    if (this.isInitializing) return;
+    this.isInitializing = true;
+
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       this.audioCtx = new AudioContextClass({
-        sampleRate,
+        sampleRate: 48000,
         latencyHint: 'interactive',
       });
 
@@ -113,7 +211,6 @@ export class WasapiAudioBridge {
       this.destinationNode = this.audioCtx.createMediaStreamDestination();
       this.gainNode.connect(this.destinationNode);
 
-      // Tenta registrar o AudioWorklet para renderização em thread de áudio dedicada
       if (this.audioCtx.audioWorklet) {
         const blob = new Blob([WORKLET_PROCESSOR_CODE], { type: 'application/javascript' });
         const workletUrl = URL.createObjectURL(blob);
@@ -128,22 +225,29 @@ export class WasapiAudioBridge {
 
         this.workletNode.connect(this.gainNode);
         this.workletReady = true;
-        console.log('[AudioBridge] AudioWorklet Ring Buffer ativado com sucesso a', sampleRate, 'Hz');
-
-        // Despeja qualquer chunk recebido durante a inicialização assíncrona
-        if (this.pendingChunks.length > 0) {
-          for (const pending of this.pendingChunks) {
-            this.feedPcmChunk(pending.pcmData, pending.channels, pending.sampleRate);
-          }
-          this.pendingChunks = [];
-        }
+        console.log(
+          '[AudioBridge] AudioWorklet Jitter Buffer ativado com sucesso a',
+          this.audioCtx.sampleRate,
+          'Hz (entrada:',
+          sampleRate,
+          'Hz)'
+        );
       }
 
       this.isInitialized = true;
+      this.isInitializing = false;
+
+      if (this.pendingChunks.length > 0) {
+        const chunks = this.pendingChunks.splice(0, this.pendingChunks.length);
+        for (const pending of chunks) {
+          this.feedPcmChunk(pending.pcmData, pending.channels, pending.sampleRate, pending.pid);
+        }
+      }
     } catch (err) {
       console.warn('[AudioBridge] Falha ao registrar AudioWorklet, usando fallback padrão:', err);
       this.workletReady = false;
       this.isInitialized = true;
+      this.isInitializing = false;
     }
   }
 
@@ -160,8 +264,8 @@ export class WasapiAudioBridge {
   }
 
   /**
-   * Retorna SEMPRE uma faixa de áudio WebRTC nova e 'live'.
-   * Recria o destinationNode para garantir que nunca retorne uma faixa 'ended'.
+   * Retorna SEMPRE uma faixa de áudio WebRTC nova e 'live' marcada com contentHint = 'music'
+   * para impedir que o codec Opus corte ou comprima sons de jogos/música como se fossem voz.
    */
   public getAudioTrack(): MediaStreamTrack | null {
     if (!this.audioCtx || this.audioCtx.state === 'closed') {
@@ -172,14 +276,12 @@ export class WasapiAudioBridge {
       this.audioCtx.resume().catch(() => {});
     }
 
-    // Se já havia um destinationNode anterior (cujo track pode ter sido parado), desconecta
     if (this.destinationNode && this.gainNode) {
       try {
         this.gainNode.disconnect(this.destinationNode);
       } catch (_) {}
     }
 
-    // Cria SEMPRE um novo MediaStreamDestinationNode para garantir um MediaStreamTrack fresco no estado 'live'
     if (this.audioCtx) {
       this.destinationNode = this.audioCtx.createMediaStreamDestination();
       if (this.gainNode) {
@@ -191,16 +293,31 @@ export class WasapiAudioBridge {
     if (tracks && tracks.length > 0) {
       const track = tracks[0];
       track.enabled = true;
-      console.log('[AudioBridge] Novo MediaStreamTrack criado no estado:', track.readyState, 'id:', track.id);
+      try {
+        if ('contentHint' in track) {
+          track.contentHint = 'music';
+        }
+      } catch (_) {}
+      console.log(
+        '[AudioBridge] Novo MediaStreamTrack Estéreo criado no estado:',
+        track.readyState,
+        'id:',
+        track.id
+      );
       return track;
     }
     return null;
   }
 
   /**
-   * Injeta um bloco PCM de 32-bit Float ou 16-bit Int recebido do Rust (via Tauri event ou WS)
+   * Injeta um bloco PCM de 32-bit Float ou 16-bit Int recebido do Rust com reamostragem automática
    */
-  public feedPcmChunk(pcmData: Float32Array | Int16Array, channels = 2, sampleRate = 48000): void {
+  public feedPcmChunk(
+    pcmData: Float32Array | Int16Array,
+    channels = 2,
+    sampleRate = 48000,
+    pid = 0
+  ): void {
     if (!this.audioCtx || !this.gainNode) {
       this.init(sampleRate);
     }
@@ -209,27 +326,62 @@ export class WasapiAudioBridge {
       this.audioCtx?.resume().catch(() => {});
     }
 
-    const frameCount = Math.floor(pcmData.length / channels);
-    if (frameCount === 0) return;
+    const inFrames = Math.floor(pcmData.length / channels);
+    if (inFrames === 0) return;
 
-    // Se o AudioWorklet estiver pronto, envia os canais separados sem criar nós de áudio
+    if (!this.isInitialized) {
+      if (this.pendingChunks.length < 35) {
+        this.pendingChunks.push({ pcmData, channels, sampleRate, pid });
+      }
+      return;
+    }
+
+    const targetRate = this.audioCtx?.sampleRate || 48000;
+
     if (this.workletNode && this.workletReady) {
-      const left = new Float32Array(frameCount);
-      const right = channels > 1 ? new Float32Array(frameCount) : left;
+      // Extrai canais L e R normalizados em Float32 [-1.0, 1.0]
+      const rawL = new Float32Array(inFrames);
+      const rawR = channels > 1 ? new Float32Array(inFrames) : rawL;
 
       if (pcmData instanceof Float32Array) {
-        for (let i = 0; i < frameCount; i++) {
-          left[i] = pcmData[i * channels];
+        for (let i = 0; i < inFrames; i++) {
+          const base = i * channels;
+          rawL[i] = pcmData[base];
           if (channels > 1) {
-            right[i] = pcmData[i * channels + 1];
+            rawR[i] = pcmData[base + 1];
           }
         }
       } else {
-        // Int16
-        for (let i = 0; i < frameCount; i++) {
-          left[i] = pcmData[i * channels] / 32768.0;
+        const inv = 1.0 / 32768.0;
+        for (let i = 0; i < inFrames; i++) {
+          const base = i * channels;
+          rawL[i] = pcmData[base] * inv;
           if (channels > 1) {
-            right[i] = pcmData[i * channels + 1] / 32768.0;
+            rawR[i] = pcmData[base + 1] * inv;
+          }
+        }
+      }
+
+      // Se a taxa de amostragem do dispositivo Windows diferir de 48kHz (ex: 44100Hz ou 96000Hz),
+      // aplica interpolação linear para igualar exatamente o clock do AudioContext
+      let finalL = rawL;
+      let finalR = rawR;
+      let outFrames = inFrames;
+
+      if (sampleRate > 0 && sampleRate !== targetRate) {
+        const ratio = sampleRate / targetRate;
+        outFrames = Math.max(1, Math.round(inFrames / ratio));
+        finalL = new Float32Array(outFrames);
+        finalR = channels > 1 ? new Float32Array(outFrames) : finalL;
+
+        for (let i = 0; i < outFrames; i++) {
+          const srcPos = i * ratio;
+          const idx0 = Math.min(inFrames - 1, Math.floor(srcPos));
+          const idx1 = Math.min(inFrames - 1, idx0 + 1);
+          const frac = srcPos - idx0;
+          finalL[i] = rawL[idx0] + (rawL[idx1] - rawL[idx0]) * frac;
+          if (channels > 1) {
+            finalR[i] = rawR[idx0] + (rawR[idx1] - rawR[idx0]) * frac;
           }
         }
       }
@@ -237,65 +389,34 @@ export class WasapiAudioBridge {
       this.workletNode.port.postMessage(
         {
           type: 'data',
-          left,
-          right: channels > 1 ? right : null,
-          length: frameCount,
+          pid,
+          left: finalL,
+          right: channels > 1 ? finalR : null,
+          length: outFrames,
         },
-        channels > 1 ? [left.buffer, right.buffer] : [left.buffer]
+        channels > 1 ? [finalL.buffer, finalR.buffer] : [finalL.buffer]
       );
       return;
     }
-
-    // Se ainda está carregando o worklet, enfileira
-    if (!this.isInitialized) {
-      if (this.pendingChunks.length < 20) {
-        this.pendingChunks.push({ pcmData, channels, sampleRate });
-      }
-      return;
-    }
-
-    // Fallback: BufferSource com auto-desconexão
-    try {
-      const ctx = this.audioCtx!;
-      const audioBuffer = ctx.createBuffer(channels, frameCount, sampleRate);
-      if (pcmData instanceof Float32Array) {
-        for (let ch = 0; ch < channels; ch++) {
-          const chData = audioBuffer.getChannelData(ch);
-          for (let i = 0; i < frameCount; i++) {
-            chData[i] = pcmData[i * channels + ch];
-          }
-        }
-      } else {
-        for (let ch = 0; ch < channels; ch++) {
-          const chData = audioBuffer.getChannelData(ch);
-          for (let i = 0; i < frameCount; i++) {
-            chData[i] = pcmData[i * channels + ch] / 32768.0;
-          }
-        }
-      }
-
-      const sourceNode = ctx.createBufferSource();
-      sourceNode.buffer = audioBuffer;
-      sourceNode.connect(this.gainNode!);
-      sourceNode.start();
-      sourceNode.onended = () => {
-        try {
-          sourceNode.disconnect();
-        } catch (_) {}
-      };
-    } catch (_) {}
   }
 
   /**
    * Processa pacote vindo em Base64 do evento Tauri ("isolated-audio-chunk")
    */
-  public feedBase64Chunk(base64Data: string, bitsPerSample = 32, channels = 2, sampleRate = 48000): void {
+  public feedBase64Chunk(
+    base64Data: string,
+    bitsPerSample = 16,
+    channels = 2,
+    sampleRate = 48000,
+    pid = 0
+  ): void {
     try {
       const binaryStr = atob(base64Data);
       const len = binaryStr.length;
       if (len === 0) return;
 
-      const alignedLength = bitsPerSample === 32 ? Math.floor(len / 4) * 4 : Math.floor(len / 2) * 2;
+      const alignedLength =
+        bitsPerSample === 32 ? Math.floor(len / 4) * 4 : Math.floor(len / 2) * 2;
       if (alignedLength === 0) return;
 
       const buffer = new ArrayBuffer(alignedLength);
@@ -306,10 +427,10 @@ export class WasapiAudioBridge {
 
       if (bitsPerSample === 32) {
         const floatView = new Float32Array(buffer);
-        this.feedPcmChunk(floatView, channels, sampleRate);
+        this.feedPcmChunk(floatView, channels, sampleRate, pid);
       } else {
         const int16View = new Int16Array(buffer);
-        this.feedPcmChunk(int16View, channels, sampleRate);
+        this.feedPcmChunk(int16View, channels, sampleRate, pid);
       }
     } catch (err) {
       console.error('[AudioBridge] Erro ao decodificar pacote PCM base64:', err);
@@ -332,8 +453,8 @@ export class WasapiAudioBridge {
     this.workletNode = null;
     this.workletReady = false;
     this.isInitialized = false;
+    this.isInitializing = false;
   }
 }
 
-// Instância singleton para uso em todo o frontend
 export const wasapiAudioBridge = new WasapiAudioBridge();

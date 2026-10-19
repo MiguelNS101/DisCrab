@@ -78,6 +78,7 @@ export default function App() {
     reconnectAllPeers,
     resetPeerConnection,
     startScreenShare,
+    updateStreamQuality,
     stopScreenShare,
     toggleWebcam,
     requestPeerStream,
@@ -94,6 +95,15 @@ export default function App() {
   const [isolateAudio, setIsolateAudio] = useState<boolean>(true);
   const [fps, setFps] = useState<30 | 60>(60);
   const [resolution, setResolution] = useState<'720p' | '1080p' | '1440p'>('1080p');
+
+  // Atualiza resolução, escala, bitrate e FPS em tempo real durante a transmissão ativa
+  useEffect(() => {
+    if (isScreenSharing) {
+      updateStreamQuality(resolution, fps).catch((err) =>
+        console.warn('[App] Erro ao atualizar qualidade da transmissão em tempo real:', err)
+      );
+    }
+  }, [resolution, fps, isScreenSharing, updateStreamQuality]);
 
   // Adiciona ou remove janela da lista de mixagem de áudio
   const handleToggleAudioCustomWindow = (win: WindowItem) => {
@@ -135,12 +145,15 @@ export default function App() {
       }
       return `${audioCustomWindows.length} Janelas Mixadas (${audioCustomWindows.map((w) => w.process_name).join(', ')})`;
     }
-    return selectedWindow ? `${selectedWindow.process_name} (PID ${selectedWindow.pid})` : 'Tela Inteira (Sem Discord)';
+    return selectedWindow ? `${selectedWindow.process_name} (PID ${selectedWindow.pid})` : 'Janela / Tela (Sem Discord)';
   };
 
-  // Alternância dinâmica de áudio WASAPI em tempo real durante a live (suporte a mixagem de múltiplos PIDs)
+  // Alternância dinâmica de áudio WASAPI em tempo real quando o usuário muda a fonte durante a live
   useEffect(() => {
     if (isScreenSharing && isolateAudio && isTauriEnvironment()) {
+      if (audioSourceMode === 'selected_window' && !selectedWindow) {
+        return; // Preserva o PID detectado automaticamente da janela escolhida no picker
+      }
       const pids = getEffectiveAudioPids();
       startNativeMultiProcessAudio(pids).catch((err) =>
         console.warn('[App] Erro ao alternar fontes de áudio nativas:', err)
@@ -170,8 +183,8 @@ export default function App() {
         user_name: p.nickname,
         type: 'screen',
         title: p.screenTitle || 'Tela do Amigo',
-        resolution: '1080p',
-        fps: 60,
+        resolution: p.screenResolution || '1080p',
+        fps: p.screenFps || 60,
         volume: savedVol,
         is_muted: savedVol === 0,
         is_watched: !!p.screenStream,
@@ -215,15 +228,8 @@ export default function App() {
       stopScreenShare();
     } else {
       const title = selectedWindow ? selectedWindow.title : 'Tela do Usuário';
-      // Se não houver janela selecionada e o usuário estiver compartilhando tela inteira, define default para sem discord
-      if (!selectedWindow && audioSourceMode === 'selected_window') {
-        setAudioSourceMode('all_except_discord');
-      }
-      await startScreenShare(title, fps, resolution, isolateAudio);
-      if (isTauriEnvironment() && isolateAudio) {
-        const pids = getEffectiveAudioPids();
-        await startNativeMultiProcessAudio(pids).catch(() => {});
-      }
+      const pids = getEffectiveAudioPids();
+      await startScreenShare(title, fps, resolution, isolateAudio, pids);
     }
   };
 

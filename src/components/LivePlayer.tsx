@@ -64,61 +64,73 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   const [savedVolumeFlash, setSavedVolumeFlash] = useState(false);
   const flashTimerRef = useRef<any>(null);
 
-  // Web Audio API para amplificação real acima de 100% (101% até 150% boost)
+  // Web Audio API para amplificação limpa acima de 100% (101% até 150% boost) sem duplicação de fase
   const audioCtxRef = useRef<AudioContext | null>(null);
   const boostGainRef = useRef<GainNode | null>(null);
   const boostSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const boostStreamRef = useRef<MediaStream | null>(null);
 
-  // Vincula o MediaStream nativo da RTCPeerConnection ao elemento <video>
+  // Vincula o MediaStream nativo da RTCPeerConnection ao elemento <video> apenas quando o stream muda
   useEffect(() => {
     const el = videoRef.current;
-    if (el && stream && isWatched) {
+    if (el && stream && isWatched && !isPoppedOut) {
       if (el.srcObject !== stream) {
         el.srcObject = stream;
       }
-      el.muted = isSelf ? true : isMuted;
-      el.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
       el.play().catch((err) => {
         console.warn('[LivePlayer] Autoplay restrito pelo navegador, aguardando interação do usuário:', err);
       });
     }
-  }, [stream, isWatched, isSelf, isMuted, volume]);
+  }, [stream, isWatched, isPoppedOut]);
 
-  // Aplica o volume salvo (0% a 100% nativo + 101% a 150% via GainNode WebAudio)
+  // Aplica o volume salvo sem reiniciar o elemento <video> nem causar eco entre <video> e WebAudio
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.muted = isSelf ? true : isMuted;
-      videoRef.current.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
-    }
+    const el = videoRef.current;
+    const hasAudioTracks = !!stream && stream.getAudioTracks().length > 0;
+    const useBoost = !isSelf && !isMuted && volume > 100 && hasAudioTracks && isWatched && !isPoppedOut;
 
-    // Se volume > 100 e houver faixa de áudio no stream remoto, aplica ganho extra
-    if (!isSelf && !isMuted && volume > 100 && stream && stream.getAudioTracks().length > 0 && isWatched) {
+    if (useBoost && stream) {
       try {
-        if (!audioCtxRef.current) {
+        if (!audioCtxRef.current || audioCtxRef.current.state === 'closed') {
           const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-          audioCtxRef.current = new AudioCtx();
+          audioCtxRef.current = new AudioCtx({ latencyHint: 'interactive' });
         }
         const ctx = audioCtxRef.current;
         if (ctx.state === 'suspended') {
           ctx.resume().catch(() => {});
         }
-        if (!boostSourceRef.current) {
+        if (boostStreamRef.current !== stream) {
+          try {
+            boostSourceRef.current?.disconnect();
+            boostGainRef.current?.disconnect();
+          } catch {}
           boostSourceRef.current = ctx.createMediaStreamSource(stream);
           boostGainRef.current = ctx.createGain();
           boostSourceRef.current.connect(boostGainRef.current);
           boostGainRef.current.connect(ctx.destination);
+          boostStreamRef.current = stream;
         }
         if (boostGainRef.current) {
-          // Adiciona somente a diferença acima de 100% (0.0 a 0.5 extra)
-          boostGainRef.current.gain.value = (volume - 100) / 100;
+          boostGainRef.current.gain.value = volume / 100;
         }
+        // Silencia a saída direta do <video> enquanto o WebAudio assume com ganho > 100% para evitar eco/comb-filtering
+        if (el) {
+          el.muted = true;
+        }
+        return;
       } catch {
-        // fallback silencioso para volume padrão 100%
+        // fallback para áudio nativo do elemento <video>
       }
-    } else if (boostGainRef.current) {
+    }
+
+    if (boostGainRef.current) {
       boostGainRef.current.gain.value = 0;
     }
-  }, [volume, isMuted, isSelf, stream, isWatched]);
+    if (el) {
+      el.muted = isSelf ? true : isMuted;
+      el.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
+    }
+  }, [volume, isMuted, isSelf, stream, isWatched, isPoppedOut]);
 
   useEffect(() => {
     return () => {

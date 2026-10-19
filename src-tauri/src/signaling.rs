@@ -52,12 +52,16 @@ pub enum SignalingMessage {
         payload: serde_json::Value,
     },
 
-    // Notificação de estado de live / webcam (preservando IDs das tracks no servidor)
+    // Notificação de estado de live / webcam (preservando IDs das tracks e qualidade no servidor)
     #[serde(rename = "stream_status")]
     StreamStatus {
         peer_id: String,
         has_screen: bool,
         screen_title: Option<String>,
+        #[serde(default)]
+        screen_resolution: Option<String>,
+        #[serde(default)]
+        screen_fps: Option<u32>,
         #[serde(default)]
         screen_track_id: Option<String>,
         has_webcam: bool,
@@ -92,6 +96,10 @@ pub struct PeerSummary {
     #[serde(default)]
     pub screen_title: Option<String>,
     #[serde(default)]
+    pub screen_resolution: Option<String>,
+    #[serde(default)]
+    pub screen_fps: Option<u32>,
+    #[serde(default)]
     pub screen_track_id: Option<String>,
     #[serde(default)]
     pub has_webcam: bool,
@@ -108,6 +116,8 @@ pub struct PeerSession {
     pub is_host: bool,
     pub has_screen: bool,
     pub screen_title: Option<String>,
+    pub screen_resolution: Option<String>,
+    pub screen_fps: Option<u32>,
     pub screen_track_id: Option<String>,
     pub has_webcam: bool,
     pub webcam_track_id: Option<String>,
@@ -295,7 +305,16 @@ async fn handle_connection(
                 let (stale_other_ids, preserved_stream_state, was_host) = {
                     let mut peers_map = state.peers.lock().await;
                     let mut to_remove = Vec::new();
-                    let mut prev_state = (false, None, None, false, None, false);
+                    let mut prev_state = (
+                        false,
+                        None,
+                        None,
+                        None,
+                        None,
+                        false,
+                        None,
+                        false,
+                    );
                     let mut prev_is_host = false;
 
                     for (existing_id, session) in peers_map.iter() {
@@ -307,6 +326,8 @@ async fn handle_connection(
                             prev_state = (
                                 session.has_screen,
                                 session.screen_title.clone(),
+                                session.screen_resolution.clone(),
+                                session.screen_fps,
                                 session.screen_track_id.clone(),
                                 session.has_webcam,
                                 session.webcam_track_id.clone(),
@@ -355,6 +376,8 @@ async fn handle_connection(
                             is_host: p.is_host,
                             has_screen: p.has_screen,
                             screen_title: p.screen_title.clone(),
+                            screen_resolution: p.screen_resolution.clone(),
+                            screen_fps: p.screen_fps,
                             screen_track_id: p.screen_track_id.clone(),
                             has_webcam: p.has_webcam,
                             webcam_track_id: p.webcam_track_id.clone(),
@@ -377,10 +400,12 @@ async fn handle_connection(
                     is_host,
                     has_screen: preserved_stream_state.0,
                     screen_title: preserved_stream_state.1.clone(),
-                    screen_track_id: preserved_stream_state.2.clone(),
-                    has_webcam: preserved_stream_state.3,
-                    webcam_track_id: preserved_stream_state.4.clone(),
-                    has_isolated_audio: preserved_stream_state.5,
+                    screen_resolution: preserved_stream_state.2.clone(),
+                    screen_fps: preserved_stream_state.3,
+                    screen_track_id: preserved_stream_state.4.clone(),
+                    has_webcam: preserved_stream_state.5,
+                    webcam_track_id: preserved_stream_state.6.clone(),
+                    has_isolated_audio: preserved_stream_state.7,
                 };
 
                 // Registra ou atualiza a sessão
@@ -395,10 +420,12 @@ async fn handle_connection(
                             is_host,
                             has_screen: preserved_stream_state.0,
                             screen_title: preserved_stream_state.1,
-                            screen_track_id: preserved_stream_state.2,
-                            has_webcam: preserved_stream_state.3,
-                            webcam_track_id: preserved_stream_state.4,
-                            has_isolated_audio: preserved_stream_state.5,
+                            screen_resolution: preserved_stream_state.2,
+                            screen_fps: preserved_stream_state.3,
+                            screen_track_id: preserved_stream_state.4,
+                            has_webcam: preserved_stream_state.5,
+                            webcam_track_id: preserved_stream_state.6,
+                            has_isolated_audio: preserved_stream_state.7,
                             connection_seq: my_conn_seq,
                             tx: tx.clone(),
                         },
@@ -478,6 +505,8 @@ async fn handle_connection(
                         SignalingMessage::StreamStatus {
                             has_screen,
                             screen_title,
+                            screen_resolution,
+                            screen_fps,
                             screen_track_id,
                             has_webcam,
                             webcam_track_id,
@@ -490,6 +519,8 @@ async fn handle_connection(
                                 if let Some(session) = peers_map.get_mut(&my_id) {
                                     session.has_screen = has_screen;
                                     session.screen_title = screen_title.clone();
+                                    session.screen_resolution = screen_resolution.clone();
+                                    session.screen_fps = screen_fps;
                                     session.screen_track_id = screen_track_id.clone();
                                     session.has_webcam = has_webcam;
                                     session.webcam_track_id = webcam_track_id.clone();
@@ -501,6 +532,8 @@ async fn handle_connection(
                                 peer_id: my_id.clone(),
                                 has_screen,
                                 screen_title,
+                                screen_resolution,
+                                screen_fps,
                                 screen_track_id,
                                 has_webcam,
                                 webcam_track_id,

@@ -278,6 +278,8 @@ wss.on('connection', (ws: WebSocket) => {
           if (mySession) {
             mySession.has_screen = !!msg.has_screen;
             mySession.screen_title = msg.screen_title;
+            (mySession as any).screen_resolution = msg.screen_resolution;
+            (mySession as any).screen_fps = msg.screen_fps;
             mySession.screen_track_id = msg.screen_track_id;
             mySession.has_webcam = !!msg.has_webcam;
             mySession.webcam_track_id = msg.webcam_track_id;
@@ -289,6 +291,8 @@ wss.on('connection', (ws: WebSocket) => {
             peer_id: authenticatedPeerId,
             has_screen: !!msg.has_screen,
             screen_title: msg.screen_title,
+            screen_resolution: msg.screen_resolution,
+            screen_fps: msg.screen_fps,
             screen_track_id: msg.screen_track_id,
             has_webcam: !!msg.has_webcam,
             webcam_track_id: msg.webcam_track_id,

@@ -368,6 +368,14 @@ fn main() {
 
             // Thread em background que transmite os pacotes PCM isolados para a WebView do Tauri
             std::thread::spawn(move || {
+                #[cfg(windows)]
+                unsafe {
+                    use windows::Win32::System::Threading::{
+                        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+                    };
+                    let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+                }
+
                 loop {
                     match audio_rx.blocking_recv() {
                         Ok(packet) => {
@@ -378,6 +386,7 @@ fn main() {
 
                             #[derive(Serialize, Clone)]
                             struct AudioChunkEvent {
+                                pid: u32,
                                 sample_rate: u32,
                                 channels: u16,
                                 bits_per_sample: u16,
@@ -385,6 +394,7 @@ fn main() {
                             }
 
                             let payload = AudioChunkEvent {
+                                pid: packet.pid,
                                 sample_rate: packet.sample_rate,
                                 channels: packet.channels,
                                 bits_per_sample: packet.bits_per_sample,

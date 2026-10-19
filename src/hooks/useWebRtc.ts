@@ -60,8 +60,10 @@ export interface UseWebRtcReturn {
     title: string,
     fps?: 30 | 60,
     resolution?: '720p' | '1080p' | '1440p',
-    useWasapi?: boolean
+    useWasapi?: boolean,
+    explicitAudioPids?: number[]
   ) => Promise<void>;
+  updateStreamQuality: (resolution: '720p' | '1080p' | '1440p', fps: 30 | 60) => Promise<void>;
   stopScreenShare: () => void;
   toggleWebcam: () => Promise<void>;
   requestPeerStream: (peerId: string, type: 'screen' | 'webcam') => void;
@@ -119,12 +121,13 @@ export function useWebRtc(): UseWebRtcReturn {
 
     if (isTauriEnvironment()) {
       listen<any>('isolated-audio-chunk', (event) => {
-        const { data_base64, bits_per_sample, channels, sample_rate } = event.payload;
+        const { pid, data_base64, bits_per_sample, channels, sample_rate } = event.payload;
         wasapiAudioBridge.feedBase64Chunk(
           data_base64,
           bits_per_sample,
           channels,
-          sample_rate
+          sample_rate,
+          pid ?? 0
         );
       })
         .then((unlisten) => {
@@ -251,11 +254,18 @@ export function useWebRtc(): UseWebRtcReturn {
       title: string,
       fps: 30 | 60 = 60,
       resolution: '720p' | '1080p' | '1440p' = '1080p',
-      useWasapi = true
+      useWasapi = true,
+      explicitAudioPids?: number[]
     ) => {
       const engine = initEngine();
       try {
-        const stream = await engine.startScreenShare(title, fps, resolution, useWasapi);
+        const stream = await engine.startScreenShare(
+          title,
+          fps,
+          resolution,
+          useWasapi,
+          explicitAudioPids
+        );
         setLocalStream(stream);
         setIsScreenSharing(true);
       } catch (err: any) {
@@ -263,6 +273,15 @@ export function useWebRtc(): UseWebRtcReturn {
       }
     },
     [initEngine]
+  );
+
+  const updateStreamQuality = useCallback(
+    async (resolution: '720p' | '1080p' | '1440p', fps: 30 | 60) => {
+      if (engineRef.current) {
+        await engineRef.current.updateStreamQuality(resolution, fps);
+      }
+    },
+    []
   );
 
   const stopScreenShare = useCallback(() => {
@@ -408,6 +427,7 @@ export function useWebRtc(): UseWebRtcReturn {
     reconnectAllPeers,
     resetPeerConnection,
     startScreenShare,
+    updateStreamQuality,
     stopScreenShare,
     toggleWebcam,
     requestPeerStream,
