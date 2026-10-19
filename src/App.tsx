@@ -79,6 +79,7 @@ export default function App() {
     resetPeerConnection,
     startScreenShare,
     updateStreamQuality,
+    getDetectedWindowPid,
     stopScreenShare,
     toggleWebcam,
     requestPeerStream,
@@ -124,11 +125,12 @@ export default function App() {
   // Calcula a lista de PIDs efetivos para captura/mixagem WASAPI
   const getEffectiveAudioPids = (): number[] => {
     if (audioSourceMode === 'all_except_discord') return [0];
+    const fallbackWindowPid = selectedWindow ? selectedWindow.pid : getDetectedWindowPid();
     if (audioSourceMode === 'other_window') {
       if (audioCustomWindows.length > 0) return audioCustomWindows.map((w) => w.pid);
-      return selectedWindow ? [selectedWindow.pid] : [0];
+      return [fallbackWindowPid];
     }
-    return selectedWindow ? [selectedWindow.pid] : [0];
+    return [fallbackWindowPid];
   };
 
   const getEffectiveAudioPid = (): number => {
@@ -145,15 +147,16 @@ export default function App() {
       }
       return `${audioCustomWindows.length} Janelas Mixadas (${audioCustomWindows.map((w) => w.process_name).join(', ')})`;
     }
-    return selectedWindow ? `${selectedWindow.process_name} (PID ${selectedWindow.pid})` : 'Janela / Tela (Sem Discord)';
+    if (selectedWindow) {
+      return `${selectedWindow.process_name} (PID ${selectedWindow.pid})`;
+    }
+    const autoPid = getDetectedWindowPid();
+    return autoPid > 0 ? `Janela Detectada (PID ${autoPid})` : 'Janela / Tela (Sem Discord)';
   };
 
   // Alternância dinâmica de áudio WASAPI em tempo real quando o usuário muda a fonte durante a live
   useEffect(() => {
     if (isScreenSharing && isolateAudio && isTauriEnvironment()) {
-      if (audioSourceMode === 'selected_window' && !selectedWindow) {
-        return; // Preserva o PID detectado automaticamente da janela escolhida no picker
-      }
       const pids = getEffectiveAudioPids();
       startNativeMultiProcessAudio(pids).catch((err) =>
         console.warn('[App] Erro ao alternar fontes de áudio nativas:', err)

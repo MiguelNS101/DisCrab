@@ -64,6 +64,7 @@ export interface UseWebRtcReturn {
     explicitAudioPids?: number[]
   ) => Promise<void>;
   updateStreamQuality: (resolution: '720p' | '1080p' | '1440p', fps: 30 | 60) => Promise<void>;
+  getDetectedWindowPid: () => number;
   stopScreenShare: () => void;
   toggleWebcam: () => Promise<void>;
   requestPeerStream: (peerId: string, type: 'screen' | 'webcam') => void;
@@ -284,6 +285,10 @@ export function useWebRtc(): UseWebRtcReturn {
     []
   );
 
+  const getDetectedWindowPid = useCallback((): number => {
+    return engineRef.current?.getDetectedWindowPid() || 0;
+  }, []);
+
   const stopScreenShare = useCallback(() => {
     if (engineRef.current) {
       engineRef.current.stopScreenShare();
@@ -428,6 +433,7 @@ export function useWebRtc(): UseWebRtcReturn {
     resetPeerConnection,
     startScreenShare,
     updateStreamQuality,
+    getDetectedWindowPid,
     stopScreenShare,
     toggleWebcam,
     requestPeerStream,

@@ -4,11 +4,11 @@
 //! Modos:
 //! - PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE (0): captura SOMENTE a janela/jogo alvo
 //! - PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE (1): captura todo o PC EXCLUINDO o Discord
-//! Garante áudio contínuo a 48kHz Estéreo sem cortes, sem engasgos e com zero eco!
+//! Garante áudio perfeito, isolado e com zero eco!
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::broadcast;
 
 // Constantes da API de Process Loopback do Windows 10 20348+ / Windows 11
@@ -16,13 +16,11 @@ pub const AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK: u32 = 1;
 pub const PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE: u32 = 0;
 pub const PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE: u32 = 1;
 
-// Flags do mixer WASAPI para reamostragem automática no kernel para 48kHz Estéreo
-#[cfg(windows)]
-const STREAMFLAGS_AUTOCONVERTPCM: u32 = 0x8000_0000;
-#[cfg(windows)]
-const STREAMFLAGS_SRC_DEFAULT_QUALITY: u32 = 0x0800_0000;
+// Flags de conversão automática de sample rate do mixer do Windows (caso o hardware não esteja em 48kHz)
+const STREAMFLAGS_AUTOCONVERTPCM: u32 = 0x80000000;
+const STREAMFLAGS_SRC_DEFAULT_QUALITY: u32 = 0x08000000;
 
-/// Representa um pacote de áudio PCM capturado do processo (normalizado em 16-bit Estéreo)
+/// Representa um pacote de áudio PCM capturado do processo
 #[derive(Debug, Clone)]
 pub struct PcmAudioPacket {
     pub pid: u32,
@@ -42,7 +40,7 @@ pub struct ProcessAudioCapturer {
 
 impl ProcessAudioCapturer {
     pub fn new() -> (Self, broadcast::Receiver<PcmAudioPacket>) {
-        let (tx, rx) = broadcast::channel(256);
+        let (tx, rx) = broadcast::channel(512);
         (
             Self {
                 active_flag: Arc::new(Mutex::new(None)),
@@ -77,8 +75,8 @@ impl ProcessAudioCapturer {
         }
         let mut pid_lock = self.target_pid.lock().unwrap();
         *pid_lock = None;
-        let mut active_pids_lock = self.active_pids.lock().unwrap();
-        active_pids_lock.clear();
+        let mut pids_lock = self.active_pids.lock().unwrap();
+        pids_lock.clear();
     }
 
     /// Inicia a captura WASAPI para múltiplos PIDs mixados simultaneamente
@@ -93,10 +91,14 @@ impl ProcessAudioCapturer {
             effective_pids.push(0);
         }
 
-        // Evita reiniciar a captura WASAPI se os mesmos PIDs já estiverem rodando ativamente
+        // Evita reiniciar as threads WASAPI se exatamente os mesmos PIDs já estiverem ativos
         if self.is_running() {
-            let current_pids = self.active_pids.lock().unwrap().clone();
-            if current_pids == effective_pids {
+            let current_pids = self.active_pids.lock().unwrap();
+            if *current_pids == effective_pids {
+                println!(
+                    "[WASAPI] Captura já está ativa para os PIDs {:?}, mantendo fluxo contínuo.",
+                    effective_pids
+                );
                 return Ok(());
             }
         }
@@ -113,8 +115,8 @@ impl ProcessAudioCapturer {
             *flag_guard = Some(new_flag.clone());
             let mut pid_lock = self.target_pid.lock().unwrap();
             *pid_lock = Some(primary_pid);
-            let mut active_pids_lock = self.active_pids.lock().unwrap();
-            *active_pids_lock = effective_pids.clone();
+            let mut pids_lock = self.active_pids.lock().unwrap();
+            *pids_lock = effective_pids.clone();
         }
 
         for target_pid in effective_pids {
@@ -127,7 +129,10 @@ impl ProcessAudioCapturer {
                     .name(format!("wasapi-loopback-pid-{}", target_pid))
                     .spawn(move || {
                         if let Err(e) = run_wasapi_capture_loop(target_pid, running_flag, sender) {
-                            eprintln!("[WASAPI Error] Falha na captura do PID {}: {}", target_pid, e);
+                            eprintln!(
+                                "[WASAPI Error] Falha na captura do PID {}: {}",
+                                target_pid, e
+                            );
                         }
                     })
                     .map_err(|e| {
@@ -147,28 +152,35 @@ impl ProcessAudioCapturer {
                         let mut sample_index: f32 = 0.0;
                         while running_flag.load(Ordering::SeqCst) {
                             let sample_rate = 48000u32;
-                            let chunk_size = 720; // 15ms a 48kHz
-                            let mut byte_data = Vec::with_capacity(chunk_size * 4);
+                            let chunk_size = 960; // 20ms a 48kHz
+                            let mut pcm_floats = Vec::with_capacity(chunk_size * 2);
 
                             for _ in 0..chunk_size {
                                 let freq = 440.0 + (target_pid as f32 % 5.0) * 80.0;
-                                let val = (sample_index * 2.0 * std::f32::consts::PI * freq / 48000.0).sin() * 0.15;
-                                let s16 = (val.clamp(-1.0, 1.0) * 32767.0) as i16;
-                                byte_data.extend_from_slice(&s16.to_le_bytes());
-                                byte_data.extend_from_slice(&s16.to_le_bytes());
+                                let val = (sample_index * 2.0 * std::f32::consts::PI * freq
+                                    / 48000.0)
+                                    .sin()
+                                    * 0.15;
+                                pcm_floats.push(val);
+                                pcm_floats.push(val);
                                 sample_index += 1.0;
+                            }
+
+                            let mut byte_data = Vec::with_capacity(pcm_floats.len() * 4);
+                            for sample in pcm_floats {
+                                byte_data.extend_from_slice(&sample.to_le_bytes());
                             }
 
                             let packet = PcmAudioPacket {
                                 pid: target_pid,
                                 sample_rate,
                                 channels: 2,
-                                bits_per_sample: 16,
+                                bits_per_sample: 32,
                                 pcm_data: byte_data,
                             };
 
                             let _ = sender.send(packet);
-                            std::thread::sleep(Duration::from_millis(15));
+                            std::thread::sleep(Duration::from_millis(20));
                         }
                     })
                     .map_err(|e| format!("Falha ao criar mock de áudio: {}", e))?;
@@ -342,7 +354,9 @@ unsafe fn activate_process_loopback_client(
         .map_err(|e| format!("Falha ao carregar mmdevapi.dll: {}", e))?;
 
     let proc = GetProcAddress(mmdevapi, windows::core::s!("ActivateAudioInterfaceAsync"))
-        .ok_or_else(|| "ActivateAudioInterfaceAsync não suportado nesta versão do Windows".to_string())?;
+        .ok_or_else(|| {
+            "ActivateAudioInterfaceAsync não suportado nesta versão do Windows".to_string()
+        })?;
 
     let activate_fn: ActivateAudioInterfaceAsyncFn = std::mem::transmute(proc);
 
@@ -476,91 +490,6 @@ pub fn find_discord_root_pid() -> Option<u32> {
     }
 }
 
-/// Converte qualquer buffer capturado (Float32 ou Int16, 1..8 canais) para Estéreo 16-bit Signed PCM (4 bytes/frame)
-#[cfg(windows)]
-fn append_converted_stereo_s16(
-    dst: &mut Vec<u8>,
-    raw_bytes: &[u8],
-    num_frames: usize,
-    channels: usize,
-    bits_per_sample: u16,
-    is_float: bool,
-) {
-    if num_frames == 0 || channels == 0 {
-        return;
-    }
-    let bytes_per_sample = (bits_per_sample as usize) / 8;
-    let frame_stride = channels * bytes_per_sample;
-    if raw_bytes.len() < num_frames * frame_stride {
-        return;
-    }
-
-    dst.reserve(num_frames * 4);
-
-    if is_float && bits_per_sample == 32 {
-        for f in 0..num_frames {
-            let base = f * frame_stride;
-            let l = f32::from_le_bytes([
-                raw_bytes[base],
-                raw_bytes[base + 1],
-                raw_bytes[base + 2],
-                raw_bytes[base + 3],
-            ]);
-            let r = if channels > 1 {
-                f32::from_le_bytes([
-                    raw_bytes[base + 4],
-                    raw_bytes[base + 5],
-                    raw_bytes[base + 6],
-                    raw_bytes[base + 7],
-                ])
-            } else {
-                l
-            };
-            let l_s16 = (l.clamp(-1.0, 1.0) * 32767.0) as i16;
-            let r_s16 = (r.clamp(-1.0, 1.0) * 32767.0) as i16;
-            dst.extend_from_slice(&l_s16.to_le_bytes());
-            dst.extend_from_slice(&r_s16.to_le_bytes());
-        }
-    } else if bits_per_sample == 16 {
-        for f in 0..num_frames {
-            let base = f * frame_stride;
-            let l_s16 = i16::from_le_bytes([raw_bytes[base], raw_bytes[base + 1]]);
-            let r_s16 = if channels > 1 {
-                i16::from_le_bytes([raw_bytes[base + 2], raw_bytes[base + 3]])
-            } else {
-                l_s16
-            };
-            dst.extend_from_slice(&l_s16.to_le_bytes());
-            dst.extend_from_slice(&r_s16.to_le_bytes());
-        }
-    } else if bits_per_sample == 32 {
-        // 32-bit Int PCM
-        for f in 0..num_frames {
-            let base = f * frame_stride;
-            let l_i32 = i32::from_le_bytes([
-                raw_bytes[base],
-                raw_bytes[base + 1],
-                raw_bytes[base + 2],
-                raw_bytes[base + 3],
-            ]);
-            let r_i32 = if channels > 1 {
-                i32::from_le_bytes([
-                    raw_bytes[base + 4],
-                    raw_bytes[base + 5],
-                    raw_bytes[base + 6],
-                    raw_bytes[base + 7],
-                ])
-            } else {
-                l_i32
-            };
-            let l_s16 = (l_i32 >> 16) as i16;
-            let r_s16 = (r_i32 >> 16) as i16;
-            dst.extend_from_slice(&l_s16.to_le_bytes());
-            dst.extend_from_slice(&r_s16.to_le_bytes());
-        }
-    }
-}
-
 #[cfg(windows)]
 fn run_wasapi_capture_loop(
     pid: u32,
@@ -584,7 +513,6 @@ fn run_wasapi_capture_loop(
     };
 
     unsafe {
-        // Eleva prioridade da thread de áudio para que codificação de vídeo 1080p/1440p nunca cause cortes no som
         let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
 
         CoInitializeEx(None, COINIT_MULTITHREADED)
@@ -646,79 +574,54 @@ fn run_wasapi_capture_loop(
             }
         };
 
-        // 4. Preferência 1: Inicializa com AUTOCONVERTPCM em 48.000 Hz, 2 Canais (Estéreo), 32-bit IEEE Float.
-        // O próprio mixer de kernel do Windows converte qualquer headset 44.1kHz/96kHz ou 5.1/7.1 para 48kHz Estéreo!
-        let desired_format = WAVEFORMATEX {
-            wFormatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
-            nChannels: 2,
-            nSamplesPerSec: 48000,
-            nAvgBytesPerSec: 48000 * 2 * 4,
-            nBlockAlign: 8,
-            wBitsPerSample: 32,
-            cbSize: 0,
+        // 4. Obtém o formato de mixagem nativo.
+        // IMPORTANTE: Em Process Loopback Virtual (VAD\Process_Loopback), GetMixFormat retorna E_NOTIMPL
+        // e o dispositivo virtual exige uma struct WAVEFORMATEX simples (cbSize = 0, IEEE_FLOAT 32-bit, 2 canais),
+        // rejeitando WAVEFORMATEXTENSIBLE de hardware!
+        let (wave_format_ptr, should_free) = match audio_client.GetMixFormat() {
+            Ok(ptr) => (ptr, true),
+            Err(_) => {
+                let fmt = Box::new(WAVEFORMATEX {
+                    wFormatTag: 3, // WAVE_FORMAT_IEEE_FLOAT
+                    nChannels: 2,
+                    nSamplesPerSec: 48000,
+                    nAvgBytesPerSec: 48000 * 2 * 4,
+                    nBlockAlign: 2 * 4,
+                    wBitsPerSample: 32,
+                    cbSize: 0,
+                });
+                (Box::into_raw(fmt), false)
+            }
         };
 
-        let autoconvert_flags = AUDCLNT_STREAMFLAGS_LOOPBACK
-            | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-            | STREAMFLAGS_AUTOCONVERTPCM
-            | STREAMFLAGS_SRC_DEFAULT_QUALITY;
+        let wave_format = &*wave_format_ptr;
+        let sample_rate = wave_format.nSamplesPerSec;
+        let channels = wave_format.nChannels;
+        let bits_per_sample = wave_format.wBitsPerSample;
 
-        let mut sample_rate = 48000u32;
-        let mut channels = 2u16;
-        let mut bits_per_sample = 32u16;
-        let mut is_float = true;
-        let mut fallback_format_ptr: Option<*mut WAVEFORMATEX> = None;
-
-        let init_autoconvert = audio_client.Initialize(
+        // 5. Inicializa o cliente WASAPI em modo Loopback.
+        // Tenta primeiro com as flags padrão de Process Loopback e faz fallback com AUTOCONVERTPCM se necessário.
+        let base_flags = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+        let init_res = audio_client.Initialize(
             AUDCLNT_SHAREMODE_SHARED,
-            autoconvert_flags,
-            400_000, // 40ms de buffer interno de baixa latência
+            base_flags,
+            10_000_000, // 1 segundo de buffer
             0,
-            &desired_format,
+            wave_format_ptr,
             None,
         );
 
-        if init_autoconvert.is_err() {
-            // Fallback: usa o formato nativo do endpoint caso AUTOCONVERTPCM não seja aceito pelo driver
-            let endpoint_format = audio_client.GetMixFormat().ok().or_else(|| {
-                let enumerator: IMMDeviceEnumerator =
-                    CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
-                let dev = enumerator.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
-                let client: IAudioClient = dev.Activate(CLSCTX_ALL, None).ok()?;
-                client.GetMixFormat().ok()
-            });
-
-            if let Some(ptr) = endpoint_format {
-                let wf = &*ptr;
-                sample_rate = wf.nSamplesPerSec;
-                channels = wf.nChannels;
-                bits_per_sample = wf.wBitsPerSample;
-                // No Windows MixFormat compartilhado, 32-bit é IEEE Float (wFormatTag == 3 ou WAVE_FORMAT_EXTENSIBLE 0xFFFE)
-                is_float = bits_per_sample == 32;
-                fallback_format_ptr = Some(ptr);
-
-                audio_client
-                    .Initialize(
-                        AUDCLNT_SHAREMODE_SHARED,
-                        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                        1_000_000,
-                        0,
-                        ptr,
-                        None,
-                    )
-                    .map_err(|e| format!("IAudioClient::Initialize (fallback) falhou: {}", e))?;
-            } else {
-                audio_client
-                    .Initialize(
-                        AUDCLNT_SHAREMODE_SHARED,
-                        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-                        1_000_000,
-                        0,
-                        &desired_format,
-                        None,
-                    )
-                    .map_err(|e| format!("IAudioClient::Initialize falhou: {}", e))?;
-            }
+        if init_res.is_err() {
+            audio_client
+                .Initialize(
+                    AUDCLNT_SHAREMODE_SHARED,
+                    base_flags | STREAMFLAGS_AUTOCONVERTPCM | STREAMFLAGS_SRC_DEFAULT_QUALITY,
+                    10_000_000,
+                    0,
+                    wave_format_ptr,
+                    None,
+                )
+                .map_err(|e| format!("IAudioClient::Initialize falhou: {}", e))?;
         }
 
         let event_handle = CreateEventW(None, false, false, None)
@@ -737,21 +640,20 @@ fn run_wasapi_capture_loop(
             .map_err(|e| format!("audio_client.Start falhou: {}", e))?;
 
         println!(
-            "[WASAPI] Captura ativa (PID {}): entrada {} Hz {}ch {}-bit -> saída contínua Estéreo 16-bit",
+            "[WASAPI] Captura de áudio ativa com sucesso (PID {}): {} Hz, {} canais, {}-bit",
             pid, sample_rate, channels, bits_per_sample
         );
 
-        let src_bytes_per_frame = (channels as usize) * ((bits_per_sample as usize) / 8);
-        // Saída sempre em Estéreo 16-bit (4 bytes por frame). Agrupa a cada ~15ms (~720 frames a 48kHz = 2880 bytes)
-        let out_batch_bytes = ((sample_rate as usize) / 66) * 4;
-        let mut accumulated_s16_bytes = Vec::with_capacity(out_batch_bytes * 2);
-        let mut last_dispatch = Instant::now();
+        let bytes_per_frame = (channels as usize) * ((bits_per_sample as usize) / 8);
+        // Agrupa pacotes a cada ~20ms (50 pacotes/s) para estabilidade IPC com baixa latência
+        let batch_threshold_bytes = ((sample_rate as usize) / 50) * bytes_per_frame;
+        let mut accumulated_bytes = Vec::with_capacity(batch_threshold_bytes * 2);
 
-        // 5. Loop de captura de alta precisão (timeout de 10ms para nunca reter amostras no buffer)
+        // 6. Loop contínuo de captura e transmissão PCM
         while running.load(Ordering::SeqCst) {
-            let wait_res = WaitForSingleObject(event_handle, 10);
-            if wait_res == WAIT_OBJECT_0 || wait_res.0 == 0x0000_0102 {
-                // 0x102 == WAIT_TIMEOUT: também verifica se há pacotes disponíveis no capture_client
+            let wait_res = WaitForSingleObject(event_handle, 20);
+            if wait_res == WAIT_OBJECT_0 {
+                let mut read_any = false;
                 loop {
                     let mut data_ptr: *mut u8 = ptr::null_mut();
                     let mut num_frames_read: u32 = 0;
@@ -769,62 +671,60 @@ fn run_wasapi_capture_loop(
                         break;
                     }
 
-                    let frames = num_frames_read as usize;
+                    read_any = true;
+                    let total_bytes = (num_frames_read as usize) * bytes_per_frame;
                     if (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0 || data_ptr.is_null() {
-                        accumulated_s16_bytes.resize(accumulated_s16_bytes.len() + frames * 4, 0);
+                        accumulated_bytes.resize(accumulated_bytes.len() + total_bytes, 0);
                     } else {
-                        let raw_slice =
-                            std::slice::from_raw_parts(data_ptr, frames * src_bytes_per_frame);
-                        append_converted_stereo_s16(
-                            &mut accumulated_s16_bytes,
-                            raw_slice,
-                            frames,
-                            channels as usize,
-                            bits_per_sample,
-                            is_float,
-                        );
-                    }
+                        let slice = std::slice::from_raw_parts(data_ptr, total_bytes);
+                        accumulated_bytes.extend_from_slice(slice);
+                    };
 
                     let _ = capture_client.ReleaseBuffer(num_frames_read);
 
-                    if accumulated_s16_bytes.len() >= out_batch_bytes {
+                    if accumulated_bytes.len() >= batch_threshold_bytes {
                         let packet = PcmAudioPacket {
                             pid,
                             sample_rate,
-                            channels: 2,
-                            bits_per_sample: 16,
+                            channels,
+                            bits_per_sample,
                             pcm_data: std::mem::replace(
-                                &mut accumulated_s16_bytes,
-                                Vec::with_capacity(out_batch_bytes * 2),
+                                &mut accumulated_bytes,
+                                Vec::with_capacity(batch_threshold_bytes * 2),
                             ),
                         };
                         let _ = sender.send(packet);
-                        last_dispatch = Instant::now();
                     }
                 }
-            }
 
-            // Se houver amostras parciais retidas há mais de 15ms, despacha imediatamente para evitar buracos
-            if !accumulated_s16_bytes.is_empty() && last_dispatch.elapsed() >= Duration::from_millis(15) {
+                if !read_any && !accumulated_bytes.is_empty() {
+                    let packet = PcmAudioPacket {
+                        pid,
+                        sample_rate,
+                        channels,
+                        bits_per_sample,
+                        pcm_data: std::mem::take(&mut accumulated_bytes),
+                    };
+                    let _ = sender.send(packet);
+                }
+            } else if !accumulated_bytes.is_empty() {
                 let packet = PcmAudioPacket {
                     pid,
                     sample_rate,
-                    channels: 2,
-                    bits_per_sample: 16,
-                    pcm_data: std::mem::replace(
-                        &mut accumulated_s16_bytes,
-                        Vec::with_capacity(out_batch_bytes * 2),
-                    ),
+                    channels,
+                    bits_per_sample,
+                    pcm_data: std::mem::take(&mut accumulated_bytes),
                 };
                 let _ = sender.send(packet);
-                last_dispatch = Instant::now();
             }
         }
 
         let _ = audio_client.Stop();
         let _ = CloseHandle(event_handle);
-        if let Some(ptr) = fallback_format_ptr {
-            CoTaskMemFree(Some(ptr as *mut _));
+        if should_free {
+            CoTaskMemFree(Some(wave_format_ptr as *mut _));
+        } else {
+            let _ = Box::from_raw(wave_format_ptr as *mut WAVEFORMATEX);
         }
         CoUninitialize();
     }

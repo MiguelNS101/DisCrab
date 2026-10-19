@@ -77,15 +77,22 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       if (el.srcObject !== stream) {
         el.srcObject = stream;
       }
+      el.muted = isSelf ? true : isMuted;
+      el.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
       el.play().catch((err) => {
         console.warn('[LivePlayer] Autoplay restrito pelo navegador, aguardando interação do usuário:', err);
       });
     }
   }, [stream, isWatched, isPoppedOut]);
 
-  // Aplica o volume salvo sem reiniciar o elemento <video> nem causar eco entre <video> e WebAudio
+  // Aplica o volume salvo sem reiniciar o elemento <video> e sem silenciar a faixa WebRTC no Chromium
   useEffect(() => {
     const el = videoRef.current;
+    if (el) {
+      el.muted = isSelf ? true : isMuted;
+      el.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
+    }
+
     const hasAudioTracks = !!stream && stream.getAudioTracks().length > 0;
     const useBoost = !isSelf && !isMuted && volume > 100 && hasAudioTracks && isWatched && !isPoppedOut;
 
@@ -111,11 +118,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
           boostStreamRef.current = stream;
         }
         if (boostGainRef.current) {
-          boostGainRef.current.gain.value = volume / 100;
-        }
-        // Silencia a saída direta do <video> enquanto o WebAudio assume com ganho > 100% para evitar eco/comb-filtering
-        if (el) {
-          el.muted = true;
+          boostGainRef.current.gain.value = (volume - 100) / 100;
         }
         return;
       } catch {
@@ -125,10 +128,6 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
 
     if (boostGainRef.current) {
       boostGainRef.current.gain.value = 0;
-    }
-    if (el) {
-      el.muted = isSelf ? true : isMuted;
-      el.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
     }
   }, [volume, isMuted, isSelf, stream, isWatched, isPoppedOut]);
 
@@ -205,6 +204,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 ref={videoRef}
                 autoPlay
                 playsInline
+                muted={isSelf ? true : isMuted}
                 className={`w-full h-full object-contain bg-black ${type === 'webcam' && isSelf ? 'scale-x-[-1]' : ''}`}
               />
             ) : (

@@ -167,8 +167,13 @@ export class WebRtcEngine {
   private currentResolution: '720p' | '1080p' | '1440p' = '1080p';
   private currentFps: 30 | 60 = 60;
   private nativeCaptureHeight: number = 0;
+  private detectedWindowPid: number = 0;
   private isBroadcastingScreen = false;
   private isBroadcastingWebcam = false;
+
+  public getDetectedWindowPid(): number {
+    return this.detectedWindowPid;
+  }
 
   constructor(callbacks: EngineEventCallback) {
     this.callbacks = callbacks;
@@ -839,8 +844,8 @@ export class WebRtcEngine {
   }
 
   /**
-   * Prioriza o codec H.264 com aceleração de hardware (NVENC / AMF / QuickSync) no transceiver de vídeo
-   * para evitar que o VP8 por software na CPU derrube o framerate em 1080p/1440p.
+   * Prioriza H.264 de alto nível (Level >= 4.0) com aceleração de hardware (NVENC / AMF / QuickSync),
+   * evitando perfis Level 3.1 (42001f/42e01f) que travam a resolução máxima em 720p.
    */
   private preferHardwareH264OnTransceiver(pc: RTCPeerConnection, sender: RTCRtpSender) {
     try {
@@ -851,25 +856,30 @@ export class WebRtcEngine {
       const transceiver = pc.getTransceivers().find((t) => t.sender === sender);
       if (!transceiver || typeof transceiver.setCodecPreferences !== 'function') return;
 
-      const h264Codecs = caps.codecs.filter(
-        (c) =>
-          c.mimeType.toLowerCase() === 'video/h264' &&
-          (!c.sdpFmtpLine || c.sdpFmtpLine.includes('packetization-mode=1'))
-      );
-      const otherCodecs = caps.codecs.filter(
-        (c) => !h264Codecs.includes(c)
-      );
+      const highLevelH264 = caps.codecs.filter((c) => {
+        if (c.mimeType.toLowerCase() !== 'video/h264') return false;
+        const fmtp = c.sdpFmtpLine || '';
+        if (fmtp && !fmtp.includes('packetization-mode=1')) return false;
+        const match = fmtp.match(/profile-level-id=([0-9a-fA-F]{6})/);
+        if (match) {
+          const levelHex = parseInt(match[1].slice(4, 6), 16);
+          // Level 4.0 é 0x28 (40 decimal). Níveis menores como 0x1f (3.1) limitam o vídeo a 720p!
+          return levelHex >= 0x28;
+        }
+        return false;
+      });
 
-      if (h264Codecs.length > 0) {
-        transceiver.setCodecPreferences([...h264Codecs, ...otherCodecs]);
+      if (highLevelH264.length > 0) {
+        const otherCodecs = caps.codecs.filter((c) => !highLevelH264.includes(c));
+        transceiver.setCodecPreferences([...highLevelH264, ...otherCodecs]);
       }
     } catch (err) {
-      console.warn('[WebRTC] Aviso ao definir preferência de codec H.264:', err);
+      console.warn('[WebRTC] Aviso ao definir preferência de codec:', err);
     }
   }
 
   /**
-   * Aplica maxBitrate, maxFramerate, scaleResolutionDownBy, degradationPreference = 'maintain-framerate'
+   * Aplica maxBitrate, maxFramerate, scaleResolutionDownBy, degradationPreference = 'balanced'
    * e prioridade alta para o áudio Opus.
    */
   private applySenderQualityParameters(peerEntry: InternalPeerEntry) {
@@ -883,10 +893,8 @@ export class WebRtcEngine {
           params.encodings = [{}];
         }
 
-        // IMPORTANTE: 'maintain-framerate' impede que o Chromium derrube os FPS quando a resolução sobe para 1080p/1440p!
-        (params as any).degradationPreference = 'maintain-framerate';
+        (params as any).degradationPreference = 'balanced';
 
-        // Calcula scaleResolutionDownBy caso o capturador do Windows mantenha a resolução nativa do monitor
         let scaleDown = 1.0;
         const vTrack = this.localScreenStream?.getVideoTracks()[0];
         const actualHeight = vTrack?.getSettings?.().height || this.nativeCaptureHeight || profile.height;
@@ -924,7 +932,7 @@ export class WebRtcEngine {
   }
 
   /**
-   * Otimiza o SDP para:
+   * Otimiza apenas as linhas a=fmtp do SDP remoto para:
    * 1. Áudio Opus Estéreo 160kbps CBR com usedtx=0 (elimina cortes em sons baixos/música)
    * 2. Vídeo High-Bitrate real de acordo com a resolução (6 Mbps em 720p, 14 Mbps em 1080p, 25 Mbps em 1440p)
    */
@@ -946,13 +954,11 @@ export class WebRtcEngine {
         currentMediaSection = 'application';
       }
 
-      // Configura Opus para som de jogo/música contínuo (Estéreo, 160kbps, CBR, sem corte DTX)
       if (currentMediaSection === 'audio' && line.startsWith('a=fmtp:') && line.includes('minptime=')) {
         const base = line.split(' ')[0];
         line = `${base} minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=160000;cbr=1;usedtx=0`;
       }
 
-      // Injeta parâmetros de bitrate nos codecs de vídeo para destravar o estimador de banda do Chromium
       if (
         currentMediaSection === 'video' &&
         line.startsWith('a=fmtp:') &&
@@ -963,15 +969,6 @@ export class WebRtcEngine {
       }
 
       outLines.push(line);
-
-      // Adiciona linha b=AS e b=TIAS logo após c=IN na seção de vídeo se ainda não existir
-      if (currentMediaSection === 'video' && line.startsWith('c=IN')) {
-        const nextLine = lines[i + 1] || '';
-        if (!nextLine.startsWith('b=AS:')) {
-          outLines.push(`b=AS:${profile.maxBitrateKbps}`);
-          outLines.push(`b=TIAS:${profile.maxBitrate}`);
-        }
-      }
     }
 
     return outLines.join('\r\n');
@@ -1279,7 +1276,15 @@ export class WebRtcEngine {
           } catch {}
         }
 
-        await pc.setRemoteDescription(sdp);
+        try {
+          const enhancedRemote = new RTCSessionDescription({
+            type: sdp.type,
+            sdp: this.enhanceSdpForHighQuality(sdp.sdp || ''),
+          });
+          await pc.setRemoteDescription(enhancedRemote);
+        } catch {
+          await pc.setRemoteDescription(sdp);
+        }
         peerEntry.isSettingRemoteAnswerPending = false;
 
         while (peerEntry.pendingCandidates.length > 0) {
@@ -1291,17 +1296,18 @@ export class WebRtcEngine {
 
         if (sdp.type === 'offer') {
           const answer = await pc.createAnswer();
-          const enhancedAnswer: RTCSessionDescriptionInit = {
-            type: answer.type,
-            sdp: this.enhanceSdpForHighQuality(answer.sdp || ''),
-          };
-          await pc.setLocalDescription(enhancedAnswer);
+          await pc.setLocalDescription(answer);
           this.applySenderQualityParameters(peerEntry);
 
           this.sendWsMessage({
             type: 'webrtc_signal',
             to_peer_id: fromPeerId,
-            payload: { sdp: pc.localDescription },
+            payload: {
+              sdp: {
+                type: pc.localDescription?.type || 'answer',
+                sdp: this.enhanceSdpForHighQuality(pc.localDescription?.sdp || ''),
+              },
+            },
           });
 
           if (!peerEntry.initialHandshakeDone) {
@@ -1466,23 +1472,31 @@ export class WebRtcEngine {
       displaySurface === 'window' || label.toLowerCase().startsWith('window:');
 
     if (isTauriEnvironment() && useWasapiAudio) {
-      if (explicitAudioPids && explicitAudioPids.length > 0 && !(explicitAudioPids.length === 1 && explicitAudioPids[0] === 0 && isWindowChosen)) {
+      if (isWindowChosen) {
+        try {
+          const matchedPid = await findWindowPid(label);
+          if (matchedPid && matchedPid > 0) {
+            this.detectedWindowPid = matchedPid;
+          }
+        } catch {}
+      }
+
+      if (
+        explicitAudioPids &&
+        explicitAudioPids.length > 0 &&
+        !(explicitAudioPids.length === 1 && explicitAudioPids[0] === 0 && isWindowChosen)
+      ) {
         try {
           await startNativeMultiProcessAudio(explicitAudioPids);
         } catch {
           await startNativeProcessAudio(0);
         }
-      } else if (isWindowChosen) {
+      } else if (isWindowChosen && this.detectedWindowPid > 0) {
         try {
-          const matchedPid = await findWindowPid(label);
-          if (matchedPid && matchedPid > 0) {
-            console.log(
-              `[WASAPI] MODO JANELA: Processo alvo vinculado com sucesso (PID: ${matchedPid})`
-            );
-            await startNativeProcessAudio(matchedPid);
-          } else {
-            await startNativeProcessAudio(0);
-          }
+          console.log(
+            `[WASAPI] MODO JANELA: Processo alvo vinculado com sucesso (PID: ${this.detectedWindowPid})`
+          );
+          await startNativeProcessAudio(this.detectedWindowPid);
         } catch {
           await startNativeProcessAudio(0);
         }
@@ -1509,11 +1523,13 @@ export class WebRtcEngine {
       stream.getAudioTracks().forEach((track) => {
         try {
           if ('contentHint' in track) track.contentHint = 'music';
-          track.applyConstraints({
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-          } as any).catch(() => {});
+          track
+            .applyConstraints({
+              echoCancellation: false,
+              noiseSuppression: false,
+              autoGainControl: false,
+            } as any)
+            .catch(() => {});
         } catch {}
       });
     }
@@ -1543,6 +1559,7 @@ export class WebRtcEngine {
       this.localScreenStream = null;
     }
     this.nativeCaptureHeight = 0;
+    this.detectedWindowPid = 0;
     wasapiAudioBridge.resetClock();
     if (isTauriEnvironment()) {
       stopNativeProcessAudio().catch(() => {});
@@ -1644,18 +1661,17 @@ export class WebRtcEngine {
 
     pc.createOffer()
       .then((offer) => {
-        const enhancedOffer: RTCSessionDescriptionInit = {
-          type: offer.type,
-          sdp: this.enhanceSdpForHighQuality(offer.sdp || ''),
-        };
-        return pc.setLocalDescription(enhancedOffer);
+        return pc.setLocalDescription(offer);
       })
       .then(() => {
         this.sendWsMessage({
           type: 'webrtc_signal',
           to_peer_id: peerId,
           payload: {
-            sdp: pc.localDescription,
+            sdp: {
+              type: pc.localDescription?.type || 'offer',
+              sdp: this.enhanceSdpForHighQuality(pc.localDescription?.sdp || ''),
+            },
             ...(isFresh ? { fresh_join: true } : {}),
           },
         });
