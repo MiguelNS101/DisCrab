@@ -1,30 +1,46 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
   Video,
-  VideoOff,
   Minimize2,
   Maximize2,
   FlipHorizontal,
   X,
   GripHorizontal,
-  Sparkles,
+  Tv,
 } from 'lucide-react';
 
 interface WebcamPreviewPipProps {
   stream: MediaStream | null;
   nickname: string;
+  title?: string;
+  sourceKind?: 'webcam' | 'capture_card';
+  isMirrored?: boolean;
+  onToggleMirror?: () => void;
   onStopWebcam: () => void;
 }
 
 export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
   stream,
   nickname,
+  title = 'Sua Câmera (Preview)',
+  sourceKind = 'webcam',
+  isMirrored = false,
+  onToggleMirror,
   onStopWebcam,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [isMirrored, setIsMirrored] = useState(true);
+  const [localMirrored, setLocalMirrored] = useState(false);
   const [isMinimized, setIsMinimized] = useState(false);
   const [size, setSize] = useState<'sm' | 'md' | 'lg'>('md');
+
+  const effectiveMirrored = onToggleMirror ? isMirrored : localMirrored;
+  const handleMirrorClick = () => {
+    if (onToggleMirror) {
+      onToggleMirror();
+    } else {
+      setLocalMirrored((prev) => !prev);
+    }
+  };
 
   // Controle de arrastar (Draggable)
   const [position, setPosition] = useState({ x: 0, y: 0 });
@@ -43,6 +59,7 @@ export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
   }, [stream]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest('button')) return;
     setIsDragging(true);
     dragStartRef.current = {
       mouseX: e.clientX,
@@ -87,7 +104,9 @@ export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
       style={{
         transform: `translate(${position.x}px, ${position.y}px)`,
       }}
-      className={`fixed bottom-5 right-5 z-40 transition-shadow ${widthClass} select-none shadow-2xl rounded-xl bg-neutral-900/95 border border-indigo-500/50 backdrop-blur-md overflow-hidden`}
+      className={`fixed bottom-5 right-5 z-40 transition-shadow ${widthClass} select-none shadow-2xl rounded-xl bg-neutral-900/95 border ${
+        sourceKind === 'capture_card' ? 'border-emerald-500/50' : 'border-indigo-500/50'
+      } backdrop-blur-md overflow-hidden`}
     >
       {/* Barra de Título / Handle de Arraste */}
       <div
@@ -97,21 +116,19 @@ export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
         <div className="flex items-center gap-1.5 overflow-hidden">
           <GripHorizontal className="w-3.5 h-3.5 text-indigo-400 shrink-0 opacity-60" />
           <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
-          <span className="font-bold text-indigo-200 truncate">
-            Sua Câmera (Preview)
-          </span>
+          <span className="font-bold text-indigo-200 truncate">{title}</span>
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
-          {/* Toggle Espelho */}
+          {/* Toggle Espelho / Inverter */}
           <button
-            onClick={() => setIsMirrored(!isMirrored)}
-            className={`p-1 rounded transition-colors ${
-              isMirrored
-                ? 'text-indigo-300 bg-indigo-950/80 border border-indigo-700/60'
+            onClick={handleMirrorClick}
+            className={`p-1 rounded transition-colors cursor-pointer ${
+              effectiveMirrored
+                ? 'text-indigo-200 bg-indigo-950/90 border border-indigo-600/80'
                 : 'text-neutral-400 hover:text-white'
             }`}
-            title={isMirrored ? 'Espelhamento ativado' : 'Espelhamento desativado'}
+            title={effectiveMirrored ? 'Inversão ativada (Clique para normal)' : 'Inverter / Espelhar horizontalmente'}
           >
             <FlipHorizontal className="w-3.5 h-3.5" />
           </button>
@@ -122,7 +139,7 @@ export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
               onClick={() =>
                 setSize((prev) => (prev === 'sm' ? 'md' : prev === 'md' ? 'lg' : 'sm'))
               }
-              className="px-1.5 py-0.5 text-[10px] rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors uppercase font-bold"
+              className="px-1.5 py-0.5 text-[10px] rounded text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors uppercase font-bold cursor-pointer"
               title="Alterar tamanho do preview"
             >
               {size}
@@ -132,7 +149,7 @@ export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
           {/* Minimizar */}
           <button
             onClick={() => setIsMinimized(!isMinimized)}
-            className="p-1 text-neutral-400 hover:text-white rounded hover:bg-neutral-800 transition-colors"
+            className="p-1 text-neutral-400 hover:text-white rounded hover:bg-neutral-800 transition-colors cursor-pointer"
             title={isMinimized ? 'Expandir preview' : 'Minimizar preview'}
           >
             {isMinimized ? <Maximize2 className="w-3.5 h-3.5" /> : <Minimize2 className="w-3.5 h-3.5" />}
@@ -141,8 +158,8 @@ export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
           {/* Desligar Câmera */}
           <button
             onClick={onStopWebcam}
-            className="p-1 text-neutral-400 hover:text-red-400 rounded hover:bg-red-950/60 transition-colors"
-            title="Desligar Webcam"
+            className="p-1 text-neutral-400 hover:text-red-400 rounded hover:bg-red-950/60 transition-colors cursor-pointer"
+            title="Desligar esta fonte"
           >
             <X className="w-3.5 h-3.5" />
           </button>
@@ -157,7 +174,9 @@ export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
             autoPlay
             playsInline
             muted
-            className={`w-full h-full object-cover ${isMirrored ? 'scale-x-[-1]' : ''}`}
+            className={`w-full h-full object-contain bg-black transition-transform duration-150 ${
+              effectiveMirrored ? 'scale-x-[-1]' : ''
+            }`}
           />
 
           {/* Overlay Inferior */}
@@ -166,7 +185,11 @@ export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
               {nickname} (Você)
             </span>
             <span className="bg-indigo-950/80 backdrop-blur px-1.5 py-0.5 rounded text-indigo-300 border border-indigo-800 flex items-center gap-1">
-              <Video className="w-3 h-3 text-indigo-400" />
+              {sourceKind === 'capture_card' ? (
+                <Tv className="w-3 h-3 text-emerald-400" />
+              ) : (
+                <Video className="w-3 h-3 text-indigo-400" />
+              )}
               Ao Vivo
             </span>
           </div>

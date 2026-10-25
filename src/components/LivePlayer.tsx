@@ -12,6 +12,9 @@ import {
   ExternalLink,
   BookmarkCheck,
   RefreshCw,
+  FlipHorizontal,
+  Tv,
+  PowerOff,
 } from 'lucide-react';
 
 interface LivePlayerProps {
@@ -19,6 +22,7 @@ interface LivePlayerProps {
   userName: string;
   title: string;
   type: 'screen' | 'webcam';
+  sourceKind?: 'screen' | 'webcam' | 'capture_card';
   stream?: MediaStream | null;
   resolution: string;
   fps: number;
@@ -29,11 +33,15 @@ interface LivePlayerProps {
   isMuted: boolean;
   isWatched: boolean;
   isPoppedOut?: boolean;
+  isMirrored?: boolean;
   connectionState?: RTCPeerConnectionState;
   onOpenPopup?: () => void;
+  onClosePopup?: () => void;
   onToggleWatch: () => void;
   onChangeVolume: (vol: number) => void;
   onToggleMute: () => void;
+  onToggleMirror?: () => void;
+  onStopLocalSource?: () => void;
   onResetConnection?: () => void;
 }
 
@@ -41,6 +49,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   userName,
   title,
   type,
+  sourceKind,
   stream,
   resolution,
   fps,
@@ -51,11 +60,15 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   isMuted,
   isWatched,
   isPoppedOut = false,
+  isMirrored = false,
   connectionState,
   onOpenPopup,
+  onClosePopup,
   onToggleWatch,
   onChangeVolume,
   onToggleMute,
+  onToggleMirror,
+  onStopLocalSource,
   onResetConnection,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -63,6 +76,8 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [savedVolumeFlash, setSavedVolumeFlash] = useState(false);
   const flashTimerRef = useRef<any>(null);
+
+  const effectiveKind = sourceKind || (type === 'screen' ? 'screen' : 'webcam');
 
   // Web Audio API para amplificação limpa acima de 100% (101% até 150% boost) sem duplicação de fase
   const audioCtxRef = useRef<AudioContext | null>(null);
@@ -168,6 +183,12 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     }
   };
 
+  const getKindLabel = () => {
+    if (effectiveKind === 'capture_card') return 'PLACA DE CAPTURA';
+    if (effectiveKind === 'webcam') return 'WEBCAM';
+    return 'TELA';
+  };
+
   return (
     <div
       ref={containerRef}
@@ -182,20 +203,30 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
             </div>
             <div>
               <h4 className="text-xs font-mono font-bold text-cyan-300">
-                Aberta em Janela Flutuante (Popup)
+                Aberta em Nova Janela Externa
               </h4>
               <p className="text-[11px] text-neutral-400 font-mono mt-0.5 max-w-xs">
-                Controles de tamanho livre, qualidade e áudio salvos disponíveis na janela destacada.
+                Você pode arrastar a nova janela livremente para outro monitor ou deixá-la em tela cheia.
               </p>
             </div>
-            {onOpenPopup && (
-              <button
-                onClick={onOpenPopup}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/60 text-cyan-300 text-xs font-mono font-semibold rounded cursor-pointer transition-all"
-              >
-                Focar Janela Flutuante
-              </button>
-            )}
+            <div className="flex items-center justify-center gap-2">
+              {onOpenPopup && (
+                <button
+                  onClick={onOpenPopup}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/60 text-cyan-300 text-xs font-mono font-semibold rounded cursor-pointer transition-all"
+                >
+                  Focar Nova Janela
+                </button>
+              )}
+              {onClosePopup && (
+                <button
+                  onClick={onClosePopup}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-300 text-xs font-mono rounded cursor-pointer transition-all"
+                >
+                  Voltar p/ Grade
+                </button>
+              )}
+            </div>
           </div>
         ) : isWatched ? (
           <>
@@ -205,21 +236,25 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 autoPlay
                 playsInline
                 muted={isSelf ? true : isMuted}
-                className={`w-full h-full object-contain bg-black ${type === 'webcam' && isSelf ? 'scale-x-[-1]' : ''}`}
+                className={`w-full h-full object-contain bg-black transition-transform duration-150 ${
+                  isMirrored ? 'scale-x-[-1]' : ''
+                }`}
               />
             ) : (
               /* Estado aguardando stream ou reconectando */
               <div className="w-full h-full relative bg-gradient-to-br from-neutral-950 via-neutral-900 to-cyan-950/40 flex items-center justify-center">
                 <div className="text-center space-y-2.5 p-4">
-                  {type === 'screen' ? (
+                  {effectiveKind === 'screen' ? (
                     <Gamepad2 className="w-12 h-12 text-cyan-400 mx-auto animate-pulse" />
+                  ) : effectiveKind === 'capture_card' ? (
+                    <Tv className="w-12 h-12 text-emerald-400 mx-auto animate-pulse" />
                   ) : (
                     <User className="w-12 h-12 text-indigo-400 mx-auto animate-pulse" />
                   )}
                   <h4 className="text-xs font-mono font-bold text-neutral-200">{title}</h4>
                   <div className="flex items-center justify-center gap-2 text-[10px] font-mono text-neutral-400">
                     <span className="text-emerald-400 bg-emerald-950/80 border border-emerald-800 px-1.5 py-0.5 rounded">
-                      WEBRTC P2P
+                      {getKindLabel()}
                     </span>
                     <span>{resolution}</span>
                     <span>{fps} FPS</span>
@@ -245,10 +280,35 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 {userName} {isSelf && '(Você)'}
               </span>
 
+              <span
+                className={`text-[10px] font-mono px-2 py-0.5 rounded backdrop-blur border ${
+                  effectiveKind === 'capture_card'
+                    ? 'bg-emerald-950/80 border-emerald-700 text-emerald-300'
+                    : effectiveKind === 'webcam'
+                    ? 'bg-indigo-950/80 border-indigo-700 text-indigo-300'
+                    : 'bg-neutral-950/80 border-neutral-700 text-neutral-300'
+                }`}
+              >
+                {title} ({resolution}·{fps}fps)
+              </span>
+
               {hasIsolatedAudio && (
                 <span className="text-[10px] font-mono bg-cyan-950/80 border border-cyan-800 text-cyan-300 px-2 py-0.5 rounded backdrop-blur flex items-center gap-1">
                   <Sparkles className="w-2.5 h-2.5 text-cyan-400" />
                   WASAPI {processName ? `[${processName}]` : 'Isolado'}
+                </span>
+              )}
+
+              {effectiveKind === 'capture_card' && stream && stream.getAudioTracks().length > 0 && (
+                <span className="text-[10px] font-mono bg-emerald-950/85 border border-emerald-700 text-emerald-300 px-2 py-0.5 rounded backdrop-blur flex items-center gap-1">
+                  <Volume2 className="w-2.5 h-2.5 text-emerald-400" />
+                  Áudio Captura Estéreo
+                </span>
+              )}
+
+              {isMirrored && (
+                <span className="text-[10px] font-mono bg-indigo-950/80 border border-indigo-700 text-indigo-200 px-1.5 py-0.5 rounded backdrop-blur">
+                  Espelhado
                 </span>
               )}
 
@@ -260,8 +320,21 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
               )}
             </div>
 
-            {/* Botões de Ação Superior Direito (Reset P2P + Popup + Tela Cheia) */}
+            {/* Botões de Ação Superior Direito (Inverter + Reset P2P + Popup + Tela Cheia + Encerrar Fonte) */}
             <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+              {onToggleMirror && (
+                <button
+                  onClick={onToggleMirror}
+                  className={`p-1.5 rounded border cursor-pointer backdrop-blur transition-colors ${
+                    isMirrored
+                      ? 'bg-indigo-600/90 border-indigo-400 text-white'
+                      : 'bg-neutral-950/80 hover:bg-neutral-800 text-neutral-300 border-neutral-800'
+                  }`}
+                  title={isMirrored ? 'Desativar inversão horizontal (Normal)' : 'Inverter / Espelhar horizontalmente'}
+                >
+                  <FlipHorizontal className="w-4 h-4" />
+                </button>
+              )}
               {!isSelf && onResetConnection && (
                 <button
                   onClick={onResetConnection}
@@ -287,6 +360,15 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
               >
                 {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
               </button>
+              {isSelf && onStopLocalSource && (
+                <button
+                  onClick={onStopLocalSource}
+                  className="p-1.5 bg-red-950/85 hover:bg-red-800 text-red-200 rounded border border-red-700 cursor-pointer backdrop-blur"
+                  title="Desligar esta fonte de vídeo"
+                >
+                  <PowerOff className="w-4 h-4" />
+                </button>
+              )}
             </div>
           </>
         ) : (
@@ -297,7 +379,12 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
             </div>
             <div>
               <h4 className="text-xs font-mono font-bold text-neutral-300">
-                {userName} está transmitindo {type === 'screen' ? 'a Tela' : 'a Webcam'}
+                {userName} está transmitindo{' '}
+                {effectiveKind === 'screen'
+                  ? 'a Tela'
+                  : effectiveKind === 'capture_card'
+                  ? 'Placa de Captura'
+                  : 'Câmera'}
               </h4>
               <p className="text-[11px] text-neutral-500 font-mono">
                 {title} ({resolution} · {fps} FPS)
@@ -328,76 +415,100 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       {/* Controles de Áudio & Volume Individual com Memória Persistente */}
       <div
         onWheel={handleVolumeWheel}
-        className="p-3 bg-neutral-950/80 border-t border-neutral-800 flex items-center justify-between gap-3"
+        className="p-3 bg-neutral-950/80 border-t border-neutral-800 flex items-center justify-between gap-2 flex-wrap"
       >
         <div className="flex items-center gap-2">
-          <button
-            onClick={onToggleMute}
-            disabled={isSelf}
-            className={`p-1.5 rounded border cursor-pointer transition-colors ${
-              isSelf
-                ? 'bg-neutral-900/50 border-neutral-800 text-neutral-600 cursor-not-allowed'
-                : isMuted
-                ? 'bg-red-950/60 border-red-800 text-red-400'
-                : 'bg-neutral-900 border-neutral-800 text-neutral-300 hover:text-white'
-            }`}
-            title={
-              isSelf
-                ? 'Sua própria transmissão fica mutada localmente para evitar eco'
-                : isMuted
-                ? 'Desmutar (restaurar volume salvo)'
-                : 'Mutar áudio'
-            }
-          >
-            {isMuted || isSelf ? (
-              <VolumeX className="w-4 h-4" />
-            ) : (
-              <Volume2 className="w-4 h-4 text-cyan-400" />
-            )}
-          </button>
-
-          {/* Slider de Volume Individual (0% até 150% boost) com salvamento automático */}
-          <div className="flex items-center gap-2">
-            <input
-              type="range"
-              min={0}
-              max={150}
-              value={isSelf ? 0 : isMuted ? 0 : volume}
-              onChange={(e) => handleVolumeUpdate(Number(e.target.value))}
-              onDoubleClick={() => !isSelf && handleVolumeUpdate(100)}
-              disabled={isSelf}
-              title="Arraste ou use a roda do mouse para ajustar a altura do áudio (duplo clique volta para 100%). Salvo automaticamente."
-              className="w-24 sm:w-28 accent-cyan-400 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
-            />
-            <span
-              onClick={() => !isSelf && handleVolumeUpdate(100)}
-              title="Volume salvo automaticamente para esta transmissão (clique para resetar em 100%)"
-              className={`text-[10px] font-mono w-10 cursor-pointer select-none transition-colors ${
-                !isSelf && volume > 100
-                  ? 'text-amber-400 font-bold'
-                  : 'text-neutral-300 hover:text-cyan-300'
-              }`}
-            >
-              {isSelf ? 'Local' : isMuted ? '0%' : `${volume}%`}
+          {effectiveKind === 'webcam' && (!stream || stream.getAudioTracks().length === 0) ? (
+            <span className="text-[11px] font-mono text-neutral-500 bg-neutral-900/70 border border-neutral-800 px-2.5 py-1 rounded">
+              Câmera (Apenas Vídeo · Sem Áudio)
             </span>
-
-            {!isSelf && (
-              <span
-                className={`inline-flex items-center gap-0.5 text-[10px] font-mono px-1.5 py-0.5 rounded border transition-all ${
-                  savedVolumeFlash
-                    ? 'bg-emerald-950/80 border-emerald-700 text-emerald-300'
-                    : 'bg-neutral-900/70 border-neutral-800 text-neutral-500'
+          ) : (
+            <>
+              <button
+                onClick={onToggleMute}
+                disabled={isSelf}
+                className={`p-1.5 rounded border cursor-pointer transition-colors ${
+                  isSelf
+                    ? 'bg-neutral-900/50 border-neutral-800 text-neutral-600 cursor-not-allowed'
+                    : isMuted
+                    ? 'bg-red-950/60 border-red-800 text-red-400'
+                    : 'bg-neutral-900 border-neutral-800 text-neutral-300 hover:text-white'
                 }`}
-                title={`Altura do áudio (${isMuted ? '0%' : `${volume}%`}) guardada para ${userName}`}
+                title={
+                  isSelf
+                    ? 'Sua própria transmissão fica mutada localmente para evitar eco'
+                    : isMuted
+                    ? 'Desmutar (restaurar volume salvo)'
+                    : 'Mutar áudio'
+                }
               >
-                <BookmarkCheck className="w-3 h-3 text-cyan-400" />
-                <span className="hidden sm:inline">{savedVolumeFlash ? 'Salvo!' : 'Salvo'}</span>
-              </span>
-            )}
-          </div>
+                {isMuted || isSelf ? (
+                  <VolumeX className="w-4 h-4" />
+                ) : (
+                  <Volume2 className="w-4 h-4 text-cyan-400" />
+                )}
+              </button>
+
+              {/* Slider de Volume Individual (0% até 150% boost) com salvamento automático */}
+              <div className="flex items-center gap-2">
+                <input
+                  type="range"
+                  min={0}
+                  max={150}
+                  value={isSelf ? 0 : isMuted ? 0 : volume}
+                  onChange={(e) => handleVolumeUpdate(Number(e.target.value))}
+                  onDoubleClick={() => !isSelf && handleVolumeUpdate(100)}
+                  disabled={isSelf}
+                  title="Arraste ou use a roda do mouse para ajustar a altura do áudio (duplo clique volta para 100%). Salvo automaticamente."
+                  className="w-24 sm:w-28 accent-cyan-400 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
+                />
+                <span
+                  onClick={() => !isSelf && handleVolumeUpdate(100)}
+                  title="Volume salvo automaticamente para esta transmissão (clique para resetar em 100%)"
+                  className={`text-[10px] font-mono w-10 cursor-pointer select-none transition-colors ${
+                    !isSelf && volume > 100
+                      ? 'text-amber-400 font-bold'
+                      : 'text-neutral-300 hover:text-cyan-300'
+                  }`}
+                >
+                  {isSelf ? 'Local' : isMuted ? '0%' : `${volume}%`}
+                </span>
+
+                {!isSelf && (
+                  <span
+                    className={`inline-flex items-center gap-0.5 text-[10px] font-mono px-1.5 py-0.5 rounded border transition-all ${
+                      savedVolumeFlash
+                        ? 'bg-emerald-950/80 border-emerald-700 text-emerald-300'
+                        : 'bg-neutral-900/70 border-neutral-800 text-neutral-500'
+                    }`}
+                    title={`Altura do áudio (${isMuted ? '0%' : `${volume}%`}) guardada para ${userName}`}
+                  >
+                    <BookmarkCheck className="w-3 h-3 text-cyan-400" />
+                    <span className="hidden sm:inline">{savedVolumeFlash ? 'Salvo!' : 'Salvo'}</span>
+                  </span>
+                )}
+              </div>
+            </>
+          )}
         </div>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2">
+          {/* Botão explícito para Inverter / Espelhar qualquer fonte */}
+          {isWatched && onToggleMirror && (
+            <button
+              onClick={onToggleMirror}
+              className={`text-[11px] font-mono flex items-center gap-1.5 cursor-pointer px-2 py-1 rounded border transition-colors ${
+                isMirrored
+                  ? 'bg-indigo-950/80 border-indigo-600 text-indigo-200'
+                  : 'bg-neutral-900 hover:bg-neutral-800 border-neutral-800 text-neutral-300'
+              }`}
+              title="Inverter / Espelhar horizontalmente esta imagem"
+            >
+              <FlipHorizontal className="w-3.5 h-3.5" />
+              <span>{isMirrored ? 'Invertido' : 'Inverter'}</span>
+            </button>
+          )}
+
           {/* Botão de Destacar em Popup */}
           {isWatched && onOpenPopup && !isPoppedOut && (
             <button

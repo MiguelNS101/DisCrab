@@ -67,6 +67,8 @@ pub enum SignalingMessage {
         has_webcam: bool,
         #[serde(default)]
         webcam_track_id: Option<String>,
+        #[serde(default)]
+        media_sources: Option<serde_json::Value>,
         has_isolated_audio: bool,
     },
 
@@ -106,6 +108,8 @@ pub struct PeerSummary {
     #[serde(default)]
     pub webcam_track_id: Option<String>,
     #[serde(default)]
+    pub media_sources: Option<serde_json::Value>,
+    #[serde(default)]
     pub has_isolated_audio: bool,
 }
 
@@ -121,6 +125,7 @@ pub struct PeerSession {
     pub screen_track_id: Option<String>,
     pub has_webcam: bool,
     pub webcam_track_id: Option<String>,
+    pub media_sources: Option<serde_json::Value>,
     pub has_isolated_audio: bool,
     pub connection_seq: u64,
     pub tx: mpsc::UnboundedSender<Message>,
@@ -313,6 +318,7 @@ async fn handle_connection(
                         None,
                         false,
                         None,
+                        None,
                         false,
                     );
                     let mut prev_is_host = false;
@@ -331,6 +337,7 @@ async fn handle_connection(
                                 session.screen_track_id.clone(),
                                 session.has_webcam,
                                 session.webcam_track_id.clone(),
+                                session.media_sources.clone(),
                                 session.has_isolated_audio,
                             );
                             prev_is_host = session.is_host;
@@ -381,6 +388,7 @@ async fn handle_connection(
                             screen_track_id: p.screen_track_id.clone(),
                             has_webcam: p.has_webcam,
                             webcam_track_id: p.webcam_track_id.clone(),
+                            media_sources: p.media_sources.clone(),
                             has_isolated_audio: p.has_isolated_audio,
                         })
                         .collect()
@@ -405,7 +413,8 @@ async fn handle_connection(
                     screen_track_id: preserved_stream_state.4.clone(),
                     has_webcam: preserved_stream_state.5,
                     webcam_track_id: preserved_stream_state.6.clone(),
-                    has_isolated_audio: preserved_stream_state.7,
+                    media_sources: preserved_stream_state.7.clone(),
+                    has_isolated_audio: preserved_stream_state.8,
                 };
 
                 // Registra ou atualiza a sessão
@@ -425,7 +434,8 @@ async fn handle_connection(
                             screen_track_id: preserved_stream_state.4,
                             has_webcam: preserved_stream_state.5,
                             webcam_track_id: preserved_stream_state.6,
-                            has_isolated_audio: preserved_stream_state.7,
+                            media_sources: preserved_stream_state.7,
+                            has_isolated_audio: preserved_stream_state.8,
                             connection_seq: my_conn_seq,
                             tx: tx.clone(),
                         },
@@ -510,6 +520,7 @@ async fn handle_connection(
                             screen_track_id,
                             has_webcam,
                             webcam_track_id,
+                            media_sources,
                             has_isolated_audio,
                             ..
                         } => {
@@ -524,6 +535,7 @@ async fn handle_connection(
                                     session.screen_track_id = screen_track_id.clone();
                                     session.has_webcam = has_webcam;
                                     session.webcam_track_id = webcam_track_id.clone();
+                                    session.media_sources = media_sources.clone();
                                     session.has_isolated_audio = has_isolated_audio;
                                 }
                             }
@@ -537,6 +549,7 @@ async fn handle_connection(
                                 screen_track_id,
                                 has_webcam,
                                 webcam_track_id,
+                                media_sources,
                                 has_isolated_audio,
                             };
                             broadcast_to_others(&state, &my_id, status).await;

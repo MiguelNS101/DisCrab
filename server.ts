@@ -147,6 +147,7 @@ wss.on('connection', (ws: WebSocket) => {
           let preservedScreenTrackId: string | undefined = undefined;
           let preservedWebcam = false;
           let preservedWebcamTrackId: string | undefined = undefined;
+          let preservedMediaSources: any = undefined;
           let preservedIsolatedAudio = false;
           let wasHost = false;
 
@@ -159,6 +160,7 @@ wss.on('connection', (ws: WebSocket) => {
               preservedScreenTrackId = oldPeer.screen_track_id;
               preservedWebcam = oldPeer.has_webcam;
               preservedWebcamTrackId = oldPeer.webcam_track_id;
+              preservedMediaSources = (oldPeer as any).media_sources;
               preservedIsolatedAudio = oldPeer.has_isolated_audio;
               wasHost = oldPeer.is_host;
               room.peers.delete(oldId);
@@ -199,6 +201,7 @@ wss.on('connection', (ws: WebSocket) => {
               screen_track_id: p.screen_track_id,
               has_webcam: p.has_webcam,
               webcam_track_id: p.webcam_track_id,
+              media_sources: (p as any).media_sources,
               has_isolated_audio: p.has_isolated_audio,
             }));
 
@@ -216,6 +219,7 @@ wss.on('connection', (ws: WebSocket) => {
             connection_seq: myConnSeq,
             ws,
           };
+          (newSession as any).media_sources = preservedMediaSources;
 
           room.peers.set(peerId, newSession);
 
@@ -239,6 +243,7 @@ wss.on('connection', (ws: WebSocket) => {
               screen_track_id: preservedScreenTrackId,
               has_webcam: preservedWebcam,
               webcam_track_id: preservedWebcamTrackId,
+              media_sources: preservedMediaSources,
               has_isolated_audio: preservedIsolatedAudio,
             },
           });
@@ -283,6 +288,7 @@ wss.on('connection', (ws: WebSocket) => {
             mySession.screen_track_id = msg.screen_track_id;
             mySession.has_webcam = !!msg.has_webcam;
             mySession.webcam_track_id = msg.webcam_track_id;
+            (mySession as any).media_sources = msg.media_sources;
             mySession.has_isolated_audio = !!msg.has_isolated_audio;
           }
 
@@ -296,6 +302,7 @@ wss.on('connection', (ws: WebSocket) => {
             screen_track_id: msg.screen_track_id,
             has_webcam: !!msg.has_webcam,
             webcam_track_id: msg.webcam_track_id,
+            media_sources: msg.media_sources,
             has_isolated_audio: !!msg.has_isolated_audio,
           });
 

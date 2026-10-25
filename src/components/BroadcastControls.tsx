@@ -2,20 +2,22 @@ import React from 'react';
 import {
   Monitor,
   Video,
-  VideoOff,
   Flame,
   Volume2,
-  VolumeX,
-  Radio,
-  Layers,
-  ShieldCheck,
-  Sparkles,
+  Tv,
+  ChevronDown,
+  ChevronUp,
+  PowerOff,
 } from 'lucide-react';
-import { WindowItem, AudioSourceMode } from '../types';
+import { WindowItem, AudioSourceMode, LocalMediaSource } from '../types';
 
 interface BroadcastControlsProps {
   isScreenSharing: boolean;
   isWebcamActive: boolean;
+  localMediaSources?: LocalMediaSource[];
+  showSourceManager?: boolean;
+  onToggleSourceManager?: () => void;
+  onStopAllSources?: () => void;
   selectedWindow: WindowItem | null;
   isolateAudio: boolean;
   audioSourceMode: AudioSourceMode;
@@ -33,19 +35,22 @@ interface BroadcastControlsProps {
 export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
   isScreenSharing,
   isWebcamActive,
-  selectedWindow,
-  isolateAudio,
+  localMediaSources = [],
+  showSourceManager = false,
+  onToggleSourceManager,
+  onStopAllSources,
   audioSourceMode,
   onChangeAudioSourceMode,
   fps,
   resolution,
   onToggleScreenShare,
   onToggleWebcam,
-  onToggleIsolateAudio,
   onChangeFps,
   onChangeResolution,
   activeAudioLabel,
 }) => {
+  const activeCount = localMediaSources.length;
+
   return (
     <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
       {/* Botões de Ação Principais */}
@@ -62,7 +67,7 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
           {isScreenSharing ? (
             <>
               <Flame className="w-4 h-4 text-white animate-pulse" />
-              Parar Transmissão
+              Parar Tela
             </>
           ) : (
             <>
@@ -72,27 +77,43 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
           )}
         </button>
 
-        {/* Ligar / Desligar Webcam */}
-        <button
-          onClick={onToggleWebcam}
-          className={`flex items-center gap-2 px-3.5 py-2 rounded-lg font-mono text-xs transition-all cursor-pointer border ${
-            isWebcamActive
-              ? 'bg-indigo-950/70 border-indigo-500 text-indigo-300 font-bold'
-              : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-white'
-          }`}
-        >
-          {isWebcamActive ? (
-            <>
-              <Video className="w-4 h-4 text-indigo-400" />
-              Webcam Ativa
-            </>
-          ) : (
-            <>
-              <VideoOff className="w-4 h-4" />
-              Ligar Webcam
-            </>
+        {/* Seletor Multi-Fonte: Webcams & Placas de Captura USB */}
+        <div className="flex items-center gap-1">
+          <button
+            onClick={onToggleSourceManager || onToggleWebcam}
+            className={`flex items-center gap-2 px-3.5 py-2 rounded-lg font-mono text-xs transition-all cursor-pointer border ${
+              activeCount > 0 || isWebcamActive
+                ? 'bg-indigo-950/80 border-indigo-500 text-indigo-200 font-bold shadow-md shadow-indigo-950/40'
+                : showSourceManager
+                ? 'bg-neutral-800 border-indigo-500/60 text-white'
+                : 'bg-neutral-950 border-neutral-800 text-neutral-300 hover:text-white hover:border-neutral-700'
+            }`}
+            title="Escolher Webcam(s) ou Placa(s) de Captura USB e transmitir várias fontes ao mesmo tempo"
+          >
+            <Video className="w-4 h-4 text-indigo-400" />
+            <Tv className="w-3.5 h-3.5 text-emerald-400 -ml-1" />
+            <span>
+              {activeCount > 0
+                ? `Câmeras / Captura (${activeCount} Ativa${activeCount > 1 ? 's' : ''})`
+                : 'Câmeras & Placa de Captura'}
+            </span>
+            {showSourceManager ? (
+              <ChevronUp className="w-3.5 h-3.5 text-neutral-400" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5 text-neutral-400" />
+            )}
+          </button>
+
+          {activeCount > 0 && onStopAllSources && (
+            <button
+              onClick={onStopAllSources}
+              className="p-2 rounded-lg bg-red-950/70 hover:bg-red-900 border border-red-800 text-red-300 cursor-pointer transition-colors"
+              title="Desligar todas as webcams e placas de captura ativas"
+            >
+              <PowerOff className="w-4 h-4" />
+            </button>
           )}
-        </button>
+        </div>
 
         {/* Alternador Rápido de Áudio WASAPI Ao Vivo */}
         <div className="flex items-center bg-neutral-950 border border-neutral-800 rounded-lg p-0.5 text-xs font-mono">

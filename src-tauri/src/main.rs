@@ -417,6 +417,9 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
             if let WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed = event {
                 println!("[Shutdown] Encerrando StreamCompanion e liberando processos...");
                 let app = window.app_handle();

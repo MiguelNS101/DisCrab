@@ -6,6 +6,41 @@ export interface WindowItem {
   category: 'game' | 'browser' | 'chat' | 'media' | 'other';
 }
 
+export interface VideoInputDeviceInfo {
+  deviceId: string;
+  label: string;
+  groupId: string;
+  kind: 'webcam' | 'capture_card';
+}
+
+export interface AudioInputDeviceInfo {
+  deviceId: string;
+  label: string;
+  groupId: string;
+}
+
+export interface LocalMediaSource {
+  sourceId: string;
+  deviceId: string;
+  audioDeviceId: string; // 'none' | 'default' | specific deviceId
+  title: string;
+  kind: 'webcam' | 'capture_card';
+  resolution: '720p' | '1080p' | '1440p';
+  fps: 30 | 60;
+  stream: MediaStream;
+}
+
+export interface RemoteMediaSourceMeta {
+  source_id: string;
+  title: string;
+  kind: 'webcam' | 'capture_card';
+  resolution: '720p' | '1080p' | '1440p';
+  fps: 30 | 60;
+  video_track_id?: string;
+  audio_track_id?: string;
+  stream_id?: string;
+}
+
 export interface RoomDetails {
   code: string;
   token: string;
@@ -21,6 +56,8 @@ export interface StreamItem {
   id: string;
   user_name: string;
   type: 'screen' | 'webcam';
+  source_id?: string;
+  source_kind?: 'screen' | 'webcam' | 'capture_card';
   title: string;
   resolution: '720p' | '1080p' | '1440p';
   fps: 30 | 60;

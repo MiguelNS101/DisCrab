@@ -13,7 +13,14 @@ import {
   findWindowPid,
 } from '../tauriBridge';
 
-import { ChatMessage, ChatAttachment } from '../../types';
+import {
+  ChatMessage,
+  ChatAttachment,
+  VideoInputDeviceInfo,
+  AudioInputDeviceInfo,
+  LocalMediaSource,
+  RemoteMediaSourceMeta,
+} from '../../types';
 
 export const RTC_CONFIGURATION: RTCConfiguration = {
   iceServers: [
@@ -88,6 +95,8 @@ export interface RemotePeer {
   hasIsolatedAudio: boolean;
   screenStream?: MediaStream;
   webcamStream?: MediaStream;
+  mediaSources?: RemoteMediaSourceMeta[];
+  mediaStreams?: Record<string, MediaStream>;
 }
 
 export interface PerformanceLogEntry {
@@ -105,6 +114,18 @@ export interface PerformanceLogEntry {
   };
 }
 
+export interface P2PTelemetryPoint {
+  timestamp: number;
+  timeLabel: string;
+  bitrateKbps: number;
+  inboundKbps: number;
+  outboundKbps: number;
+  packetLossPct: number;
+  rttMs: number;
+  fps: number;
+  activePeers: number;
+}
+
 export type EngineEventCallback = {
   onPeersChange?: (peers: RemotePeer[]) => void;
   onSelfConnected?: (peerId: string, isHost: boolean) => void;
@@ -112,7 +133,7 @@ export type EngineEventCallback = {
   onReconnectingChange?: (isReconnecting: boolean, attempt: number) => void;
   onError?: (err: string) => void;
   onRemoteStream?: (peerId: string, type: 'screen' | 'webcam', stream: MediaStream) => void;
-  onStatsUpdate?: (stats: { rttMs: number; bytesReceived: number; bytesSent: number }) => void;
+  onStatsUpdate?: (stats: P2PTelemetryPoint) => void;
   onChatMessage?: (msg: ChatMessage) => void;
   onPerformanceLog?: (entry: PerformanceLogEntry) => void;
 };
@@ -133,6 +154,8 @@ interface InternalPeerEntry {
   recoveryAttempts: number;
   watchedScreen: boolean;
   watchedWebcam: boolean;
+  watchedSources: Set<string>;
+  receivedTracks: Map<string, { track: MediaStreamTrack; streamId: string }>;
 }
 
 export class WebRtcEngine {
@@ -163,6 +186,7 @@ export class WebRtcEngine {
   // Streams locais e configuração de qualidade ativa
   private localScreenStream: MediaStream | null = null;
   private localWebcamStream: MediaStream | null = null;
+  private localMediaSources: Map<string, LocalMediaSource> = new Map();
   private screenTitle: string = '';
   private currentResolution: '720p' | '1080p' | '1440p' = '1080p';
   private currentFps: 30 | 60 = 60;
@@ -173,6 +197,80 @@ export class WebRtcEngine {
 
   public getDetectedWindowPid(): number {
     return this.detectedWindowPid;
+  }
+
+  public getLocalMediaSources(): LocalMediaSource[] {
+    return Array.from(this.localMediaSources.values());
+  }
+
+  /**
+   * Lista todas as Webcams, Placas de Captura USB/HDMI e Entradas de Áudio conectadas ao PC.
+   * Se os rótulos estiverem ocultos por falta de permissão inicial, solicita permissão rápida.
+   */
+  public async enumerateMediaDevices(
+    requestPermissionIfNeeded = false
+  ): Promise<{ videoDevices: VideoInputDeviceInfo[]; audioDevices: AudioInputDeviceInfo[] }> {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+      return { videoDevices: [], audioDevices: [] };
+    }
+
+    let devices = await navigator.mediaDevices.enumerateDevices();
+    const hasUnlabeledVideo = devices.some((d) => d.kind === 'videoinput' && !d.label);
+
+    if (requestPermissionIfNeeded || hasUnlabeledVideo) {
+      try {
+        const probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        probe.getTracks().forEach((t) => t.stop());
+        devices = await navigator.mediaDevices.enumerateDevices();
+      } catch {
+        // segue com os dispositivos disponíveis
+      }
+    }
+
+    const captureKeywords = [
+      'capture',
+      'placa',
+      'hdmi',
+      'elgato',
+      'cam link',
+      'camlink',
+      'usb video',
+      'usb3',
+      'avermedia',
+      'ezcap',
+      'mirabox',
+      'genki',
+      'evga',
+      'obs virtual',
+      'game capture',
+      ' FHD ',
+      'streaming',
+    ];
+
+    const videoDevices: VideoInputDeviceInfo[] = [];
+    const audioDevices: AudioInputDeviceInfo[] = [];
+
+    devices.forEach((d, idx) => {
+      if (d.kind === 'videoinput') {
+        const label = d.label || `Dispositivo de Vídeo USB #${videoDevices.length + 1}`;
+        const lower = label.toLowerCase();
+        const isCapture = captureKeywords.some((kw) => lower.includes(kw.toLowerCase()));
+        videoDevices.push({
+          deviceId: d.deviceId || `default-video-${idx}`,
+          label,
+          groupId: d.groupId || '',
+          kind: isCapture ? 'capture_card' : 'webcam',
+        });
+      } else if (d.kind === 'audioinput') {
+        audioDevices.push({
+          deviceId: d.deviceId || `default-audio-${idx}`,
+          label: d.label || `Entrada de Áudio #${audioDevices.length + 1}`,
+          groupId: d.groupId || '',
+        });
+      }
+    });
+
+    return { videoDevices, audioDevices };
   }
 
   constructor(callbacks: EngineEventCallback) {
@@ -394,11 +492,13 @@ export class WebRtcEngine {
       screenFps,
       hasWebcam,
       hasIsolatedAudio,
+      mediaSources,
     } = existing.info;
     const screenTrackId = (existing.info as any).screenTrackId;
     const webcamTrackId = (existing.info as any).webcamTrackId;
     const watchedScreen = existing.watchedScreen || !!existing.info.screenStream;
     const watchedWebcam = existing.watchedWebcam || !!existing.info.webcamStream;
+    const watchedSources = new Set<string>(existing.watchedSources);
 
     console.log(
       `[WebRTC] Resetando conexão P2P com ${nickname} (${peerId}), notifyRemote=${notifyRemote}`
@@ -435,9 +535,11 @@ export class WebRtcEngine {
       screenTrackId,
       hasWebcam,
       webcamTrackId,
+      mediaSources,
       hasIsolatedAudio,
       watchedScreen,
       watchedWebcam,
+      watchedSources,
     });
 
     this.broadcastStreamStatus();
@@ -474,6 +576,9 @@ export class WebRtcEngine {
               existing.info.screenTitle = p.screen_title || existing.info.screenTitle;
               existing.info.hasWebcam = !!p.has_webcam;
               existing.info.hasIsolatedAudio = !!p.has_isolated_audio;
+              if (Array.isArray(p.media_sources)) {
+                existing.info.mediaSources = p.media_sources;
+              }
               (existing.info as any).screenTrackId = p.screen_track_id;
               (existing.info as any).webcamTrackId = p.webcam_track_id;
 
@@ -488,6 +593,7 @@ export class WebRtcEngine {
                 screenTrackId: p.screen_track_id,
                 hasWebcam: !!p.has_webcam,
                 webcamTrackId: p.webcam_track_id,
+                mediaSources: Array.isArray(p.media_sources) ? p.media_sources : [],
                 hasIsolatedAudio: !!p.has_isolated_audio,
                 watchedScreen: false,
                 watchedWebcam: false,
@@ -504,7 +610,7 @@ export class WebRtcEngine {
 
         this.emitPeersChange();
 
-        if (this.isBroadcastingScreen || this.isBroadcastingWebcam) {
+        if (this.isBroadcastingScreen || this.isBroadcastingWebcam || this.localMediaSources.size > 0) {
           setTimeout(() => this.broadcastStreamStatus(), 150);
         }
         break;
@@ -530,6 +636,7 @@ export class WebRtcEngine {
           if (typeof p.has_screen === 'boolean') existing.info.hasScreen = p.has_screen;
           if (p.screen_title) existing.info.screenTitle = p.screen_title;
           if (typeof p.has_webcam === 'boolean') existing.info.hasWebcam = p.has_webcam;
+          if (Array.isArray(p.media_sources)) existing.info.mediaSources = p.media_sources;
           if (typeof p.has_isolated_audio === 'boolean') {
             existing.info.hasIsolatedAudio = p.has_isolated_audio;
           }
@@ -545,6 +652,7 @@ export class WebRtcEngine {
             screenTrackId: p.screen_track_id,
             hasWebcam: !!p.has_webcam,
             webcamTrackId: p.webcam_track_id,
+            mediaSources: Array.isArray(p.media_sources) ? p.media_sources : [],
             hasIsolatedAudio: !!p.has_isolated_audio,
           });
         }
@@ -574,6 +682,23 @@ export class WebRtcEngine {
           peer.info.hasIsolatedAudio = !!msg.has_isolated_audio;
           (peer.info as any).webcamTrackId = msg.webcam_track_id;
           (peer.info as any).screenTrackId = msg.screen_track_id;
+          (peer.info as any).screenAudioTrackId = msg.screen_audio_track_id;
+          (peer.info as any).screenStreamId = msg.screen_stream_id;
+
+          const incomingSources: RemoteMediaSourceMeta[] = Array.isArray(msg.media_sources)
+            ? msg.media_sources
+            : [];
+          peer.info.mediaSources = incomingSources;
+
+          if (!peer.info.mediaStreams) {
+            peer.info.mediaStreams = {};
+          }
+          const activeSourceIds = new Set(incomingSources.map((s) => s.source_id));
+          for (const existingSid of Object.keys(peer.info.mediaStreams)) {
+            if (!activeSourceIds.has(existingSid)) {
+              delete peer.info.mediaStreams[existingSid];
+            }
+          }
 
           if (!msg.has_screen) {
             peer.info.screenStream = undefined;
@@ -581,12 +706,24 @@ export class WebRtcEngine {
             this.requestPeerStream(msg.peer_id, 'screen');
           }
 
-          if (!msg.has_webcam) {
+          if (!msg.has_webcam && incomingSources.length === 0) {
             peer.info.webcamStream = undefined;
-          } else if (peer.watchedWebcam && !peer.info.webcamStream) {
-            this.requestPeerStream(msg.peer_id, 'webcam');
+            peer.info.mediaStreams = {};
+          } else {
+            for (const src of incomingSources) {
+              if (
+                peer.watchedSources.has(src.source_id) &&
+                !peer.info.mediaStreams?.[src.source_id]
+              ) {
+                this.requestPeerStream(msg.peer_id, `source:${src.source_id}`);
+              }
+            }
+            if (peer.watchedWebcam && !peer.info.webcamStream && incomingSources.length === 0) {
+              this.requestPeerStream(msg.peer_id, 'webcam');
+            }
           }
 
+          this.reconcileRemoteTracks(msg.peer_id, peer);
           this.emitPeersChange();
         }
         break;
@@ -619,9 +756,11 @@ export class WebRtcEngine {
       screenTrackId?: string;
       hasWebcam?: boolean;
       webcamTrackId?: string;
+      mediaSources?: RemoteMediaSourceMeta[];
       hasIsolatedAudio?: boolean;
       watchedScreen?: boolean;
       watchedWebcam?: boolean;
+      watchedSources?: Set<string>;
     }
   ): RTCPeerConnection {
     if (this.peers.has(peerId)) {
@@ -641,6 +780,8 @@ export class WebRtcEngine {
       screenFps: preservedState?.screenFps ?? 60,
       hasWebcam: preservedState?.hasWebcam ?? false,
       hasIsolatedAudio: preservedState?.hasIsolatedAudio ?? false,
+      mediaSources: preservedState?.mediaSources ?? [],
+      mediaStreams: {},
     };
     if (preservedState?.screenTrackId) (info as any).screenTrackId = preservedState.screenTrackId;
     if (preservedState?.webcamTrackId) (info as any).webcamTrackId = preservedState.webcamTrackId;
@@ -660,6 +801,8 @@ export class WebRtcEngine {
       recoveryAttempts: 0,
       watchedScreen: preservedState?.watchedScreen ?? false,
       watchedWebcam: preservedState?.watchedWebcam ?? false,
+      watchedSources: preservedState?.watchedSources ?? new Set<string>(),
+      receivedTracks: new Map(),
     };
     this.peers.set(peerId, peerEntry);
 
@@ -674,7 +817,11 @@ export class WebRtcEngine {
       if (this.isBroadcastingScreen && this.localScreenStream) {
         this.addTracksOnly(peerEntry, 'screen');
       }
-      if (this.isBroadcastingWebcam && this.localWebcamStream) {
+      if (this.localMediaSources.size > 0) {
+        for (const [sourceId] of this.localMediaSources.entries()) {
+          this.addTracksOnly(peerEntry, `source:${sourceId}`);
+        }
+      } else if (this.isBroadcastingWebcam && this.localWebcamStream) {
         this.addTracksOnly(peerEntry, 'webcam');
       }
     }
@@ -768,6 +915,16 @@ export class WebRtcEngine {
         if (peerEntry.watchedScreen && info.hasScreen && !info.screenStream) {
           this.requestPeerStream(peerId, 'screen');
         }
+        if (peerEntry.watchedSources.size > 0 && info.mediaSources) {
+          for (const src of info.mediaSources) {
+            if (
+              peerEntry.watchedSources.has(src.source_id) &&
+              !info.mediaStreams?.[src.source_id]
+            ) {
+              this.requestPeerStream(peerId, `source:${src.source_id}`);
+            }
+          }
+        }
         if (peerEntry.watchedWebcam && info.hasWebcam && !info.webcamStream) {
           this.requestPeerStream(peerId, 'webcam');
         }
@@ -790,49 +947,13 @@ export class WebRtcEngine {
       } catch {}
 
       const streamId = event.streams[0]?.id || '';
-      const isWebcam =
-        streamId.toLowerCase().includes('webcam') ||
-        event.track.id === (info as any).webcamTrackId;
+      peerEntry.receivedTracks.set(event.track.id, { track: event.track, streamId });
 
-      if (isWebcam) {
-        if (!info.webcamStream) {
-          info.webcamStream = new MediaStream();
-        }
-        info.webcamStream.getTracks().forEach((t) => {
-          if (t.kind === event.track.kind && t.id !== event.track.id) {
-            info.webcamStream?.removeTrack(t);
-          }
-        });
-        if (!info.webcamStream.getTracks().some((t) => t.id === event.track.id)) {
-          info.webcamStream.addTrack(event.track);
-          info.webcamStream = new MediaStream(info.webcamStream.getTracks());
-        }
-        info.hasWebcam = true;
-        peerEntry.watchedWebcam = true;
-        this.callbacks.onRemoteStream?.(peerId, 'webcam', info.webcamStream);
-      } else {
-        if (!info.screenStream) {
-          info.screenStream = new MediaStream();
-        }
-        info.screenStream.getTracks().forEach((t) => {
-          if (t.kind === event.track.kind && t.id !== event.track.id) {
-            info.screenStream?.removeTrack(t);
-          }
-        });
-        if (!info.screenStream.getTracks().some((t) => t.id === event.track.id)) {
-          info.screenStream.addTrack(event.track);
-          info.screenStream = new MediaStream(info.screenStream.getTracks());
-        }
-        if (event.track.kind === 'video') {
-          info.hasScreen = true;
-        }
-        if (event.track.kind === 'audio') {
-          info.hasIsolatedAudio = true;
-        }
-        peerEntry.watchedScreen = true;
-        this.callbacks.onRemoteStream?.(peerId, 'screen', info.screenStream);
-      }
+      event.track.onended = () => {
+        peerEntry.receivedTracks.delete(event.track.id);
+      };
 
+      this.reconcileRemoteTracks(peerId, peerEntry, event.track, streamId);
       this.emitPeersChange();
     };
 
@@ -841,6 +962,146 @@ export class WebRtcEngine {
     }
 
     return pc;
+  }
+
+  /**
+   * Associa cada MediaStreamTrack recebido à sua fonte exata (Tela ou múltiplas Webcams / Placas de Captura)
+   */
+  private reconcileRemoteTracks(
+    peerId: string,
+    peerEntry: InternalPeerEntry,
+    latestTrack?: MediaStreamTrack,
+    latestStreamId?: string
+  ) {
+    const { info } = peerEntry;
+    if (!info.mediaStreams) {
+      info.mediaStreams = {};
+    }
+
+    const sources = info.mediaSources || [];
+    const matchedTrackIds = new Set<string>();
+
+    // 1. Vincula pelos metadados de mediaSources (múltiplas webcams e placas de captura c/ vídeo + áudio)
+    for (const src of sources) {
+      const matchingEntries: MediaStreamTrack[] = [];
+      for (const [, entry] of peerEntry.receivedTracks.entries()) {
+        if (entry.track.readyState === 'ended') continue;
+        if (
+          entry.track.id === src.video_track_id ||
+          entry.track.id === src.audio_track_id ||
+          (src.stream_id && entry.streamId && entry.streamId === src.stream_id)
+        ) {
+          matchingEntries.push(entry.track);
+          matchedTrackIds.add(entry.track.id);
+        }
+      }
+
+      if (matchingEntries.length > 0) {
+        const currentStream = info.mediaStreams[src.source_id];
+        const currentIds = currentStream
+          ? currentStream.getTracks().map((t) => t.id).sort().join(',')
+          : '';
+        const newIds = matchingEntries.map((t) => t.id).sort().join(',');
+
+        if (!currentStream || currentIds !== newIds) {
+          info.mediaStreams[src.source_id] = new MediaStream(matchingEntries);
+        }
+        peerEntry.watchedSources.add(src.source_id);
+        info.hasWebcam = true;
+        if (!info.webcamStream) {
+          info.webcamStream = info.mediaStreams[src.source_id];
+        }
+      }
+    }
+
+    // Se alguma track de Placa de Captura/Webcam caiu temporariamente em screenStream antes de stream_status chegar, remove-a de screenStream
+    if (info.screenStream && matchedTrackIds.size > 0) {
+      const remainingScreenTracks = info.screenStream
+        .getTracks()
+        .filter((t) => !matchedTrackIds.has(t.id) && t.readyState !== 'ended');
+      if (remainingScreenTracks.length !== info.screenStream.getTracks().length) {
+        info.screenStream =
+          remainingScreenTracks.length > 0 ? new MediaStream(remainingScreenTracks) : undefined;
+      }
+    }
+
+    // 2. Vincula tracks da transmissão de Tela (vídeo + áudio isolado WASAPI) pelos IDs conhecidos
+    const screenVideoId = (info as any).screenTrackId;
+    const screenAudioId = (info as any).screenAudioTrackId;
+    const screenStreamId = (info as any).screenStreamId;
+
+    if (screenVideoId || screenAudioId || screenStreamId) {
+      const screenTracks: MediaStreamTrack[] = [];
+      for (const [, entry] of peerEntry.receivedTracks.entries()) {
+        if (entry.track.readyState === 'ended' || matchedTrackIds.has(entry.track.id)) continue;
+        if (
+          entry.track.id === screenVideoId ||
+          entry.track.id === screenAudioId ||
+          (screenStreamId && entry.streamId && entry.streamId === screenStreamId)
+        ) {
+          screenTracks.push(entry.track);
+          matchedTrackIds.add(entry.track.id);
+        }
+      }
+      if (screenTracks.length > 0) {
+        const currentIds = info.screenStream
+          ? info.screenStream.getTracks().map((t) => t.id).sort().join(',')
+          : '';
+        const newIds = screenTracks.map((t) => t.id).sort().join(',');
+        if (!info.screenStream || currentIds !== newIds) {
+          info.screenStream = new MediaStream(screenTracks);
+        }
+        info.hasScreen = true;
+        peerEntry.watchedScreen = true;
+        this.callbacks.onRemoteStream?.(peerId, 'screen', info.screenStream);
+      }
+    }
+
+    // 3. Se chegou uma track agora que ainda não tinha metadados em stream_status, classifica por fallback seguro
+    if (latestTrack && !matchedTrackIds.has(latestTrack.id)) {
+      const isLegacyWebcam =
+        (latestStreamId && latestStreamId.toLowerCase().includes('webcam')) ||
+        latestTrack.id === (info as any).webcamTrackId;
+
+      if (isLegacyWebcam) {
+        if (!info.webcamStream) {
+          info.webcamStream = new MediaStream();
+        }
+        info.webcamStream.getTracks().forEach((t) => {
+          if (t.kind === latestTrack.kind && t.id !== latestTrack.id) {
+            info.webcamStream?.removeTrack(t);
+          }
+        });
+        if (!info.webcamStream.getTracks().some((t) => t.id === latestTrack.id)) {
+          info.webcamStream.addTrack(latestTrack);
+          info.webcamStream = new MediaStream(info.webcamStream.getTracks());
+        }
+        info.hasWebcam = true;
+        peerEntry.watchedWebcam = true;
+        this.callbacks.onRemoteStream?.(peerId, 'webcam', info.webcamStream);
+      } else if (info.hasScreen || sources.length === 0) {
+        if (!info.screenStream) {
+          info.screenStream = new MediaStream();
+        }
+        info.screenStream.getTracks().forEach((t) => {
+          if (t.kind === latestTrack.kind && t.id !== latestTrack.id) {
+            info.screenStream?.removeTrack(t);
+          }
+        });
+        if (!info.screenStream.getTracks().some((t) => t.id === latestTrack.id)) {
+          info.screenStream.addTrack(latestTrack);
+          info.screenStream = new MediaStream(info.screenStream.getTracks());
+        }
+        if (latestTrack.kind === 'video') {
+          info.hasScreen = true;
+        }
+        if (latestTrack.kind === 'audio') {
+          info.hasIsolatedAudio = true;
+        }
+        peerEntry.watchedScreen = true;
+        this.callbacks.onRemoteStream?.(peerId, 'screen', info.screenStream);
+      }
+    }
   }
 
   /**
@@ -929,6 +1190,37 @@ export class WebRtcEngine {
         screenAudioSender.setParameters(aParams).catch(() => {});
       } catch {}
     }
+
+    for (const [sourceId, src] of this.localMediaSources.entries()) {
+      const srcProfile = getVideoQualityProfile(src.resolution, src.fps);
+      const vSender = peerEntry.sendersMap.get(`source:${sourceId}_video`);
+      if (vSender) {
+        try {
+          const params = vSender.getParameters();
+          if (!params.encodings || params.encodings.length === 0) {
+            params.encodings = [{}];
+          }
+          (params as any).degradationPreference = 'balanced';
+          params.encodings[0].maxBitrate = srcProfile.maxBitrate;
+          params.encodings[0].maxFramerate = srcProfile.fps;
+          (params.encodings[0] as any).priority = 'high';
+          (params.encodings[0] as any).networkPriority = 'high';
+          vSender.setParameters(params).catch(() => {});
+        } catch {}
+      }
+      const aSender = peerEntry.sendersMap.get(`source:${sourceId}_audio`);
+      if (aSender) {
+        try {
+          const aParams = aSender.getParameters();
+          if (!aParams.encodings || aParams.encodings.length === 0) {
+            aParams.encodings = [{}];
+          }
+          aParams.encodings[0].maxBitrate = 160_000;
+          (aParams.encodings[0] as any).priority = 'high';
+          aSender.setParameters(aParams).catch(() => {});
+        } catch {}
+      }
+    }
   }
 
   /**
@@ -974,16 +1266,39 @@ export class WebRtcEngine {
     return outLines.join('\r\n');
   }
 
-  private addTracksOnly(peerEntry: InternalPeerEntry, streamType: 'screen' | 'webcam'): boolean {
-    const stream = streamType === 'webcam' ? this.localWebcamStream : this.localScreenStream;
+  private addTracksOnly(peerEntry: InternalPeerEntry, streamType: string): boolean {
+    if (streamType === 'webcam' && this.localMediaSources.size > 0) {
+      let anyAdded = false;
+      for (const [sourceId] of this.localMediaSources.entries()) {
+        if (this.addTracksOnly(peerEntry, `source:${sourceId}`)) {
+          anyAdded = true;
+        }
+      }
+      return anyAdded;
+    }
+
+    let stream: MediaStream | null = null;
+    let isHighMotionVideo = false;
+
+    if (streamType.startsWith('source:')) {
+      const sourceId = streamType.slice('source:'.length);
+      const src = this.localMediaSources.get(sourceId);
+      stream = src?.stream || null;
+      isHighMotionVideo = src?.kind === 'capture_card' || src?.fps === 60;
+    } else if (streamType === 'webcam') {
+      stream = this.localWebcamStream;
+    } else {
+      stream = this.localScreenStream;
+      isHighMotionVideo = true;
+    }
+
     if (!stream) return false;
 
     let added = false;
     stream.getTracks().forEach((track) => {
       track.enabled = true;
       try {
-        if (track.kind === 'video' && streamType === 'screen' && 'contentHint' in track) {
-          // 'motion' evita que o codificador WebRTC trave o framerate em 1080p/1440p!
+        if (track.kind === 'video' && isHighMotionVideo && 'contentHint' in track) {
           track.contentHint = 'motion';
         } else if (track.kind === 'audio' && 'contentHint' in track) {
           track.contentHint = 'music';
@@ -999,9 +1314,9 @@ export class WebRtcEngine {
         });
       } else {
         try {
-          const sender = peerEntry.pc.addTrack(track, stream);
+          const sender = peerEntry.pc.addTrack(track, stream!);
           peerEntry.sendersMap.set(key, sender);
-          if (track.kind === 'video' && streamType === 'screen') {
+          if (track.kind === 'video' && isHighMotionVideo) {
             this.preferHardwareH264OnTransceiver(peerEntry.pc, sender);
           }
           added = true;
@@ -1316,7 +1631,11 @@ export class WebRtcEngine {
             if (this.isBroadcastingScreen && this.localScreenStream) {
               if (this.addTracksOnly(peerEntry, 'screen')) added = true;
             }
-            if (this.isBroadcastingWebcam && this.localWebcamStream) {
+            if (this.localMediaSources.size > 0) {
+              for (const [sourceId] of this.localMediaSources.entries()) {
+                if (this.addTracksOnly(peerEntry, `source:${sourceId}`)) added = true;
+              }
+            } else if (this.isBroadcastingWebcam && this.localWebcamStream) {
               if (this.addTracksOnly(peerEntry, 'webcam')) added = true;
             }
             if (added || peerEntry.pendingNegotiation) {
@@ -1350,11 +1669,16 @@ export class WebRtcEngine {
     }
   }
 
-  public requestPeerStream(targetPeerId: string, streamType: 'screen' | 'webcam'): void {
+  public requestPeerStream(targetPeerId: string, streamType: string): void {
     const peerEntry = this.peers.get(targetPeerId);
     if (peerEntry) {
       if (streamType === 'screen') peerEntry.watchedScreen = true;
-      if (streamType === 'webcam') peerEntry.watchedWebcam = true;
+      else if (streamType.startsWith('source:')) {
+        peerEntry.watchedSources.add(streamType.slice('source:'.length));
+        peerEntry.watchedWebcam = true;
+      } else if (streamType === 'webcam') {
+        peerEntry.watchedWebcam = true;
+      }
 
       if (
         peerEntry.pc.connectionState === 'failed' ||
@@ -1366,7 +1690,7 @@ export class WebRtcEngine {
       }
     }
 
-    console.log(`[WebRTC Engine] Solicitando stream sob demanda do peer ${targetPeerId}`);
+    console.log(`[WebRTC Engine] Solicitando stream sob demanda (${streamType}) do peer ${targetPeerId}`);
     this.sendWsMessage({
       type: 'request_stream',
       target_peer_id: targetPeerId,
@@ -1545,11 +1869,13 @@ export class WebRtcEngine {
     this.localScreenStream = stream;
     this.isBroadcastingScreen = true;
 
+    // Envia os IDs das faixas antes da renegociação SDP para que ontrack remoto já conheça os IDs
+    this.broadcastStreamStatus();
+
     for (const [peerId] of this.peers.entries()) {
       this.attachTracksForPeer(peerId, 'screen');
     }
 
-    this.broadcastStreamStatus();
     return stream;
   }
 
@@ -1592,25 +1918,220 @@ export class WebRtcEngine {
     this.broadcastStreamStatus();
   }
 
-  public async startWebcam(): Promise<MediaStream> {
-    this.stopWebcam();
+  /**
+   * Inicia uma fonte de vídeo específica (Webcam ou Placa de Captura USB/HDMI).
+   * Permite transmitir MÚLTIPLAS fontes ao mesmo tempo (ex: Placa de Captura + Webcam + Tela).
+   */
+  public async startMediaSource(options: {
+    deviceId: string;
+    audioDeviceId?: string;
+    title?: string;
+    kind?: 'webcam' | 'capture_card';
+    resolution?: '720p' | '1080p' | '1440p';
+    fps?: 30 | 60;
+  }): Promise<LocalMediaSource> {
+    const cleanId = (options.deviceId || 'default').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 28);
+    const sourceId = `src_${cleanId || 'cam'}`;
+
+    // Se esta mesma fonte já estiver aberta, fecha apenas ela antes de reabrir com novas configs
+    if (this.localMediaSources.has(sourceId)) {
+      this.stopMediaSource(sourceId);
+    }
+
+    const kind = options.kind || 'webcam';
+    const resolution = options.resolution || (kind === 'capture_card' ? '1080p' : '720p');
+    const fps = options.fps || (kind === 'capture_card' ? 60 : 30);
+    const profile = getVideoQualityProfile(resolution, fps);
+
+    // Webcams nunca capturam áudio (apenas vídeo). Placas de captura permitem enviar áudio HDMI/USB junto com o vídeo.
+    let audioDeviceId =
+      kind === 'webcam' ? 'none' : options.audioDeviceId ?? 'default';
+
+    const videoConstraints: MediaTrackConstraints = {
+      ...(options.deviceId && !options.deviceId.startsWith('default-')
+        ? { deviceId: { exact: options.deviceId } }
+        : {}),
+      width: { ideal: profile.width },
+      height: { ideal: profile.height },
+      frameRate: { ideal: fps },
+    };
+
+    // Primeiro abre o fluxo de vídeo da Webcam ou Placa de Captura
     const stream = await navigator.mediaDevices.getUserMedia({
-      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-      audio: true,
+      video: videoConstraints,
+      audio: false,
     });
 
-    this.localWebcamStream = stream;
-    this.isBroadcastingWebcam = true;
+    // Se for Placa de Captura e o envio de áudio estiver ativado, captura o áudio estéreo de alta fidelidade da placa
+    if (kind === 'capture_card' && audioDeviceId !== 'none') {
+      try {
+        let targetAudioDeviceId = audioDeviceId;
+
+        // Se estiver em 'default' (Automático da Placa), procura a interface de áudio que compartilha o mesmo groupId USB da placa de captura ou palavras-chave HDMI/USB
+        if (targetAudioDeviceId === 'default' || targetAudioDeviceId.startsWith('default-')) {
+          const vTrackSettings = stream.getVideoTracks()[0]?.getSettings?.() || {};
+          const videoGroupId = vTrackSettings.groupId;
+          const allDevices = await navigator.mediaDevices.enumerateDevices();
+          const audioInputs = allDevices.filter((d) => d.kind === 'audioinput');
+
+          const sameGroupAudio = videoGroupId
+            ? audioInputs.find((a) => a.groupId && a.groupId === videoGroupId)
+            : undefined;
+          const keywordAudio = audioInputs.find((a) =>
+            /capture|placa|hdmi|usb|digital audio|interface|elgato|avermedia|cam link|camlink|ezcap|mirabox|game/i.test(
+              a.label
+            )
+          );
+
+          if (sameGroupAudio?.deviceId) {
+            targetAudioDeviceId = sameGroupAudio.deviceId;
+          } else if (keywordAudio?.deviceId) {
+            targetAudioDeviceId = keywordAudio.deviceId;
+          }
+        }
+
+        const captureAudioConstraints: MediaTrackConstraints = {
+          ...(targetAudioDeviceId &&
+          targetAudioDeviceId !== 'default' &&
+          !targetAudioDeviceId.startsWith('default-')
+            ? { deviceId: { exact: targetAudioDeviceId } }
+            : {}),
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 2,
+          sampleRate: 48000,
+        };
+
+        const audioStream = await navigator.mediaDevices.getUserMedia({
+          video: false,
+          audio: captureAudioConstraints,
+        });
+
+        audioStream.getAudioTracks().forEach((aTrack) => {
+          aTrack.enabled = true;
+          try {
+            if ('contentHint' in aTrack) {
+              aTrack.contentHint = 'music';
+            }
+          } catch {}
+          stream.addTrack(aTrack);
+        });
+        audioDeviceId = targetAudioDeviceId;
+      } catch (audioErr) {
+        console.warn(
+          '[WebRTC] Aviso ao abrir áudio dedicado da Placa de Captura (seguindo apenas com vídeo):',
+          audioErr
+        );
+      }
+    }
+
+    const vTrack = stream.getVideoTracks()[0];
+    if (vTrack) {
+      if (kind === 'capture_card' || fps === 60) {
+        try {
+          if ('contentHint' in vTrack) vTrack.contentHint = 'motion';
+        } catch {}
+      }
+      vTrack.onended = () => {
+        this.stopMediaSource(sourceId);
+      };
+    }
+
+    const actualTitle =
+      options.title ||
+      vTrack?.label ||
+      (kind === 'capture_card' ? 'Placa de Captura' : 'Webcam');
+
+    const localSource: LocalMediaSource = {
+      sourceId,
+      deviceId: options.deviceId,
+      audioDeviceId,
+      title: actualTitle,
+      kind,
+      resolution,
+      fps,
+      stream,
+    };
+
+    this.localMediaSources.set(sourceId, localSource);
+    this.localWebcamStream = Array.from(this.localMediaSources.values())[0]?.stream || null;
+    this.isBroadcastingWebcam = this.localMediaSources.size > 0;
+
+    // Envia stream_status antes de renegociar os tracks para que o peer remoto já tenha video_track_id e audio_track_id
+    this.broadcastStreamStatus();
 
     for (const [peerId] of this.peers.entries()) {
-      this.attachTracksForPeer(peerId, 'webcam');
+      this.attachTracksForPeer(peerId, `source:${sourceId}`);
+    }
+
+    return localSource;
+  }
+
+  /**
+   * Interrompe apenas uma fonte específica (ex: desligar a webcam mantendo a placa de captura e a tela ativas)
+   */
+  public stopMediaSource(sourceId: string): void {
+    const existing = this.localMediaSources.get(sourceId);
+    if (!existing) return;
+
+    existing.stream.getTracks().forEach((t) => t.stop());
+    this.localMediaSources.delete(sourceId);
+
+    const remaining = Array.from(this.localMediaSources.values());
+    this.localWebcamStream = remaining[0]?.stream || null;
+    this.isBroadcastingWebcam = remaining.length > 0;
+
+    for (const [peerId, peerEntry] of this.peers.entries()) {
+      let changed = false;
+      const vKey = `source:${sourceId}_video`;
+      const vSender = peerEntry.sendersMap.get(vKey);
+      if (vSender) {
+        try {
+          peerEntry.pc.removeTrack(vSender);
+        } catch (_) {}
+        peerEntry.sendersMap.delete(vKey);
+        changed = true;
+      }
+
+      const aKey = `source:${sourceId}_audio`;
+      const aSender = peerEntry.sendersMap.get(aKey);
+      if (aSender) {
+        try {
+          peerEntry.pc.removeTrack(aSender);
+        } catch (_) {}
+        peerEntry.sendersMap.delete(aKey);
+        changed = true;
+      }
+
+      if (changed) {
+        this.renegotiatePeer(peerId);
+      }
     }
 
     this.broadcastStreamStatus();
-    return stream;
+  }
+
+  public async startWebcam(): Promise<MediaStream> {
+    const { videoDevices } = await this.enumerateMediaDevices(true);
+    const preferred =
+      videoDevices.find((d) => d.kind === 'webcam') || videoDevices[0];
+    const kind = preferred?.kind || 'webcam';
+    const src = await this.startMediaSource({
+      deviceId: preferred?.deviceId || 'default',
+      title: preferred?.label || (kind === 'capture_card' ? 'Placa de Captura' : 'Webcam'),
+      kind,
+      resolution: kind === 'capture_card' ? '1080p' : '720p',
+      fps: kind === 'capture_card' ? 60 : 30,
+      audioDeviceId: kind === 'capture_card' ? 'default' : 'none',
+    });
+    return src.stream;
   }
 
   public stopWebcam(): void {
+    for (const sourceId of Array.from(this.localMediaSources.keys())) {
+      this.stopMediaSource(sourceId);
+    }
     if (this.localWebcamStream) {
       this.localWebcamStream.getTracks().forEach((t) => t.stop());
       this.localWebcamStream = null;
@@ -1686,8 +2207,9 @@ export class WebRtcEngine {
     const peerEntry = this.peers.get(peerId);
     if (!peerEntry) return;
 
-    const type = streamType === 'webcam' ? 'webcam' : 'screen';
-    this.addTracksOnly(peerEntry, type);
+    const normalizedType =
+      streamType === 'screen' || streamType.startsWith('source:') ? streamType : 'webcam';
+    this.addTracksOnly(peerEntry, normalizedType);
 
     if (peerEntry.initialHandshakeDone || peerEntry.pc.remoteDescription !== null) {
       this.renegotiatePeer(peerId);
@@ -1698,6 +2220,23 @@ export class WebRtcEngine {
 
   private broadcastStreamStatus() {
     if (!this.myPeerId) return;
+    const mediaSourcesPayload: RemoteMediaSourceMeta[] = Array.from(
+      this.localMediaSources.values()
+    ).map((src) => ({
+      source_id: src.sourceId,
+      title: src.title,
+      kind: src.kind,
+      resolution: src.resolution,
+      fps: src.fps,
+      video_track_id: src.stream.getVideoTracks()[0]?.id,
+      audio_track_id: src.stream.getAudioTracks()[0]?.id,
+      stream_id: src.stream.id,
+    }));
+
+    const firstWebcamTrackId =
+      mediaSourcesPayload[0]?.video_track_id ||
+      this.localWebcamStream?.getVideoTracks()[0]?.id;
+
     this.sendWsMessage({
       type: 'stream_status',
       peer_id: this.myPeerId,
@@ -1706,8 +2245,11 @@ export class WebRtcEngine {
       screen_resolution: this.currentResolution,
       screen_fps: this.currentFps,
       screen_track_id: this.localScreenStream?.getVideoTracks()[0]?.id,
-      has_webcam: this.isBroadcastingWebcam,
-      webcam_track_id: this.localWebcamStream?.getVideoTracks()[0]?.id,
+      screen_audio_track_id: this.localScreenStream?.getAudioTracks()[0]?.id,
+      screen_stream_id: this.localScreenStream?.id,
+      has_webcam: this.isBroadcastingWebcam || mediaSourcesPayload.length > 0,
+      webcam_track_id: firstWebcamTrackId,
+      media_sources: mediaSourcesPayload,
       has_isolated_audio: this.isBroadcastingScreen,
     });
   }
@@ -1738,20 +2280,40 @@ export class WebRtcEngine {
   private statsInterval: any = null;
   private prevStatsMap: Map<
     string,
-    { packetsLost: number; packetsReceived: number; framesDropped: number }
+    {
+      timestamp: number;
+      bytesReceived: number;
+      bytesSent: number;
+      packetsLost: number;
+      packetsTotal: number;
+      framesDropped: number;
+    }
   > = new Map();
 
   public startPerformanceMonitoring() {
     if (this.statsInterval) return;
     this.statsInterval = setInterval(async () => {
+      const now = Date.now();
+      let totalInboundKbps = 0;
+      let totalOutboundKbps = 0;
+      let maxPacketLossPct = 0;
+      let maxRttMs = 0;
+      let maxFps = 0;
+      let connectedPeersCount = 0;
+
       for (const [peerId, peerEntry] of this.peers.entries()) {
         try {
           if (peerEntry.pc.connectionState !== 'connected') continue;
+          connectedPeersCount++;
+
           const stats = await peerEntry.pc.getStats();
           let rttMs = 0;
-          let packetLossPct = 0;
           let fps = 0;
-          let framesDroppedDelta = 0;
+          let bytesReceived = 0;
+          let bytesSent = 0;
+          let packetsLost = 0;
+          let packetsTotal = 0;
+          let framesDropped = 0;
 
           stats.forEach((report) => {
             if (
@@ -1761,67 +2323,121 @@ export class WebRtcEngine {
             ) {
               rttMs = Math.round(report.currentRoundTripTime * 1000);
             }
-            if (report.type === 'inbound-rtp' && report.kind === 'video') {
-              fps = report.framesPerSecond || 0;
-              const prev = this.prevStatsMap.get(peerId);
-              const lost = report.packetsLost || 0;
-              const received = report.packetsReceived || 0;
-              const dropped = report.framesDropped || 0;
-
-              if (prev) {
-                const deltaLost = Math.max(0, lost - prev.packetsLost);
-                const deltaRecv = Math.max(0, received - prev.packetsReceived);
-                const total = deltaLost + deltaRecv;
-                if (total > 0) {
-                  packetLossPct = Math.round((deltaLost / total) * 1000) / 10;
-                }
-                framesDroppedDelta = Math.max(0, dropped - prev.framesDropped);
+            if (report.type === 'inbound-rtp') {
+              bytesReceived += report.bytesReceived || 0;
+              packetsLost += Math.max(0, report.packetsLost || 0);
+              packetsTotal += report.packetsReceived || 0;
+              if (report.kind === 'video') {
+                if (report.framesPerSecond) fps = Math.max(fps, Math.round(report.framesPerSecond));
+                framesDropped += report.framesDropped || 0;
               }
-
-              this.prevStatsMap.set(peerId, {
-                packetsLost: lost,
-                packetsReceived: received,
-                framesDropped: dropped,
-              });
+            }
+            if (report.type === 'outbound-rtp') {
+              bytesSent += report.bytesSent || 0;
+              packetsTotal += report.packetsSent || 0;
+              if (report.kind === 'video' && report.framesPerSecond) {
+                fps = Math.max(fps, Math.round(report.framesPerSecond));
+              }
+            }
+            if (report.type === 'remote-inbound-rtp') {
+              packetsLost += Math.max(0, report.packetsLost || 0);
+              if (typeof report.roundTripTime === 'number' && rttMs === 0) {
+                rttMs = Math.round(report.roundTripTime * 1000);
+              }
             }
           });
+
+          const prev = this.prevStatsMap.get(peerId);
+          let peerInboundKbps = 0;
+          let peerOutboundKbps = 0;
+          let packetLossPct = 0;
+          let framesDroppedDelta = 0;
+
+          if (prev) {
+            const elapsedSec = Math.max(0.5, (now - prev.timestamp) / 1000);
+            const deltaBytesRecv = Math.max(0, bytesReceived - prev.bytesReceived);
+            const deltaBytesSent = Math.max(0, bytesSent - prev.bytesSent);
+
+            peerInboundKbps = Math.round((deltaBytesRecv * 8) / 1000 / elapsedSec);
+            peerOutboundKbps = Math.round((deltaBytesSent * 8) / 1000 / elapsedSec);
+
+            const deltaLost = Math.max(0, packetsLost - prev.packetsLost);
+            const deltaPackets = Math.max(0, packetsTotal - prev.packetsTotal);
+            const totalWindowPackets = deltaLost + deltaPackets;
+            if (totalWindowPackets > 0) {
+              packetLossPct = Math.round((deltaLost / totalWindowPackets) * 1000) / 10;
+            }
+            framesDroppedDelta = Math.max(0, framesDropped - prev.framesDropped);
+          }
+
+          this.prevStatsMap.set(peerId, {
+            timestamp: now,
+            bytesReceived,
+            bytesSent,
+            packetsLost,
+            packetsTotal,
+            framesDropped,
+          });
+
+          totalInboundKbps += peerInboundKbps;
+          totalOutboundKbps += peerOutboundKbps;
+          maxPacketLossPct = Math.max(maxPacketLossPct, packetLossPct);
+          maxRttMs = Math.max(maxRttMs, rttMs);
+          maxFps = Math.max(maxFps, fps);
+
+          const peerBitrateKbps = peerInboundKbps + peerOutboundKbps;
 
           if (packetLossPct > 5) {
             this.callbacks.onPerformanceLog?.({
               id: Math.random().toString(36).substring(2, 9),
-              timestamp: Date.now(),
+              timestamp: now,
               peerId,
               userName: peerEntry.info.nickname || 'Amigo',
               type: 'warning',
               message: `Perda de pacotes elevada (${packetLossPct}%)`,
-              metric: { packetLossPct, rttMs, fps },
+              metric: { packetLossPct, rttMs, fps, bitrateKbps: peerBitrateKbps },
             });
           } else if (rttMs > 180) {
             this.callbacks.onPerformanceLog?.({
               id: Math.random().toString(36).substring(2, 9),
-              timestamp: Date.now(),
+              timestamp: now,
               peerId,
               userName: peerEntry.info.nickname || 'Amigo',
               type: 'warning',
               message: `Latência de rede elevada (${rttMs}ms ping)`,
-              metric: { rttMs, packetLossPct, fps },
+              metric: { rttMs, packetLossPct, fps, bitrateKbps: peerBitrateKbps },
             });
           } else if (framesDroppedDelta > 15) {
             this.callbacks.onPerformanceLog?.({
               id: Math.random().toString(36).substring(2, 9),
-              timestamp: Date.now(),
+              timestamp: now,
               peerId,
               userName: peerEntry.info.nickname || 'Amigo',
               type: 'warning',
               message: `Queda de quadros de vídeo detectada (${framesDroppedDelta} frames descartados)`,
-              metric: { rttMs, packetLossPct, fps },
+              metric: { rttMs, packetLossPct, fps, bitrateKbps: peerBitrateKbps },
             });
           }
         } catch {
           // ignore
         }
       }
-    }, 3500);
+
+      const d = new Date(now);
+      const timeLabel = `${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
+
+      this.callbacks.onStatsUpdate?.({
+        timestamp: now,
+        timeLabel,
+        bitrateKbps: totalInboundKbps + totalOutboundKbps,
+        inboundKbps: totalInboundKbps,
+        outboundKbps: totalOutboundKbps,
+        packetLossPct: maxPacketLossPct,
+        rttMs: maxRttMs,
+        fps: maxFps || (this.isBroadcastingScreen ? this.currentFps : 0),
+        activePeers: connectedPeersCount,
+      });
+    }, 1500);
   }
 
   private closeWsOnly() {

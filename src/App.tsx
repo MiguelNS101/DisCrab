@@ -7,15 +7,20 @@ import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { RoomControl } from './components/RoomControl';
 import { BroadcastControls } from './components/BroadcastControls';
+import { VideoSourceManager } from './components/VideoSourceManager';
 import { LivePlayer } from './components/LivePlayer';
-import { FloatingStreamPopup } from './components/FloatingStreamPopup';
+import {
+  FloatingStreamPopup,
+  openExternalStreamWindowSync,
+  closeExternalStreamWindowSync,
+} from './components/FloatingStreamPopup';
 import { PerformanceDrawer } from './components/PerformanceDrawer';
 import { ChatBox } from './components/ChatBox';
 import { WindowSelector } from './components/WindowSelector';
 import { WindowItem, RoomDetails, StreamItem, ChatAttachment, AudioSourceMode } from './types';
 import { useWebRtc } from './hooks/useWebRtc';
 import { WebcamPreviewPip } from './components/WebcamPreviewPip';
-import { startNativeProcessAudio, startNativeMultiProcessAudio, isTauriEnvironment } from './services/tauriBridge';
+import { startNativeMultiProcessAudio, isTauriEnvironment } from './services/tauriBridge';
 import { Radio, Users, AlertCircle, X, Tv, ChevronDown, ChevronUp, AppWindow, RefreshCw } from 'lucide-react';
 
 export default function App() {
@@ -42,22 +47,27 @@ export default function App() {
 
   // Controle de Popups de Transmissão Flutuantes Individuais
   const [activePopups, setActivePopups] = useState<Record<string, boolean>>({});
+  // Controle do Gerenciador de Webcams & Placas de Captura USB
+  const [showSourceManager, setShowSourceManager] = useState<boolean>(false);
 
-  const togglePopup = (streamId: string) => {
+  // Abre ou foca uma nova janela real do Sistema Operacional (permitindo arrastar para outro monitor)
+  const openPopup = (streamId: string, title = 'StreamCompanion Live') => {
+    openExternalStreamWindowSync(streamId, title);
     setActivePopups((prev) => ({
       ...prev,
-      [streamId]: !prev[streamId],
+      [streamId]: true,
     }));
   };
 
   const closePopup = (streamId: string) => {
+    closeExternalStreamWindowSync(streamId);
     setActivePopups((prev) => ({
       ...prev,
       [streamId]: false,
     }));
   };
 
-  // Hook WebRTC nativo P2P com DataChannel Chat integrado, auto-reconexão e memória de volume
+  // Hook WebRTC nativo P2P com DataChannel Chat integrado, auto-reconexão, multi-fonte e memória de volume/inversão
   const {
     isConnected,
     isReconnecting,
@@ -68,9 +78,16 @@ export default function App() {
     isScreenSharing,
     isWebcamActive,
     localStream,
-    localWebcamStream,
+    localMediaSources,
+    videoDevices,
+    audioDevices,
+    refreshMediaDevices,
+    startMediaSource,
+    stopMediaSource,
+    stopAllMediaSources,
     chatMessages,
     performanceLogs,
+    telemetryHistory,
     clearPerformanceLogs,
     sendChatMessage,
     connectToRoom,
@@ -86,6 +103,8 @@ export default function App() {
     getStreamVolume,
     setStreamVolume,
     toggleStreamMute,
+    isStreamMirrored,
+    toggleStreamMirror,
   } = useWebRtc();
 
   // Seleção de janela e roteamento de áudio WASAPI por processo
@@ -173,7 +192,7 @@ export default function App() {
     }
   }, [roomDetails?.created_at]);
 
-  // Monta a lista de streams estritamente REAIS a partir dos peers conectados
+  // Monta a lista de streams estritamente REAIS a partir dos peers conectados (Tela + Múltiplas Webcams / Placas de Captura)
   const peerStreams: (StreamItem & { peerId: string; connectionState: RTCPeerConnectionState })[] = [];
   for (const p of peers) {
     if (p.hasScreen) {
@@ -185,6 +204,7 @@ export default function App() {
         connectionState: p.connectionState,
         user_name: p.nickname,
         type: 'screen',
+        source_kind: 'screen',
         title: p.screenTitle || 'Tela do Amigo',
         resolution: p.screenResolution || '1080p',
         fps: p.screenFps || 60,
@@ -196,12 +216,37 @@ export default function App() {
         stream: p.screenStream,
       });
     }
-    if (p.hasWebcam) {
+
+    if (p.mediaSources && p.mediaSources.length > 0) {
+      for (const src of p.mediaSources) {
+        const mId = `${p.id}-source-${src.source_id}`;
+        const savedVol = getStreamVolume(mId, p.nickname, src.source_id);
+        const remoteStream = p.mediaStreams?.[src.source_id] || null;
+        peerStreams.push({
+          id: mId,
+          peerId: p.id,
+          source_id: src.source_id,
+          source_kind: src.kind === 'capture_card' ? 'capture_card' : 'webcam',
+          connectionState: p.connectionState,
+          user_name: p.nickname,
+          type: 'webcam',
+          title: src.title || (src.kind === 'capture_card' ? 'Placa de Captura' : 'Webcam'),
+          resolution: src.resolution || '720p',
+          fps: src.fps || 30,
+          volume: savedVol,
+          is_muted: savedVol === 0,
+          is_watched: !!remoteStream,
+          isolated_audio: false,
+          stream: remoteStream,
+        });
+      }
+    } else if (p.hasWebcam) {
       const wId = `${p.id}-webcam`;
       const savedVol = getStreamVolume(wId, p.nickname, 'webcam');
       peerStreams.push({
         id: wId,
         peerId: p.id,
+        source_kind: 'webcam',
         connectionState: p.connectionState,
         user_name: p.nickname,
         type: 'webcam',
@@ -217,12 +262,12 @@ export default function App() {
     }
   }
 
-  const handleToggleWatch = (streamId: string) => {
-    const rawPeerId = streamId.replace('-screen', '').replace('-webcam', '');
-    const peer = peers.find((p) => p.id === rawPeerId || p.id === streamId);
-    if (peer) {
-      const type = streamId.endsWith('-webcam') ? 'webcam' : 'screen';
-      requestPeerStream(peer.id, type);
+  const handleToggleWatch = (stream: StreamItem & { peerId: string }) => {
+    if (stream.source_id) {
+      requestPeerStream(stream.peerId, `source:${stream.source_id}`);
+    } else {
+      const type = stream.type === 'webcam' ? 'webcam' : 'screen';
+      requestPeerStream(stream.peerId, type);
     }
   };
 
@@ -239,6 +284,9 @@ export default function App() {
   const handleSendMessage = (text: string, attachment?: ChatAttachment) => {
     sendChatMessage(text, nickname, attachment);
   };
+
+  const totalActiveStreams =
+    peerStreams.length + (isScreenSharing ? 1 : 0) + localMediaSources.length;
 
   return (
     <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black">
@@ -319,10 +367,14 @@ export default function App() {
           }}
         />
 
-        {/* Barra de Transmissão (Screen Share / Webcam / Resolução / FPS / Roteamento de Áudio) */}
+        {/* Barra de Transmissão (Screen Share / Multi-Webcam & Placa de Captura / Resolução / FPS / Roteamento de Áudio) */}
         <BroadcastControls
           isScreenSharing={isScreenSharing}
           isWebcamActive={isWebcamActive}
+          localMediaSources={localMediaSources}
+          showSourceManager={showSourceManager}
+          onToggleSourceManager={() => setShowSourceManager((prev) => !prev)}
+          onStopAllSources={stopAllMediaSources}
           selectedWindow={selectedWindow}
           isolateAudio={isolateAudio}
           audioSourceMode={audioSourceMode}
@@ -335,6 +387,21 @@ export default function App() {
           onChangeFps={setFps}
           onChangeResolution={setResolution}
           activeAudioLabel={getEffectiveAudioLabel()}
+        />
+
+        {/* Painel Multi-Fonte: Escolher Webcams e Placas de Captura USB (Com suporte simultâneo e botão Inverter) */}
+        <VideoSourceManager
+          isOpen={showSourceManager}
+          onClose={() => setShowSourceManager(false)}
+          videoDevices={videoDevices}
+          audioDevices={audioDevices}
+          localMediaSources={localMediaSources}
+          onRefreshDevices={refreshMediaDevices}
+          onStartSource={startMediaSource}
+          onStopSource={stopMediaSource}
+          onStopAllSources={stopAllMediaSources}
+          isStreamMirrored={isStreamMirrored}
+          onToggleStreamMirror={toggleStreamMirror}
         />
 
         {/* Alternador e Painel do Seletor de Janela & Áudio WASAPI */}
@@ -370,16 +437,15 @@ export default function App() {
           )}
         </div>
 
-
         {/* Linha 3: Transmissões em Tempo Real e Chat WebRTC P2P */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Seção das Lives e Transmissões (7 colunas) */}
+          {/* Seção das Lives e Transmissões (8 colunas) */}
           <div className="lg:col-span-8 space-y-4">
             <div className="flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-2">
                 <Radio className="w-4 h-4 text-cyan-400" />
                 <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-200 font-mono">
-                  Transmissões Ativas ({peerStreams.length + (isScreenSharing ? 1 : 0) + (isWebcamActive && localWebcamStream ? 1 : 0)})
+                  Transmissões Ativas ({totalActiveStreams})
                 </h2>
               </div>
               <div className="flex items-center gap-3 text-xs font-mono text-neutral-400">
@@ -406,7 +472,7 @@ export default function App() {
             </div>
 
             {/* Se não houver transmissões ativas */}
-            {!isScreenSharing && (!isWebcamActive || !localWebcamStream) && peerStreams.length === 0 ? (
+            {totalActiveStreams === 0 ? (
               <div className="bg-neutral-900/60 border border-neutral-800 rounded-xl p-8 text-center space-y-3">
                 <div className="w-12 h-12 rounded-full bg-neutral-950 border border-neutral-800 flex items-center justify-center mx-auto text-neutral-600">
                   <Tv className="w-6 h-6" />
@@ -416,7 +482,7 @@ export default function App() {
                     Nenhuma transmissão ativa no momento
                   </h3>
                   <p className="text-xs text-neutral-500 font-mono max-w-md mx-auto mt-1">
-                    Inicie sua transmissão no botão "Transmitir Tela" ou "Ligar Webcam", ou aguarde os amigos conectados abrirem suas lives.
+                    Inicie sua transmissão em "Transmitir Tela" ou escolha suas Webcams e Placas de Captura em "Câmeras & Placa de Captura".
                   </p>
                 </div>
               </div>
@@ -429,6 +495,7 @@ export default function App() {
                     userName={nickname}
                     title={selectedWindow ? selectedWindow.title : 'Tela do Usuário'}
                     type="screen"
+                    sourceKind="screen"
                     stream={localStream}
                     resolution={resolution}
                     fps={fps}
@@ -439,37 +506,54 @@ export default function App() {
                     isMuted={false}
                     isWatched={true}
                     isPoppedOut={!!activePopups['self-screen']}
-                    onOpenPopup={() => togglePopup('self-screen')}
+                    isMirrored={isStreamMirrored('self-screen')}
+                    onToggleMirror={() => toggleStreamMirror('self-screen')}
+                    onOpenPopup={() =>
+                      openPopup(
+                        'self-screen',
+                        `${nickname} - ${selectedWindow ? selectedWindow.title : 'Tela do Usuário'}`
+                      )
+                    }
+                    onClosePopup={() => closePopup('self-screen')}
                     onToggleWatch={() => {}}
                     onChangeVolume={() => {}}
                     onToggleMute={() => {}}
                   />
                 )}
 
-                {/* Webcam do Próprio Usuário (Local Preview) */}
-                {isWebcamActive && localWebcamStream && (
-                  <LivePlayer
-                    id="self-webcam"
-                    userName={nickname}
-                    title="Sua Câmera (Preview)"
-                    type="webcam"
-                    stream={localWebcamStream}
-                    resolution="720p"
-                    fps={30}
-                    isSelf={true}
-                    hasIsolatedAudio={false}
-                    volume={0}
-                    isMuted={true}
-                    isWatched={true}
-                    isPoppedOut={!!activePopups['self-webcam']}
-                    onOpenPopup={() => togglePopup('self-webcam')}
-                    onToggleWatch={() => {}}
-                    onChangeVolume={() => {}}
-                    onToggleMute={() => {}}
-                  />
-                )}
+                {/* Webcams e Placas de Captura do Próprio Usuário (Suporte Multi-Fonte Simultâneo) */}
+                {localMediaSources.map((src) => {
+                  const selfId = `self-${src.sourceId}`;
+                  return (
+                    <LivePlayer
+                      key={selfId}
+                      id={selfId}
+                      userName={nickname}
+                      title={src.title}
+                      type="webcam"
+                      sourceKind={src.kind}
+                      stream={src.stream}
+                      resolution={src.resolution}
+                      fps={src.fps}
+                      isSelf={true}
+                      hasIsolatedAudio={false}
+                      volume={0}
+                      isMuted={true}
+                      isWatched={true}
+                      isPoppedOut={!!activePopups[selfId]}
+                      isMirrored={isStreamMirrored(selfId)}
+                      onToggleMirror={() => toggleStreamMirror(selfId)}
+                      onStopLocalSource={() => stopMediaSource(src.sourceId)}
+                      onOpenPopup={() => openPopup(selfId, `${nickname} - ${src.title}`)}
+                      onClosePopup={() => closePopup(selfId)}
+                      onToggleWatch={() => {}}
+                      onChangeVolume={() => {}}
+                      onToggleMute={() => {}}
+                    />
+                  );
+                })}
 
-                {/* Transmissões Reais Recebidas dos Amigos */}
+                {/* Transmissões Reais Recebidas dos Amigos (Tela + Webcams + Placas de Captura) */}
                 {peerStreams.map((stream) => (
                   <LivePlayer
                     key={stream.id}
@@ -477,6 +561,7 @@ export default function App() {
                     userName={stream.user_name}
                     title={stream.title}
                     type={stream.type}
+                    sourceKind={stream.source_kind}
                     stream={stream.stream}
                     resolution={stream.resolution}
                     fps={stream.fps}
@@ -487,11 +572,20 @@ export default function App() {
                     isMuted={stream.is_muted}
                     isWatched={stream.is_watched}
                     isPoppedOut={!!activePopups[stream.id]}
+                    isMirrored={isStreamMirrored(stream.id)}
+                    onToggleMirror={() => toggleStreamMirror(stream.id)}
                     connectionState={stream.connectionState}
-                    onOpenPopup={() => togglePopup(stream.id)}
-                    onToggleWatch={() => handleToggleWatch(stream.id)}
-                    onChangeVolume={(vol) => setStreamVolume(stream.id, vol, stream.user_name, stream.type)}
-                    onToggleMute={() => toggleStreamMute(stream.id, stream.user_name, stream.type)}
+                    onOpenPopup={() =>
+                      openPopup(stream.id, `${stream.user_name} - ${stream.title}`)
+                    }
+                    onClosePopup={() => closePopup(stream.id)}
+                    onToggleWatch={() => handleToggleWatch(stream)}
+                    onChangeVolume={(vol) =>
+                      setStreamVolume(stream.id, vol, stream.user_name, stream.source_id || stream.type)
+                    }
+                    onToggleMute={() =>
+                      toggleStreamMute(stream.id, stream.user_name, stream.source_id || stream.type)
+                    }
                     onResetConnection={() => resetPeerConnection(stream.peerId)}
                   />
                 ))}
@@ -512,13 +606,14 @@ export default function App() {
         </div>
       </main>
 
-      {/* Janelas Flutuantes (Popups) de Transmissão com Controle de Tamanho e Qualidade */}
+      {/* Janelas Flutuantes (Popups) de Transmissão com Controle de Tamanho, Qualidade e Inversão */}
       {isScreenSharing && activePopups['self-screen'] && (
         <FloatingStreamPopup
           id="self-screen"
           userName={nickname}
           title={selectedWindow ? selectedWindow.title : 'Tela do Usuário'}
           type="screen"
+          sourceKind="screen"
           stream={localStream}
           resolution={resolution}
           fps={fps}
@@ -527,6 +622,8 @@ export default function App() {
           processName={selectedWindow?.process_name}
           volume={100}
           isMuted={false}
+          isMirrored={isStreamMirrored('self-screen')}
+          onToggleMirror={() => toggleStreamMirror('self-screen')}
           initialX={80}
           initialY={100}
           onClose={() => closePopup('self-screen')}
@@ -534,6 +631,35 @@ export default function App() {
           onToggleMute={() => {}}
         />
       )}
+
+      {localMediaSources.map((src, idx) => {
+        const selfId = `self-${src.sourceId}`;
+        if (!activePopups[selfId]) return null;
+        return (
+          <FloatingStreamPopup
+            key={`popup-${selfId}`}
+            id={selfId}
+            userName={nickname}
+            title={src.title}
+            type="webcam"
+            sourceKind={src.kind}
+            stream={src.stream}
+            resolution={src.resolution}
+            fps={src.fps}
+            isSelf={true}
+            hasIsolatedAudio={false}
+            volume={0}
+            isMuted={true}
+            isMirrored={isStreamMirrored(selfId)}
+            onToggleMirror={() => toggleStreamMirror(selfId)}
+            initialX={100 + idx * 45}
+            initialY={120 + idx * 45}
+            onClose={() => closePopup(selfId)}
+            onChangeVolume={() => {}}
+            onToggleMute={() => {}}
+          />
+        );
+      })}
 
       {peerStreams.map((stream, idx) => {
         if (!activePopups[stream.id]) return null;
@@ -544,6 +670,7 @@ export default function App() {
             userName={stream.user_name}
             title={stream.title}
             type={stream.type}
+            sourceKind={stream.source_kind}
             stream={stream.stream}
             resolution={stream.resolution}
             fps={stream.fps}
@@ -552,34 +679,45 @@ export default function App() {
             processName={stream.process_name}
             volume={stream.volume}
             isMuted={stream.is_muted}
-            initialX={120 + (idx * 50)}
-            initialY={140 + (idx * 50)}
+            isMirrored={isStreamMirrored(stream.id)}
+            onToggleMirror={() => toggleStreamMirror(stream.id)}
+            initialX={120 + idx * 50}
+            initialY={140 + idx * 50}
             onClose={() => closePopup(stream.id)}
-            onChangeVolume={(vol) => setStreamVolume(stream.id, vol, stream.user_name, stream.type)}
-            onToggleMute={() => toggleStreamMute(stream.id, stream.user_name, stream.type)}
+            onChangeVolume={(vol) =>
+              setStreamVolume(stream.id, vol, stream.user_name, stream.source_id || stream.type)
+            }
+            onToggleMute={() =>
+              toggleStreamMute(stream.id, stream.user_name, stream.source_id || stream.type)
+            }
           />
         );
       })}
 
-      {/* Telinha de Preview da Webcam para o Usuário Transmitindo */}
-      {isWebcamActive && localWebcamStream && (
+      {/* Telinha Flutuante Rápida da Primeira Fonte Ativa (Com botão de Inverter sincronizado) */}
+      {localMediaSources.length > 0 && (
         <WebcamPreviewPip
-          stream={localWebcamStream}
+          stream={localMediaSources[0].stream}
           nickname={nickname}
-          onStopWebcam={toggleWebcam}
+          title={localMediaSources[0].title}
+          sourceKind={localMediaSources[0].kind}
+          isMirrored={isStreamMirrored(`self-${localMediaSources[0].sourceId}`)}
+          onToggleMirror={() => toggleStreamMirror(`self-${localMediaSources[0].sourceId}`)}
+          onStopWebcam={() => stopMediaSource(localMediaSources[0].sourceId)}
         />
       )}
 
-      {/* Monitor Discreto de Desempenho e Telemetria P2P com Identificação de Usuário e WASAPI */}
+      {/* Monitor Discreto de Desempenho e Telemetria P2P com Gráfico Recharts em Tempo Real */}
       <PerformanceDrawer
         logs={performanceLogs}
+        telemetryHistory={telemetryHistory}
         peers={peers}
         onClearLogs={clearPerformanceLogs}
         myNickname={nickname}
         selectedWindow={selectedWindow}
         isolateAudio={isolateAudio}
         onToggleIsolateAudio={setIsolateAudio}
-        isBroadcasting={isScreenSharing}
+        isBroadcasting={isScreenSharing || localMediaSources.length > 0}
         activeAudioLabel={getEffectiveAudioLabel()}
       />
 
