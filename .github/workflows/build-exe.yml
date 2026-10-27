@@ -1,4 +1,4 @@
-name: Compilar StreamCompanion (Windows .exe + Android .apk)
+name: Compilar DisCrab (Windows .exe + Android .apk)
 
 on:
   push:
@@ -49,7 +49,7 @@ jobs:
           bun run lint
 
   build-windows:
-    name: 🪟 Compilar StreamCompanion (.exe) Windows
+    name: 🪟 Compilar DisCrab (.exe) Windows
     needs: test-suite
     runs-on: windows-latest
 
@@ -85,11 +85,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: 📦 Instalar Dependências do Frontend
+      - name: 📦 Instalar Dependências do Frontend e Gerar Ícones DisCrab
         shell: pwsh
         run: |
           bun install
           bun add -d @rolldown/binding-win32-x64-msvc@1.2.14
+          node scripts/generate-icons.mjs
 
       - name: 🧪 Executar Testes Nativos Rust (Sinalização P2P, Áudio WASAPI e Android DSP)
         run: cargo test --manifest-path src-tauri/Cargo.toml
@@ -110,7 +111,7 @@ jobs:
           foreach ($file in $exeFiles) {
             if ($file.Name -notlike "*build*" -and $file.Name -notlike "*tauri*") {
               Write-Host "Encontrado executavel: $($file.FullName)"
-              Copy-Item -Path $file.FullName -Destination "release_assets_windows/StreamCompanion-Portable.exe" -Force
+              Copy-Item -Path $file.FullName -Destination "release_assets_windows/DisCrab-Portable.exe" -Force
             }
           }
           
@@ -128,12 +129,12 @@ jobs:
       - name: 📤 Publicar Artefato Windows (.exe)
         uses: actions/upload-artifact@v4
         with:
-          name: StreamCompanion-Windows-Binaries
+          name: DisCrab-Windows-Binaries
           path: release_assets_windows/
           if-no-files-found: warn
 
   build-android:
-    name: 🤖 Compilar StreamCompanion (.apk) Android
+    name: 🤖 Compilar DisCrab (.apk) Android
     needs: test-suite
     runs-on: ubuntu-latest
 
@@ -147,14 +148,28 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: 📱 Configurar Android SDK e NDK
-        uses: android-actions/setup-android@v3
-
-      - name: 📦 Instalar NDK e Build Tools do Android
+      - name: 📱 Configurar Android SDK e NDK (Direto via sdkmanager sem pacote obsoleto 'tools')
         run: |
-          sdkmanager --install "ndk;26.1.10909125" "platforms;android-34" "build-tools;34.0.0"
-          echo "NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.1.10909125" >> $GITHUB_ENV
+          export ANDROID_SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          export ANDROID_HOME="$ANDROID_SDK_ROOT"
+          
+          SDKMANAGER=$(find "$ANDROID_SDK_ROOT/cmdline-tools" -name "sdkmanager" | sort -V | tail -n 1)
+          if [ -z "$SDKMANAGER" ]; then
+            echo "Erro: sdkmanager não encontrado em $ANDROID_SDK_ROOT/cmdline-tools"
+            exit 1
+          fi
+          echo "Usando sdkmanager: $SDKMANAGER"
+          
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --install "platform-tools" "platforms;android-34" "build-tools;34.0.0" "ndk;26.1.10909125"
+          
+          NDK_PATH="$ANDROID_SDK_ROOT/ndk/26.1.10909125"
+          echo "ANDROID_HOME=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT" >> $GITHUB_ENV
+          echo "NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> $GITHUB_ENV
+          echo "$ANDROID_SDK_ROOT/platform-tools" >> $GITHUB_PATH
+          echo "$ANDROID_SDK_ROOT/build-tools/34.0.0" >> $GITHUB_PATH
 
       - name: ⚙️ Configurar Node.js (v20)
         uses: actions/setup-node@v4
@@ -185,41 +200,54 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-android-cargo-
 
-      - name: 📦 Instalar Dependências do Frontend e Testar
+      - name: 📦 Instalar Dependências do Frontend, Gerar Ícones e Compilar Dist
         run: |
           bun install
+          node scripts/generate-icons.mjs
           bun run build
 
       - name: 🚀 Inicializar Projeto Android Tauri v2 e Compilar APK (ARM64)
         run: |
           if [ ! -d "src-tauri/gen/android" ]; then
-            npx @tauri-apps/cli android init
+            npx @tauri-apps/cli android init --ci || npx @tauri-apps/cli android init
           fi
-          npx @tauri-apps/cli android build --apk --target aarch64
+          npx @tauri-apps/cli icon src-tauri/icons/icon.png || true
+          
+          # Habilita tráfego WebSocket LAN (usesCleartextTraffic) e permissões de áudio/câmera no AndroidManifest
+          MANIFEST_PATH="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
+          if [ -f "$MANIFEST_PATH" ]; then
+            sed -i 's/<application/<application android:usesCleartextTraffic="true"/g' "$MANIFEST_PATH" || true
+          fi
+          
+          npx @tauri-apps/cli android build --apk --target aarch64 --ci || npx @tauri-apps/cli android build --apk --target aarch64
 
       - name: 🔏 Assinar e Preparar APK Instalável para Release
         run: |
           mkdir -p release_assets_android
           APK_PATH=$(find src-tauri/gen/android/app/build/outputs/apk -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Erro: Nenhum arquivo .apk encontrado após o build!"
+            exit 1
+          fi
           echo "APK encontrado em: $APK_PATH"
           
-          # Gera keystore de assinatura caso o APK seja unsigned para permitir instalação direta no celular
+          # Gera keystore de assinatura caso o APK seja unsigned para permitir instalação direta no celular Android
           keytool -genkey -v -keystore release-key.jks -keyalg RSA -keysize 2048 -validity 10000 \
-            -alias streamcompanion -storepass streamcompanion123 -keypass streamcompanion123 \
-            -dname "CN=StreamCompanion, OU=P2P, O=MiguelNS101, L=BR, S=SP, C=BR"
+            -alias discrab -storepass discrab123 -keypass discrab123 \
+            -dname "CN=DisCrab, OU=P2P, O=MiguelNS101, L=BR, S=SP, C=BR"
           
           $ANDROID_HOME/build-tools/34.0.0/zipalign -v -p 4 "$APK_PATH" aligned.apk || cp "$APK_PATH" aligned.apk
           $ANDROID_HOME/build-tools/34.0.0/apksigner sign --ks release-key.jks \
-            --ks-key-alias streamcompanion --ks-pass pass:streamcompanion123 \
-            --key-pass pass:streamcompanion123 \
-            --out "release_assets_android/StreamCompanion-Android.apk" aligned.apk
+            --ks-key-alias discrab --ks-pass pass:discrab123 \
+            --key-pass pass:discrab123 \
+            --out "release_assets_android/DisCrab-Android.apk" aligned.apk
           
           ls -lh release_assets_android/
 
       - name: 📤 Publicar Artefato Android (.apk)
         uses: actions/upload-artifact@v4
         with:
-          name: StreamCompanion-Android-APK
+          name: DisCrab-Android-APK
           path: release_assets_android/
           if-no-files-found: warn
 
@@ -233,13 +261,13 @@ jobs:
       - name: 📥 Baixar Binários Windows (.exe)
         uses: actions/download-artifact@v4
         with:
-          name: StreamCompanion-Windows-Binaries
+          name: DisCrab-Windows-Binaries
           path: release_assets/
 
       - name: 📥 Baixar Pacote Android (.apk)
         uses: actions/download-artifact@v4
         with:
-          name: StreamCompanion-Android-APK
+          name: DisCrab-Android-APK
           path: release_assets/
 
       - name: 📋 Listar Arquivos da Release
@@ -249,7 +277,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.0') }}
-          name: StreamCompanion ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.0') }}
+          name: DisCrab ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.0') }}
           files: release_assets/*
           draft: false
           prerelease: false

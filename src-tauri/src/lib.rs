@@ -82,6 +82,24 @@ fn list_windows() -> Vec<WindowInfo> {
     enumerate_windows()
 }
 
+/// Detecta o IP local da máquina/celular na rede Wi-Fi/LAN de forma compatível com Windows e Android NDK
+fn detect_local_lan_ip() -> String {
+    #[cfg(not(target_os = "android"))]
+    {
+        if let Ok(ip) = local_ip_address::local_ip() {
+            return ip.to_string();
+        }
+    }
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                return addr.ip().to_string();
+            }
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
 /// Inicia a sala do Host:
 /// No Windows: suporta Cloudflare Quick Tunnel ou LAN P2P.
 /// No Android: utiliza exclusivamente LAN / P2P Direto (sem Cloudflare Tunnel).
@@ -104,9 +122,7 @@ async fn create_room(
         *sig_lock = Some(server_state);
     }
 
-    let local_ip = local_ip_address::local_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|_| "127.0.0.1".to_string());
+    let local_ip = detect_local_lan_ip();
 
     // No Android, o Cloudflare Tunnel é sempre desativado
     let allow_cloudflare = use_cloudflare && !cfg!(target_os = "android");
@@ -228,9 +244,7 @@ fn stop_screen_capture(state: State<'_, AppState>) -> Result<(), String> {
 /// Retorna o IP local da máquina na rede LAN / Wi-Fi
 #[tauri::command]
 fn get_local_ip() -> String {
-    local_ip_address::local_ip()
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|_| "127.0.0.1".to_string())
+    detect_local_lan_ip()
 }
 
 /// Retorna o uso de memória RAM real do processo em Megabytes (MB)
@@ -259,23 +273,47 @@ fn get_process_memory() -> f64 {
     42.0
 }
 
-/// Abre o seletor nativo do sistema para escolher onde salvar o arquivo
+/// Abre o seletor nativo do sistema para escolher onde salvar o arquivo (Desktop) ou salva na pasta Download (Android)
 #[tauri::command]
 fn save_file_dialog(
     app: tauri::AppHandle,
     default_name: String,
     base64_data: String,
 ) -> Result<Option<String>, String> {
-    use tauri_plugin_dialog::DialogExt;
-    let file_path = app
-        .dialog()
-        .file()
-        .set_file_name(&default_name)
-        .blocking_save_file();
-    if let Some(path) = file_path {
-        let path_buf = path
-            .as_path()
-            .ok_or_else(|| "Caminho de arquivo inválido".to_string())?;
+    #[cfg(not(target_os = "android"))]
+    {
+        use tauri_plugin_dialog::DialogExt;
+        let file_path = app
+            .dialog()
+            .file()
+            .set_file_name(&default_name)
+            .blocking_save_file();
+        if let Some(path) = file_path {
+            let path_buf = path
+                .as_path()
+                .ok_or_else(|| "Caminho de arquivo inválido".to_string())?;
+            let clean_base64 = if let Some(idx) = base64_data.find(',') {
+                &base64_data[idx + 1..]
+            } else {
+                &base64_data
+            };
+            let bytes = base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                clean_base64,
+            )
+            .map_err(|e| format!("Falha ao decodificar base64: {}", e))?;
+
+            std::fs::write(path_buf, bytes)
+                .map_err(|e| format!("Falha ao salvar arquivo no disco: {}", e))?;
+            println!("[Download] Arquivo salvo com sucesso em: {:?}", path_buf);
+            return Ok(Some(path_buf.to_string_lossy().to_string()));
+        } else {
+            return Ok(None);
+        }
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = app;
         let clean_base64 = if let Some(idx) = base64_data.find(',') {
             &base64_data[idx + 1..]
         } else {
@@ -286,13 +324,11 @@ fn save_file_dialog(
             clean_base64,
         )
         .map_err(|e| format!("Falha ao decodificar base64: {}", e))?;
-
-        std::fs::write(path_buf, bytes)
-            .map_err(|e| format!("Falha ao salvar arquivo no disco: {}", e))?;
-        println!("[Download] Arquivo salvo com sucesso em: {:?}", path_buf);
-        Ok(Some(path_buf.to_string_lossy().to_string()))
-    } else {
-        Ok(None)
+        let dest = std::path::PathBuf::from("/storage/emulated/0/Download").join(&default_name);
+        if std::fs::write(&dest, bytes).is_ok() {
+            return Ok(Some(dest.to_string_lossy().to_string()));
+        }
+        Err("Usar fallback de download WebView no Android".to_string())
     }
 }
 
@@ -753,9 +789,11 @@ pub fn run() {
         startup_invite: startup_invite_arc.clone(),
     };
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_dialog::init())
+    let builder = tauri::Builder::default().plugin(tauri_plugin_shell::init());
+    #[cfg(not(target_os = "android"))]
+    let builder = builder.plugin(tauri_plugin_dialog::init());
+
+    builder
         .manage(app_state)
         .setup(move |app| {
             let handle = app.handle().clone();

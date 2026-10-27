@@ -1,13 +1,13 @@
-//! Atualizador Embutido (Self-Updater via GitHub Releases)
-//! Permite verificar novas Releases no GitHub, baixar o novo .exe com progresso em tempo real,
-//! substituir o executável portable em execução (via renomeação atômica NTFS) e reiniciar o app automaticamente.
+//! Atualizador Embutido (Self-Updater via GitHub Releases para Windows .exe e Android .apk)
+//! No Windows: baixa o novo .exe com progresso em tempo real, substitui o executável em execução e reinicia.
+//! No Android: localiza o .apk na Release do GitHub, faz o download com barra de progresso para a pasta Download
+//! e aciona o instalador do sistema Android.
 
 use crate::tunnel::{CloudflaredStatus, TunnelManager};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +28,9 @@ pub struct UpdateCheckResult {
     pub download_url: Option<String>,
     pub asset_name: Option<String>,
     pub asset_size_mb: f64,
+    pub apk_download_url: Option<String>,
+    pub apk_asset_name: Option<String>,
+    pub apk_size_mb: f64,
     pub html_url: String,
 }
 
@@ -40,11 +43,10 @@ pub struct UpdateProgressPayload {
     pub message: String,
 }
 
-/// Ao iniciar o app, remove silenciosamente qualquer arquivo `.old.exe` ou `.update.tmp`
+/// Ao iniciar o app no Desktop, remove silenciosamente qualquer arquivo `.old.exe` ou `.update.tmp`
 /// deixado pela atualização anterior.
 pub fn cleanup_old_executable() {
     std::thread::spawn(|| {
-        // Aguarda 1.2s para garantir que o processo antigo já encerrou totalmente
         std::thread::sleep(std::time::Duration::from_millis(1200));
 
         if let Ok(current_exe) = std::env::current_exe() {
@@ -72,9 +74,13 @@ pub fn cleanup_old_executable() {
 /// Retorna informações da versão atual do executável e status do cloudflared em %LOCALAPPDATA%
 pub fn get_system_info() -> AppSystemInfo {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
-    let exe_path = std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "Desconhecido".to_string());
+    let exe_path = if cfg!(target_os = "android") {
+        "Pacote Android Nativo (.apk)".to_string()
+    } else {
+        std::env::current_exe()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "Desconhecido".to_string())
+    };
     let cloudflared = TunnelManager::get_binary_status();
 
     AppSystemInfo {
@@ -141,17 +147,16 @@ fn is_newer_version(current: &str, latest: &str) -> bool {
         }
     }
 
-    // Se a tag mudou mas não segue semver numérico, considera como nova versão
     clean_lat != clean_cur
 }
 
-/// Consulta a última Release publicada no GitHub Releases
+/// Consulta a última Release publicada no GitHub Releases (extraindo tanto o .exe quanto o .apk)
 pub async fn check_github_release(repo_input: &str) -> Result<UpdateCheckResult, String> {
     let repo = normalize_github_repo(repo_input)?;
     let api_url = format!("https://api.github.com/repos/{}/releases/latest", repo);
 
     let client = reqwest::Client::builder()
-        .user_agent("StreamCompanion-AutoUpdater/2.0")
+        .user_agent("DisCrab-AutoUpdater/2.0")
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("Erro ao criar cliente HTTP: {}", e))?;
@@ -165,14 +170,14 @@ pub async fn check_github_release(repo_input: &str) -> Result<UpdateCheckResult,
 
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
         return Err(format!(
-            "Nenhuma Release encontrada em '{}' (ou o repositório é privado/inexistente). Crie uma Release na aba Releases do GitHub anexando o .exe.",
+            "Nenhuma Release encontrada em '{}' (ou o repositório ainda não possui Releases publicadas).",
             repo
         ));
     }
 
     if !resp.status().is_success() {
         return Err(format!(
-            "GitHub API retornou status {}: verifique o nome do repositório '{}'.",
+            "GitHub API retornou status {}: verifique o repositório '{}'.",
             resp.status(),
             repo
         ));
@@ -208,25 +213,59 @@ pub async fn check_github_release(repo_input: &str) -> Result<UpdateCheckResult,
         .unwrap_or("")
         .to_string();
 
-    // Procura o arquivo .exe anexado nos assets da Release (ignorando cloudflared.exe caso esteja junto)
-    let mut download_url: Option<String> = None;
-    let mut asset_name: Option<String> = None;
-    let mut asset_size_mb: f64 = 0.0;
+    let mut exe_download_url: Option<String> = None;
+    let mut exe_asset_name: Option<String> = None;
+    let mut exe_size_mb: f64 = 0.0;
+
+    let mut apk_download_url: Option<String> = None;
+    let mut apk_asset_name: Option<String> = None;
+    let mut apk_size_mb: f64 = 0.0;
 
     if let Some(assets) = json["assets"].as_array() {
-        // Prioriza executáveis do StreamCompanion (.exe)
         for asset in assets {
             let name = asset["name"].as_str().unwrap_or("");
             let lower = name.to_lowercase();
-            if lower.ends_with(".exe") && !lower.contains("cloudflared") {
-                download_url = asset["browser_download_url"].as_str().map(|s| s.to_string());
-                asset_name = Some(name.to_string());
-                let size_bytes = asset["size"].as_u64().unwrap_or(0);
-                asset_size_mb = ((size_bytes as f64) / (1024.0 * 1024.0) * 10.0).round() / 10.0;
-                break;
+            let size_bytes = asset["size"].as_u64().unwrap_or(0);
+            let size_mb = ((size_bytes as f64) / (1024.0 * 1024.0) * 10.0).round() / 10.0;
+
+            if exe_download_url.is_none()
+                && lower.ends_with(".exe")
+                && !lower.contains("cloudflared")
+            {
+                exe_download_url = asset["browser_download_url"].as_str().map(|s| s.to_string());
+                exe_asset_name = Some(name.to_string());
+                exe_size_mb = size_mb;
+            }
+
+            if apk_download_url.is_none() && lower.ends_with(".apk") {
+                apk_download_url = asset["browser_download_url"].as_str().map(|s| s.to_string());
+                apk_asset_name = Some(name.to_string());
+                apk_size_mb = size_mb;
             }
         }
     }
+
+    let (download_url, asset_name, asset_size_mb) = if cfg!(target_os = "android") {
+        (
+            apk_download_url.clone().or(exe_download_url),
+            apk_asset_name.clone().or(exe_asset_name),
+            if apk_size_mb > 0.0 {
+                apk_size_mb
+            } else {
+                exe_size_mb
+            },
+        )
+    } else {
+        (
+            exe_download_url.or_else(|| apk_download_url.clone()),
+            exe_asset_name.or_else(|| apk_asset_name.clone()),
+            if exe_size_mb > 0.0 {
+                exe_size_mb
+            } else {
+                apk_size_mb
+            },
+        )
+    };
 
     let has_update = is_newer_version(&current_version, &tag_name);
 
@@ -240,17 +279,140 @@ pub async fn check_github_release(repo_input: &str) -> Result<UpdateCheckResult,
         download_url,
         asset_name,
         asset_size_mb,
+        apk_download_url,
+        apk_asset_name,
+        apk_size_mb,
         html_url,
     })
 }
 
-/// Baixa o novo .exe, substitui o executável atual em execução (renomeando o atual para .old.exe)
-/// e reinicia o aplicativo automaticamente!
+/// No Android: faz o download do novo .apk com progresso em tempo real, salva em Download (se disponível)
+/// e abre o instalador/navegador do sistema Android para concluir a atualização do APK.
+#[cfg(target_os = "android")]
+pub async fn download_and_apply_update(
+    app: AppHandle,
+    download_url: String,
+    _tunnel_manager: &TunnelManager,
+) -> Result<(), String> {
+    let _ = app.emit(
+        "update-progress",
+        UpdateProgressPayload {
+            stage: "connecting".to_string(),
+            downloaded_mb: 0.0,
+            total_mb: 0.0,
+            percent: 5,
+            message: "Conectando ao GitHub Releases para baixar o APK...".to_string(),
+        },
+    );
+
+    let client = reqwest::Client::builder()
+        .user_agent("DisCrab-AndroidUpdater/2.0")
+        .build()
+        .map_err(|e| format!("Falha ao iniciar cliente HTTP no Android: {}", e))?;
+
+    let resp = client
+        .get(&download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Falha ao iniciar download do APK: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!(
+            "Servidor retornou erro HTTP {} ao baixar o APK.",
+            resp.status()
+        ));
+    }
+
+    let total_bytes = resp.content_length().unwrap_or(0);
+    let total_mb = ((total_bytes as f64) / (1024.0 * 1024.0) * 10.0).round() / 10.0;
+
+    // Tenta gravar uma cópia direta na pasta pública de Downloads do Android se permitido
+    let public_download_dir = PathBuf::from("/storage/emulated/0/Download");
+    let target_apk_path = if public_download_dir.exists() {
+        public_download_dir.join("DisCrab-Android.apk")
+    } else {
+        std::env::temp_dir().join("DisCrab-Android.apk")
+    };
+
+    let mut maybe_file = std::fs::File::create(&target_apk_path).ok();
+    let mut downloaded_bytes: u64 = 0;
+    let mut stream = resp.bytes_stream();
+    let mut first_chunk_checked = false;
+    let mut last_emitted_percent: u8 = 0;
+
+    while let Some(chunk_res) = stream.next().await {
+        let chunk = chunk_res.map_err(|e| format!("Erro durante download do APK: {}", e))?;
+
+        if !first_chunk_checked && chunk.len() >= 2 {
+            first_chunk_checked = true;
+            // Verifica assinatura ZIP/APK ('PK')
+            if chunk[0] != b'P' || chunk[1] != b'K' {
+                return Err(
+                    "O arquivo baixado não é um pacote Android válido (.apk).".to_string()
+                );
+            }
+        }
+
+        if let Some(ref mut f) = maybe_file {
+            let _ = f.write_all(&chunk);
+        }
+
+        downloaded_bytes += chunk.len() as u64;
+        let downloaded_mb = ((downloaded_bytes as f64) / (1024.0 * 1024.0) * 10.0).round() / 10.0;
+
+        let percent = if total_bytes > 0 {
+            std::cmp::min(95, ((downloaded_bytes * 95) / total_bytes) as u8)
+        } else {
+            60
+        };
+
+        if percent >= last_emitted_percent + 3 || downloaded_bytes == total_bytes {
+            last_emitted_percent = percent;
+            let _ = app.emit(
+                "update-progress",
+                UpdateProgressPayload {
+                    stage: "downloading".to_string(),
+                    downloaded_mb,
+                    total_mb,
+                    percent,
+                    message: format!("Baixando APK de atualização ({:.1} MB)...", downloaded_mb),
+                },
+            );
+        }
+    }
+
+    if let Some(mut f) = maybe_file {
+        let _ = f.flush();
+    }
+
+    let _ = app.emit(
+        "update-progress",
+        UpdateProgressPayload {
+            stage: "installing".to_string(),
+            downloaded_mb: total_mb,
+            total_mb,
+            percent: 100,
+            message: "Download concluído! Abrindo instalador de pacote do Android...".to_string(),
+        },
+    );
+
+    // Aciona o sistema Android via tauri_plugin_shell para abrir/instalar o APK
+    use tauri_plugin_shell::ShellExt;
+    let _ = app.shell().open(&download_url, None);
+
+    Ok(())
+}
+
+/// No Desktop (Windows): baixa o novo .exe, substitui o executável atual em execução
+/// (renomeando o atual para .old.exe) e reinicia o aplicativo automaticamente!
+#[cfg(not(target_os = "android"))]
 pub async fn download_and_apply_update(
     app: AppHandle,
     download_url: String,
     tunnel_manager: &TunnelManager,
 ) -> Result<(), String> {
+    use std::process::Command;
+
     let current_exe: PathBuf = std::env::current_exe()
         .map_err(|e| format!("Não foi possível localizar o executável atual: {}", e))?;
 
@@ -278,7 +440,7 @@ pub async fn download_and_apply_update(
     );
 
     let client = reqwest::Client::builder()
-        .user_agent("StreamCompanion-AutoUpdater/2.0")
+        .user_agent("DisCrab-AutoUpdater/2.0")
         .build()
         .map_err(|e| format!("Falha ao iniciar cliente HTTP: {}", e))?;
 
@@ -369,14 +531,12 @@ pub async fn download_and_apply_update(
             downloaded_mb: total_mb,
             total_mb,
             percent: 98,
-            message: "Substituindo executável e reiniciando o StreamCompanion...".to_string(),
+            message: "Substituindo executável e reiniciando o DisCrab...".to_string(),
         },
     );
 
-    // Remove backup anterior se existir
     let _ = std::fs::remove_file(&backup_old_path);
 
-    // No Windows NTFS, podemos renomear o próprio .exe em execução para .old.exe!
     std::fs::rename(&current_exe, &backup_old_path).map_err(|e| {
         format!(
             "Falha ao renomear executável atual para backup ({:?}): {}",
@@ -384,20 +544,15 @@ pub async fn download_and_apply_update(
         )
     })?;
 
-    // Move o novo executável para o nome original (ex: StreamCompanion.exe)
     if let Err(e) = std::fs::rename(&temp_update_path, &current_exe) {
-        // Rollback imediato caso falhe
         let _ = std::fs::rename(&backup_old_path, &current_exe);
         return Err(format!("Falha ao ativar novo executável: {}", e));
     }
 
-    // Encerra o túnel Cloudflare antes de reiniciar para liberar portas
     tunnel_manager.stop();
 
-    // Inicia a nova versão do StreamCompanion.exe
     let _ = Command::new(&current_exe).spawn();
 
-    // Encerra o processo antigo
     std::thread::spawn(|| {
         std::thread::sleep(std::time::Duration::from_millis(350));
         std::process::exit(0);

@@ -249,6 +249,9 @@ export interface UpdateCheckResult {
   download_url?: string | null;
   asset_name?: string | null;
   asset_size_mb: number;
+  apk_download_url?: string | null;
+  apk_asset_name?: string | null;
+  apk_size_mb?: number;
   html_url: string;
 }
 
@@ -284,19 +287,26 @@ export async function ensureCloudflaredBinary(): Promise<CloudflaredStatus> {
 
 export const FIXED_GITHUB_REPO = 'MiguelNS101/StreamCompanion';
 
-// Verifica a última Release no GitHub Releases
+// Verifica a última Release no GitHub Releases (extraindo .exe para Windows e .apk para Android)
 export async function checkGithubUpdate(
   repoInput: string = FIXED_GITHUB_REPO
 ): Promise<UpdateCheckResult> {
   const effectiveRepo = repoInput.trim() || FIXED_GITHUB_REPO;
+  const preferApk = isAndroidEnvironment();
 
   if (isTauriEnvironment()) {
-    return await invokeTauri<UpdateCheckResult>('check_github_update', {
+    const res = await invokeTauri<UpdateCheckResult>('check_github_update', {
       repo: effectiveRepo,
     });
+    if (preferApk && res.apk_download_url) {
+      res.download_url = res.apk_download_url;
+      res.asset_name = res.apk_asset_name || res.asset_name;
+      res.asset_size_mb = res.apk_size_mb || res.asset_size_mb;
+    }
+    return res;
   }
 
-  // Fallback web para testar a consulta à API do GitHub direto no navegador
+  // Fallback web/mobile para consultar a API do GitHub direto no navegador/WebView
   const trimmed = effectiveRepo.replace(/\/+$/, '').replace(/\.git$/, '');
   const cleaned = trimmed.includes('github.com/')
     ? trimmed.split('github.com/')[1]
@@ -317,29 +327,43 @@ export async function checkGithubUpdate(
   const json = await resp.json();
   const currentVersion = '1.1.0';
   const latestVersion = json.tag_name || currentVersion;
-  let downloadUrl: string | null = null;
-  let assetName: string | null = null;
-  let assetSizeMb = 0;
-  const preferApk = isAndroidEnvironment();
+
+  let exeDownloadUrl: string | null = null;
+  let exeAssetName: string | null = null;
+  let exeSizeMb = 0;
+
+  let apkDownloadUrl: string | null = null;
+  let apkAssetName: string | null = null;
+  let apkSizeMb = 0;
 
   if (Array.isArray(json.assets)) {
     for (const asset of json.assets) {
       const name = String(asset.name || '');
       const lower = name.toLowerCase();
-      if (preferApk && lower.endsWith('.apk')) {
-        downloadUrl = asset.browser_download_url || null;
-        assetName = name;
-        assetSizeMb = Math.round(((asset.size || 0) / (1024 * 1024)) * 10) / 10;
-        break;
+      const sizeMb = Math.round(((asset.size || 0) / (1024 * 1024)) * 10) / 10;
+
+      if (!exeDownloadUrl && lower.endsWith('.exe') && !lower.includes('cloudflared')) {
+        exeDownloadUrl = asset.browser_download_url || null;
+        exeAssetName = name;
+        exeSizeMb = sizeMb;
       }
-      if (!preferApk && lower.endsWith('.exe') && !lower.includes('cloudflared')) {
-        downloadUrl = asset.browser_download_url || null;
-        assetName = name;
-        assetSizeMb = Math.round(((asset.size || 0) / (1024 * 1024)) * 10) / 10;
-        break;
+      if (!apkDownloadUrl && lower.endsWith('.apk')) {
+        apkDownloadUrl = asset.browser_download_url || null;
+        apkAssetName = name;
+        apkSizeMb = sizeMb;
       }
     }
   }
+
+  const downloadUrl = preferApk
+    ? apkDownloadUrl || exeDownloadUrl
+    : exeDownloadUrl || apkDownloadUrl;
+  const assetName = preferApk
+    ? apkAssetName || exeAssetName
+    : exeAssetName || apkAssetName;
+  const assetSizeMb = preferApk
+    ? apkSizeMb || exeSizeMb
+    : exeSizeMb || apkSizeMb;
 
   const cleanCur = currentVersion.replace(/^[vV]/, '');
   const cleanLat = String(latestVersion).replace(/^[vV]/, '');
@@ -354,6 +378,9 @@ export async function checkGithubUpdate(
     download_url: downloadUrl,
     asset_name: assetName,
     asset_size_mb: assetSizeMb,
+    apk_download_url: apkDownloadUrl,
+    apk_asset_name: apkAssetName,
+    apk_size_mb: apkSizeMb,
     html_url: json.html_url || '',
   };
 }
@@ -472,19 +499,45 @@ export async function runSystemDiagnostics(): Promise<NativeDiagnosticsReport> {
   };
 }
 
-// Baixa o novo .exe da Release, substitui o executável em execução e reinicia o app automaticamente
+// Dispara o download direto de um arquivo .apk no navegador/WebView do Android
+export function triggerAndroidApkDownload(apkUrl: string, fileName = 'DisCrab-Android.apk'): void {
+  if (typeof document === 'undefined') return;
+  const link = document.createElement('a');
+  link.href = apkUrl;
+  link.setAttribute('download', fileName);
+  link.setAttribute('target', '_blank');
+  link.setAttribute('rel', 'noopener noreferrer');
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+// No Windows: baixa o novo .exe da Release, substitui o executável em execução e reinicia o app.
+// No Android: baixa o novo .apk com progresso em tempo real e abre o instalador do sistema Android.
 export async function installGithubUpdate(downloadUrl: string): Promise<void> {
-  if (isAndroidEnvironment() && downloadUrl.toLowerCase().endsWith('.apk')) {
-    window.open(downloadUrl, '_blank', 'noopener,noreferrer');
+  const isApk = downloadUrl.toLowerCase().endsWith('.apk') || isAndroidEnvironment();
+
+  if (isApk) {
+    if (isTauriEnvironment()) {
+      try {
+        await invokeTauri<void>('install_github_update', {
+          downloadUrl,
+        });
+      } catch (err) {
+        console.warn('[tauriBridge] Fallback de download direto para APK Android:', err);
+      }
+    }
+    triggerAndroidApkDownload(downloadUrl, 'DisCrab-Android.apk');
     return;
   }
+
   if (isTauriEnvironment()) {
     return await invokeTauri<void>('install_github_update', {
       downloadUrl,
     });
   }
   throw new Error(
-    'A substituição automática do executável (.exe) funciona dentro do aplicativo desktop StreamCompanion.exe.'
+    'A substituição automática do executável (.exe) funciona dentro do aplicativo desktop DisCrab.exe.'
   );
 }
 

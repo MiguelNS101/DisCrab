@@ -324,12 +324,37 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
                   </div>
                 )}
 
-                {updateResult.download_url ? (
-                  <div className="flex items-center justify-end gap-2 pt-1">
+                {updateResult.download_url || updateResult.apk_download_url ? (
+                  <div className="flex items-center justify-end gap-2 pt-1 flex-wrap">
+                    {/* No PC/Web: se a Release também tiver o .apk, exibe botão auxiliar para baixar o APK */}
+                    {!isAndroid &&
+                      updateResult.apk_download_url &&
+                      updateResult.apk_download_url !== updateResult.download_url && (
+                        <button
+                          type="button"
+                          disabled={isInstalling}
+                          onClick={() => handleInstallUpdate(updateResult.apk_download_url)}
+                          className="px-3 py-2 rounded-lg font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-all bg-neutral-800 hover:bg-neutral-700 text-emerald-300 border border-emerald-500/40"
+                          title="Baixar instalador .APK para celular Android"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>
+                            Baixar .APK Android ({updateResult.apk_size_mb || updateResult.asset_size_mb} MB)
+                          </span>
+                        </button>
+                      )}
+
+                    {/* Botão principal de Atualização (.APK no Android / .EXE no Windows) */}
                     <button
                       type="button"
                       disabled={isInstalling}
-                      onClick={() => handleInstallUpdate(updateResult.download_url)}
+                      onClick={() =>
+                        handleInstallUpdate(
+                          isAndroid
+                            ? updateResult.apk_download_url || updateResult.download_url
+                            : updateResult.download_url || updateResult.apk_download_url
+                        )
+                      }
                       className={`px-4 py-2 rounded-lg font-bold text-xs flex items-center gap-2 cursor-pointer transition-all ${
                         updateResult.has_update
                           ? 'bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-400 hover:to-cyan-400 text-black shadow-lg'
@@ -339,7 +364,9 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
                       <Download className="w-4 h-4" />
                       <span>
                         {isAndroid
-                          ? `Baixar APK (${updateResult.latest_version})`
+                          ? updateResult.has_update
+                            ? `Baixar e Atualizar APK (${updateResult.latest_version})`
+                            : `Baixar APK novamente (${updateResult.latest_version})`
                           : updateResult.has_update
                           ? `Baixar ${updateResult.latest_version}, Substituir .EXE e Reiniciar`
                           : 'Reinstalar / Forçar Atualização desta Release'}
@@ -348,7 +375,7 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
                   </div>
                 ) : (
                   <p className="text-[11px] text-amber-300">
-                    Aviso: Esta Release não possui um pacote binário anexado nos Assets.
+                    Aviso: Esta Release não possui um pacote binário (.exe / .apk) anexado nos Assets.
                   </p>
                 )}
               </div>

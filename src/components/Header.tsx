@@ -133,6 +133,15 @@ export const Header: React.FC<HeaderProps> = ({
             if (res.latest_version) {
               setLatestTag(res.latest_version);
             }
+            // No Android, quando há atualização de APK disponível na primeira entrada, abre o modal automaticamente
+            if (
+              res.has_update &&
+              typeof navigator !== 'undefined' &&
+              /android/i.test(navigator.userAgent || '') &&
+              (res.apk_download_url || res.download_url)
+            ) {
+              setInternalUpdaterOpen(true);
+            }
           }
           return res;
         })
