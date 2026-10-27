@@ -79,37 +79,89 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
 
   const effectiveKind = sourceKind || (type === 'screen' ? 'screen' : 'webcam');
 
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+
+  // Assinatura reativa das faixas (vídeo + áudio) para re-vincular imediatamente caso a faixa de áudio chegue alguns ms depois do vídeo
+  const streamTracksKey = stream
+    ? stream
+        .getTracks()
+        .map((t) => `${t.kind}:${t.id}:${t.readyState}`)
+        .join('|')
+    : '';
+
   // Web Audio API para amplificação limpa acima de 100% (101% até 150% boost) sem duplicação de fase
   const audioCtxRef = useRef<AudioContext | null>(null);
   const boostGainRef = useRef<GainNode | null>(null);
   const boostSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
-  const boostStreamRef = useRef<MediaStream | null>(null);
+  const boostStreamKeyRef = useRef<string>('');
 
-  // Vincula o MediaStream nativo da RTCPeerConnection ao elemento <video> apenas quando o stream muda
+  // Vincula o MediaStream nativo da RTCPeerConnection ao elemento <video> sempre que o stream ou suas faixas mudam
   useEffect(() => {
     const el = videoRef.current;
     if (el && stream && isWatched && !isPoppedOut) {
+      stream.getAudioTracks().forEach((t) => {
+        t.enabled = true;
+      });
+
       if (el.srcObject !== stream) {
         el.srcObject = stream;
+      } else {
+        // Força o elemento <video> do Chromium a reconhecer novas faixas de áudio adicionadas ao MediaStream
+        el.srcObject = stream;
       }
-      el.muted = isSelf ? true : isMuted;
+
+      const targetMuted = isSelf ? true : isMuted;
+      el.muted = targetMuted;
       el.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
-      el.play().catch((err) => {
-        console.warn('[LivePlayer] Autoplay restrito pelo navegador, aguardando interação do usuário:', err);
-      });
+
+      el.play()
+        .then(() => {
+          setAutoplayBlocked(false);
+        })
+        .catch(() => {
+          // Se o navegador bloqueou autoplay com áudio antes de clique do usuário, inicia o vídeo e desbloqueia no 1º clique
+          if (!targetMuted) {
+            setAutoplayBlocked(true);
+            el.muted = true;
+            el.play().catch(() => {});
+          }
+        });
+    } else {
+      setAutoplayBlocked(false);
     }
-  }, [stream, isWatched, isPoppedOut]);
+  }, [stream, streamTracksKey, isWatched, isPoppedOut, isSelf]);
+
+  // Desbloqueia automaticamente o áudio assim que o usuário clicar em qualquer lugar da janela
+  useEffect(() => {
+    if (!autoplayBlocked) return;
+    const unlockAudio = () => {
+      const el = videoRef.current;
+      if (el && !isSelf && !isMuted) {
+        el.muted = false;
+        el.volume = Math.max(0, Math.min(1.0, volume / 100));
+        el.play()
+          .then(() => setAutoplayBlocked(false))
+          .catch(() => {});
+      }
+      if (audioCtxRef.current && audioCtxRef.current.state === 'suspended') {
+        audioCtxRef.current.resume().catch(() => {});
+      }
+    };
+    window.addEventListener('pointerdown', unlockAudio, { once: true });
+    return () => window.removeEventListener('pointerdown', unlockAudio);
+  }, [autoplayBlocked, isSelf, isMuted, volume]);
 
   // Aplica o volume salvo sem reiniciar o elemento <video> e sem silenciar a faixa WebRTC no Chromium
   useEffect(() => {
     const el = videoRef.current;
-    if (el) {
+    if (el && !autoplayBlocked) {
       el.muted = isSelf ? true : isMuted;
       el.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
     }
 
     const hasAudioTracks = !!stream && stream.getAudioTracks().length > 0;
-    const useBoost = !isSelf && !isMuted && volume > 100 && hasAudioTracks && isWatched && !isPoppedOut;
+    const useBoost =
+      !isSelf && !isMuted && volume > 100 && hasAudioTracks && isWatched && !isPoppedOut;
 
     if (useBoost && stream) {
       try {
@@ -121,7 +173,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
         if (ctx.state === 'suspended') {
           ctx.resume().catch(() => {});
         }
-        if (boostStreamRef.current !== stream) {
+        if (boostStreamKeyRef.current !== streamTracksKey) {
           try {
             boostSourceRef.current?.disconnect();
             boostGainRef.current?.disconnect();
@@ -130,7 +182,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
           boostGainRef.current = ctx.createGain();
           boostSourceRef.current.connect(boostGainRef.current);
           boostGainRef.current.connect(ctx.destination);
-          boostStreamRef.current = stream;
+          boostStreamKeyRef.current = streamTracksKey;
         }
         if (boostGainRef.current) {
           boostGainRef.current.gain.value = (volume - 100) / 100;
@@ -141,10 +193,16 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
       }
     }
 
-    if (boostGainRef.current) {
-      boostGainRef.current.gain.value = 0;
+    if (boostSourceRef.current || boostGainRef.current) {
+      try {
+        boostSourceRef.current?.disconnect();
+        boostGainRef.current?.disconnect();
+      } catch {}
+      boostSourceRef.current = null;
+      boostGainRef.current = null;
+      boostStreamKeyRef.current = '';
     }
-  }, [volume, isMuted, isSelf, stream, isWatched, isPoppedOut]);
+  }, [volume, isMuted, isSelf, stream, streamTracksKey, isWatched, isPoppedOut, autoplayBlocked]);
 
   useEffect(() => {
     return () => {
@@ -158,7 +216,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   }, []);
 
   const handleVolumeUpdate = (newVol: number) => {
-    const clamped = Math.max(0, Math.min(150, Math.round(newVol)));
+    const clamped = Math.max(0, Math.min(200, Math.round(newVol)));
     onChangeVolume(clamped);
     setSavedVolumeFlash(true);
     if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
@@ -320,6 +378,26 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
               )}
             </div>
 
+            {autoplayBlocked && !isSelf && !isMuted && (
+              <button
+                type="button"
+                onClick={() => {
+                  const el = videoRef.current;
+                  if (el) {
+                    el.muted = false;
+                    el.volume = Math.max(0, Math.min(1.0, volume / 100));
+                    el.play()
+                      .then(() => setAutoplayBlocked(false))
+                      .catch(() => {});
+                  }
+                }}
+                className="absolute bottom-3 left-3 z-20 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-neutral-950 font-mono font-bold text-xs shadow-lg cursor-pointer animate-bounce"
+              >
+                <Volume2 className="w-4 h-4" />
+                Clique para Ativar o Áudio
+              </button>
+            )}
+
             {/* Botões de Ação Superior Direito (Inverter + Reset P2P + Popup + Tela Cheia + Encerrar Fonte) */}
             <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
               {onToggleMirror && (
@@ -449,17 +527,17 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 )}
               </button>
 
-              {/* Slider de Volume Individual (0% até 150% boost) com salvamento automático */}
+              {/* Slider de Volume Individual (0% até 200% boost) com salvamento automático */}
               <div className="flex items-center gap-2">
                 <input
                   type="range"
                   min={0}
-                  max={150}
+                  max={200}
                   value={isSelf ? 0 : isMuted ? 0 : volume}
                   onChange={(e) => handleVolumeUpdate(Number(e.target.value))}
                   onDoubleClick={() => !isSelf && handleVolumeUpdate(100)}
                   disabled={isSelf}
-                  title="Arraste ou use a roda do mouse para ajustar a altura do áudio (duplo clique volta para 100%). Salvo automaticamente."
+                  title="Arraste ou use a roda do mouse para ajustar a altura do áudio até 200% (duplo clique volta para 100%). Salvo automaticamente."
                   className="w-24 sm:w-28 accent-cyan-400 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
                 />
                 <span

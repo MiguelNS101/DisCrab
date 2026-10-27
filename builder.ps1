@@ -236,9 +236,20 @@ if (-not (Test-Path $cloudflaredTargetFile) -or (Get-Item $cloudflaredTargetFile
 # ------------------------------------------------------------------------------
 $IconsDir = Join-Path $TauriDir "icons"
 $IconIco = Join-Path $IconsDir "icon.ico"
+$GenScriptPath = Join-Path $RootDir "scripts\generate-icons.mjs"
 
 if (-not (Test-Path $IconsDir)) {
     New-Item -ItemType Directory -Path $IconsDir -Force | Out-Null
+}
+
+if (Test-Path $GenScriptPath) {
+    Write-Info "Atualizando ícones oficiais do StreamCompanion (scripts/generate-icons.mjs)..."
+    try {
+        & node $GenScriptPath | Out-Null
+        Write-Success "Ícones DIB/PNG/ICO gerados com sucesso em src-tauri/icons."
+    } catch {
+        Write-Warn "Aviso ao executar scripts/generate-icons.mjs: $_"
+    }
 }
 
 if (-not (Test-Path $IconIco)) {

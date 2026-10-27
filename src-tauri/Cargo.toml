@@ -1,10 +1,14 @@
 [package]
 name = "stream-companion"
-version = "1.0.0"
-description = "StreamCompanion - Ultra-lightweight P2P screen & audio streaming with WASAPI process loopback"
+version = "1.1.0"
+description = "StreamCompanion - Ultra-lightweight P2P screen & audio streaming with WASAPI process loopback and Android DSP"
 authors = ["StreamCompanion Team"]
 edition = "2021"
 default-run = "stream-companion"
+
+[lib]
+name = "stream_companion_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2.0", features = [] }
@@ -21,11 +25,11 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 base64 = "0.22"
 rand = "0.8"
 regex = "1.10"
-scrap = "0.5"
 local-ip-address = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
 
 [target.'cfg(windows)'.dependencies]
+scrap = "0.5"
 windows-core = "0.58"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
@@ -43,3 +47,4 @@ windows = { version = "0.58", features = [
     "Win32_System_JobObjects",
     "Win32_System_LibraryLoader",
 ] }
+

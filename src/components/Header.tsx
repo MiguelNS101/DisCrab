@@ -1,14 +1,36 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Cpu, ShieldCheck, Terminal, ArrowUpCircle, Palette } from 'lucide-react';
 import {
   isTauriEnvironment,
   getProcessMemory,
   checkGithubUpdate,
   getAppSystemInfo,
+  FIXED_GITHUB_REPO,
+  UpdateCheckResult,
 } from '../services/tauriBridge';
 import { AppUpdaterModal } from './AppUpdaterModal';
 import { AppIcon } from './AppIcon';
 import { useTheme } from '../context/ThemeContext';
+
+// Garante que a verificação automática de atualização ocorra APENAS UMA VEZ ao abrir o app pela primeira vez
+let startupUpdateChecked = false;
+let startupUpdatePromise: Promise<UpdateCheckResult | null> | null = null;
+let startupCachedResult: UpdateCheckResult | null = null;
+let startupUpdateError: string | null = null;
+
+export function getStartupUpdateState(): {
+  checked: boolean;
+  result: UpdateCheckResult | null;
+  error: string | null;
+  promise: Promise<UpdateCheckResult | null> | null;
+} {
+  return {
+    checked: startupUpdateChecked,
+    result: startupCachedResult,
+    error: startupUpdateError,
+    promise: startupUpdatePromise,
+  };
+}
 
 interface HeaderProps {
   onOpenCodeViewer?: () => void;
@@ -31,18 +53,38 @@ export const Header: React.FC<HeaderProps> = ({
   const { setIsCustomizerOpen } = useTheme();
   const [memoryMb, setMemoryMb] = useState<number>(38.4);
   const [internalUpdaterOpen, setInternalUpdaterOpen] = useState<boolean>(false);
-  const [hasUpdateAvailable, setHasUpdateAvailable] = useState<boolean>(false);
-  const [latestTag, setLatestTag] = useState<string>('');
-  const [currentVersion, setCurrentVersion] = useState<string>('1.0.0');
+  const [hasUpdateAvailable, setHasUpdateAvailable] = useState<boolean>(
+    Boolean(startupCachedResult?.has_update)
+  );
+  const [latestTag, setLatestTag] = useState<string>(
+    startupCachedResult?.latest_version || ''
+  );
+  const [currentVersion, setCurrentVersion] = useState<string>('1.1.0');
+  const [cachedUpdateResult, setCachedUpdateResult] = useState<UpdateCheckResult | null>(
+    startupCachedResult
+  );
 
   const isUpdaterOpen = Boolean(internalUpdaterOpen || externalUpdaterOpen);
 
-  const handleCloseUpdater = () => {
+  const handleCloseUpdater = useCallback(() => {
     setInternalUpdaterOpen(false);
     if (onExternalUpdaterClose) {
       onExternalUpdaterClose();
     }
-  };
+  }, [onExternalUpdaterClose]);
+
+  const handleUpdateDetected = useCallback(
+    (hasUpdate: boolean, tag?: string, result?: UpdateCheckResult) => {
+      setHasUpdateAvailable(hasUpdate);
+      if (tag) setLatestTag(tag);
+      if (result) {
+        startupCachedResult = result;
+        startupUpdateError = null;
+        setCachedUpdateResult(result);
+      }
+    },
+    []
+  );
 
   // Monitoramento em tempo real da memória do processo
   useEffect(() => {
@@ -57,16 +99,20 @@ export const Header: React.FC<HeaderProps> = ({
     };
 
     fetchMemory();
-    const interval = setInterval(fetchMemory, 1500);
+    const interval = setInterval(fetchMemory, 2000);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
   }, []);
 
-  // Carrega a versão atual e verifica silenciosamente no GitHub se há atualização disponível
+  // Carrega a versão atual e verifica automaticamente APENAS NA PRIMEIRA VEZ que o app é aberto
   useEffect(() => {
     let mounted = true;
+    try {
+      localStorage.removeItem('sc_github_repo');
+    } catch {}
+
     getAppSystemInfo()
       .then((info) => {
         if (mounted && info.current_version) {
@@ -75,19 +121,35 @@ export const Header: React.FC<HeaderProps> = ({
       })
       .catch(() => {});
 
-    try {
-      const savedRepo = localStorage.getItem('sc_github_repo');
-      if (savedRepo && savedRepo.includes('/')) {
-        checkGithubUpdate(savedRepo)
-          .then((res) => {
-            if (mounted && res.has_update) {
-              setHasUpdateAvailable(true);
+    if (!startupUpdateChecked && !startupUpdatePromise) {
+      startupUpdateChecked = true;
+      startupUpdatePromise = checkGithubUpdate(FIXED_GITHUB_REPO)
+        .then((res) => {
+          startupCachedResult = res;
+          startupUpdateError = null;
+          if (mounted) {
+            setCachedUpdateResult(res);
+            setHasUpdateAvailable(res.has_update);
+            if (res.latest_version) {
               setLatestTag(res.latest_version);
             }
-          })
-          .catch(() => {});
+          }
+          return res;
+        })
+        .catch((err: any) => {
+          startupUpdateError = err?.message || String(err);
+          return null;
+        })
+        .finally(() => {
+          startupUpdatePromise = null;
+        });
+    } else if (startupCachedResult && mounted) {
+      setCachedUpdateResult(startupCachedResult);
+      setHasUpdateAvailable(startupCachedResult.has_update);
+      if (startupCachedResult.latest_version) {
+        setLatestTag(startupCachedResult.latest_version);
       }
-    } catch {}
+    }
 
     return () => {
       mounted = false;
@@ -98,14 +160,14 @@ export const Header: React.FC<HeaderProps> = ({
     <>
       <header className="sc-header border-b border-neutral-800/80 bg-neutral-950/90 backdrop-blur-md sticky top-0 z-40 px-4 py-2.5">
         <div className="sc-container-width max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-3">
-          {/* Brand + Novo Ícone */}
+          {/* Brand + Novo Ícone DisCrab */}
           <div className="flex items-center gap-3">
             <AppIcon size={38} showLiveDot={true} animated={isInRoom} />
 
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-base sm:text-lg font-black tracking-wider text-white font-mono uppercase">
-                  Stream<span className="text-cyan-400">Companion</span>
+                <h1 className="text-base sm:text-lg font-black tracking-wider text-white font-mono">
+                  Dis<span className="text-rose-400">Crab</span>
                 </h1>
                 <span className="text-[10px] font-mono tracking-widest px-2 py-0.5 rounded bg-neutral-900 border border-neutral-800 text-cyan-300">
                   v{currentVersion}
@@ -201,10 +263,8 @@ export const Header: React.FC<HeaderProps> = ({
       <AppUpdaterModal
         isOpen={isUpdaterOpen}
         onClose={handleCloseUpdater}
-        onUpdateDetected={(hasUpdate, tag) => {
-          setHasUpdateAvailable(hasUpdate);
-          if (tag) setLatestTag(tag);
-        }}
+        initialUpdateResult={cachedUpdateResult}
+        onUpdateDetected={handleUpdateDetected}
       />
     </>
   );

@@ -17,9 +17,14 @@ interface PeerSession {
   is_host: boolean;
   has_screen: boolean;
   screen_title?: string | null;
+  screen_resolution?: string;
+  screen_fps?: number;
   screen_track_id?: string;
+  screen_audio_track_id?: string;
+  screen_stream_id?: string;
   has_webcam: boolean;
   webcam_track_id?: string;
+  media_sources?: any;
   has_isolated_audio: boolean;
   connection_seq: number;
   ws: WebSocket;
@@ -34,6 +39,7 @@ interface Room {
 }
 
 const rooms = new Map<string, Room>();
+const meshTopics = new Map<string, Set<WebSocket>>();
 let globalConnectionSeq = 0;
 
 function generateId(prefix = 'p'): string {
@@ -95,6 +101,7 @@ app.get('/api/health', (_req, res) => {
 wss.on('connection', (ws: WebSocket) => {
   let authenticatedPeerId: string | null = null;
   let activeToken: string | null = null;
+  let subscribedMeshTopic: string | null = null;
   let myConnSeq = 0;
 
   const pingTimer = setInterval(() => {
@@ -144,7 +151,11 @@ wss.on('connection', (ws: WebSocket) => {
           const peerId = clientId ? `peer-${sanitizeClientId(clientId)}` : generateId('peer');
           let preservedScreen = false;
           let preservedTitle: string | null | undefined = undefined;
+          let preservedScreenResolution: string | undefined = undefined;
+          let preservedScreenFps: number | undefined = undefined;
           let preservedScreenTrackId: string | undefined = undefined;
+          let preservedScreenAudioTrackId: string | undefined = undefined;
+          let preservedScreenStreamId: string | undefined = undefined;
           let preservedWebcam = false;
           let preservedWebcamTrackId: string | undefined = undefined;
           let preservedMediaSources: any = undefined;
@@ -157,10 +168,14 @@ wss.on('connection', (ws: WebSocket) => {
             if (sameClient) {
               preservedScreen = oldPeer.has_screen;
               preservedTitle = oldPeer.screen_title;
+              preservedScreenResolution = oldPeer.screen_resolution;
+              preservedScreenFps = oldPeer.screen_fps;
               preservedScreenTrackId = oldPeer.screen_track_id;
+              preservedScreenAudioTrackId = oldPeer.screen_audio_track_id;
+              preservedScreenStreamId = oldPeer.screen_stream_id;
               preservedWebcam = oldPeer.has_webcam;
               preservedWebcamTrackId = oldPeer.webcam_track_id;
-              preservedMediaSources = (oldPeer as any).media_sources;
+              preservedMediaSources = oldPeer.media_sources;
               preservedIsolatedAudio = oldPeer.has_isolated_audio;
               wasHost = oldPeer.is_host;
               room.peers.delete(oldId);
@@ -198,10 +213,14 @@ wss.on('connection', (ws: WebSocket) => {
               is_host: p.is_host,
               has_screen: p.has_screen,
               screen_title: p.screen_title,
+              screen_resolution: p.screen_resolution,
+              screen_fps: p.screen_fps,
               screen_track_id: p.screen_track_id,
+              screen_audio_track_id: p.screen_audio_track_id,
+              screen_stream_id: p.screen_stream_id,
               has_webcam: p.has_webcam,
               webcam_track_id: p.webcam_track_id,
-              media_sources: (p as any).media_sources,
+              media_sources: p.media_sources,
               has_isolated_audio: p.has_isolated_audio,
             }));
 
@@ -212,14 +231,18 @@ wss.on('connection', (ws: WebSocket) => {
             is_host: isHost,
             has_screen: preservedScreen,
             screen_title: preservedTitle,
+            screen_resolution: preservedScreenResolution,
+            screen_fps: preservedScreenFps,
             screen_track_id: preservedScreenTrackId,
+            screen_audio_track_id: preservedScreenAudioTrackId,
+            screen_stream_id: preservedScreenStreamId,
             has_webcam: preservedWebcam,
             webcam_track_id: preservedWebcamTrackId,
+            media_sources: preservedMediaSources,
             has_isolated_audio: preservedIsolatedAudio,
             connection_seq: myConnSeq,
             ws,
           };
-          (newSession as any).media_sources = preservedMediaSources;
 
           room.peers.set(peerId, newSession);
 
@@ -240,7 +263,11 @@ wss.on('connection', (ws: WebSocket) => {
               is_host: isHost,
               has_screen: preservedScreen,
               screen_title: preservedTitle,
+              screen_resolution: preservedScreenResolution,
+              screen_fps: preservedScreenFps,
               screen_track_id: preservedScreenTrackId,
+              screen_audio_track_id: preservedScreenAudioTrackId,
+              screen_stream_id: preservedScreenStreamId,
               has_webcam: preservedWebcam,
               webcam_track_id: preservedWebcamTrackId,
               media_sources: preservedMediaSources,
@@ -283,12 +310,14 @@ wss.on('connection', (ws: WebSocket) => {
           if (mySession) {
             mySession.has_screen = !!msg.has_screen;
             mySession.screen_title = msg.screen_title;
-            (mySession as any).screen_resolution = msg.screen_resolution;
-            (mySession as any).screen_fps = msg.screen_fps;
+            mySession.screen_resolution = msg.screen_resolution;
+            mySession.screen_fps = msg.screen_fps;
             mySession.screen_track_id = msg.screen_track_id;
+            mySession.screen_audio_track_id = msg.screen_audio_track_id;
+            mySession.screen_stream_id = msg.screen_stream_id;
             mySession.has_webcam = !!msg.has_webcam;
             mySession.webcam_track_id = msg.webcam_track_id;
-            (mySession as any).media_sources = msg.media_sources;
+            mySession.media_sources = msg.media_sources;
             mySession.has_isolated_audio = !!msg.has_isolated_audio;
           }
 
@@ -300,6 +329,8 @@ wss.on('connection', (ws: WebSocket) => {
             screen_resolution: msg.screen_resolution,
             screen_fps: msg.screen_fps,
             screen_track_id: msg.screen_track_id,
+            screen_audio_track_id: msg.screen_audio_track_id,
+            screen_stream_id: msg.screen_stream_id,
             has_webcam: !!msg.has_webcam,
             webcam_track_id: msg.webcam_track_id,
             media_sources: msg.media_sources,
@@ -332,6 +363,36 @@ wss.on('connection', (ws: WebSocket) => {
           break;
         }
 
+        case 'mesh_sub': {
+          const topic = String(msg.topic || '').trim().slice(0, 64);
+          if (!topic) break;
+          if (subscribedMeshTopic && meshTopics.has(subscribedMeshTopic)) {
+            meshTopics.get(subscribedMeshTopic)?.delete(ws);
+          }
+          subscribedMeshTopic = topic;
+          if (!meshTopics.has(topic)) {
+            meshTopics.set(topic, new Set());
+          }
+          meshTopics.get(topic)!.add(ws);
+          break;
+        }
+
+        case 'mesh_pub': {
+          const topic = String(msg.topic || '').trim().slice(0, 64);
+          const envelope = msg.envelope;
+          if (!topic || typeof envelope !== 'string') break;
+          const subs = meshTopics.get(topic);
+          if (subs) {
+            const out = JSON.stringify({ type: 'mesh_pkt', envelope });
+            for (const peerWs of subs) {
+              if (peerWs !== ws && peerWs.readyState === WebSocket.OPEN) {
+                peerWs.send(out);
+              }
+            }
+          }
+          break;
+        }
+
         default:
           break;
       }
@@ -342,6 +403,15 @@ wss.on('connection', (ws: WebSocket) => {
 
   ws.on('close', () => {
     clearInterval(pingTimer);
+    if (subscribedMeshTopic && meshTopics.has(subscribedMeshTopic)) {
+      const subs = meshTopics.get(subscribedMeshTopic);
+      if (subs) {
+        subs.delete(ws);
+        if (subs.size === 0) {
+          meshTopics.delete(subscribedMeshTopic);
+        }
+      }
+    }
     if (activeToken && authenticatedPeerId) {
       const room = rooms.get(activeToken);
       if (room) {

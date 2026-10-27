@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Download,
   RefreshCw,
@@ -10,68 +10,137 @@ import {
   X,
   HardDriveDownload,
   ArrowUpCircle,
+  Activity,
+  Volume2,
 } from 'lucide-react';
 import {
   isTauriEnvironment,
+  isAndroidEnvironment,
   getAppSystemInfo,
   ensureCloudflaredBinary,
   checkGithubUpdate,
   installGithubUpdate,
+  runSystemDiagnostics,
+  FIXED_GITHUB_REPO,
   AppSystemInfo,
   UpdateCheckResult,
   UpdateProgressPayload,
+  NativeDiagnosticsReport,
 } from '../services/tauriBridge';
+import { getStartupUpdateState } from './Header';
 
 interface AppUpdaterModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onUpdateDetected?: (hasUpdate: boolean, latestVersion?: string) => void;
+  initialUpdateResult?: UpdateCheckResult | null;
+  onUpdateDetected?: (hasUpdate: boolean, latestVersion?: string, result?: UpdateCheckResult) => void;
 }
-
-const DEFAULT_GITHUB_REPO = 'NTDarkzZ/StreamCompanion';
 
 export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
   isOpen,
   onClose,
+  initialUpdateResult = null,
   onUpdateDetected,
 }) => {
   const isNative = isTauriEnvironment();
-
-  const [githubRepo, setGithubRepo] = useState<string>(() => {
-    try {
-      return localStorage.getItem('sc_github_repo') || DEFAULT_GITHUB_REPO;
-    } catch {
-      return DEFAULT_GITHUB_REPO;
-    }
-  });
+  const isAndroid = isAndroidEnvironment();
 
   const [systemInfo, setSystemInfo] = useState<AppSystemInfo | null>(null);
   const [isCheckingCloudflared, setIsCheckingCloudflared] = useState(false);
   const [cloudflaredMsg, setCloudflaredMsg] = useState<string | null>(null);
 
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
-  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(null);
+  const [updateResult, setUpdateResult] = useState<UpdateCheckResult | null>(initialUpdateResult);
   const [updateError, setUpdateError] = useState<string | null>(null);
 
   const [isInstalling, setIsInstalling] = useState(false);
   const [progress, setProgress] = useState<UpdateProgressPayload | null>(null);
-  const [customExeUrl, setCustomExeUrl] = useState<string>('');
-  const [showCustomUrl, setShowCustomUrl] = useState<boolean>(false);
 
-  const loadSystemInfo = async () => {
+  const [isRunningDiag, setIsRunningDiag] = useState(false);
+  const [diagReport, setDiagReport] = useState<NativeDiagnosticsReport | null>(null);
+
+  // Mantém referência estável para evitar re-execuções em loop de useEffect
+  const onUpdateDetectedRef = useRef(onUpdateDetected);
+  useEffect(() => {
+    onUpdateDetectedRef.current = onUpdateDetected;
+  }, [onUpdateDetected]);
+
+  useEffect(() => {
+    if (initialUpdateResult) {
+      setUpdateResult(initialUpdateResult);
+      setUpdateError(null);
+    }
+  }, [initialUpdateResult]);
+
+  const loadSystemInfo = useCallback(async () => {
     try {
       const info = await getAppSystemInfo();
       setSystemInfo(info);
     } catch (err) {
       console.warn('[UpdaterModal] Erro ao carregar info do sistema:', err);
     }
-  };
+  }, []);
 
-  useEffect(() => {
-    if (isOpen) {
-      loadSystemInfo();
+  // Chamado SOMENTE quando o usuário clica manualmente no botão "Verificar Novamente"
+  const handleManualCheckUpdate = useCallback(async () => {
+    setIsCheckingUpdate(true);
+    setUpdateError(null);
+    try {
+      const res = await checkGithubUpdate(FIXED_GITHUB_REPO);
+      setUpdateResult(res);
+      onUpdateDetectedRef.current?.(res.has_update, res.latest_version, res);
+    } catch (err: any) {
+      setUpdateError(err?.message || String(err));
+    } finally {
+      setIsCheckingUpdate(false);
     }
-  }, [isOpen]);
+  }, []);
+
+  const handleRunDiagnostics = useCallback(async () => {
+    setIsRunningDiag(true);
+    try {
+      const rep = await runSystemDiagnostics();
+      setDiagReport(rep);
+    } catch (err) {
+      console.warn('[UpdaterModal] Erro nos testes de diagnóstico:', err);
+    } finally {
+      setIsRunningDiag(false);
+    }
+  }, []);
+
+  // Ao abrir o modal: carrega informações locais e sincroniza o resultado da verificação inicial (sem disparar loop no GitHub)
+  const wasOpenRef = useRef(false);
+  useEffect(() => {
+    if (isOpen && !wasOpenRef.current) {
+      wasOpenRef.current = true;
+      loadSystemInfo();
+      handleRunDiagnostics();
+
+      const startupState = getStartupUpdateState();
+      if (startupState.result) {
+        setUpdateResult(startupState.result);
+        setUpdateError(null);
+      } else if (startupState.promise) {
+        setIsCheckingUpdate(true);
+        startupState.promise
+          .then((res) => {
+            if (res) {
+              setUpdateResult(res);
+              setUpdateError(null);
+            } else if (getStartupUpdateState().error) {
+              setUpdateError(getStartupUpdateState().error);
+            }
+          })
+          .finally(() => {
+            setIsCheckingUpdate(false);
+          });
+      } else if (startupState.error) {
+        setUpdateError(startupState.error);
+      }
+    } else if (!isOpen) {
+      wasOpenRef.current = false;
+    }
+  }, [isOpen, loadSystemInfo, handleRunDiagnostics]);
 
   // Escuta eventos de progresso de download do Rust (update-progress)
   useEffect(() => {
@@ -94,13 +163,6 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
     };
   }, [isNative]);
 
-  const handleSaveRepo = (val: string) => {
-    setGithubRepo(val);
-    try {
-      localStorage.setItem('sc_github_repo', val.trim());
-    } catch {}
-  };
-
   const handleEnsureCloudflared = async () => {
     setIsCheckingCloudflared(true);
     setCloudflaredMsg(null);
@@ -119,26 +181,11 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
     }
   };
 
-  const handleCheckUpdate = async () => {
-    if (!githubRepo.trim()) return;
-    setIsCheckingUpdate(true);
-    setUpdateError(null);
-    try {
-      const res = await checkGithubUpdate(githubRepo.trim());
-      setUpdateResult(res);
-      onUpdateDetected?.(res.has_update, res.latest_version);
-    } catch (err: any) {
-      setUpdateError(err?.message || String(err));
-    } finally {
-      setIsCheckingUpdate(false);
-    }
-  };
-
   const handleInstallUpdate = async (targetUrl?: string | null) => {
-    const urlToDownload = (targetUrl || customExeUrl).trim();
+    const urlToDownload = (targetUrl || '').trim();
     if (!urlToDownload) {
       setUpdateError(
-        'Nenhum arquivo .exe encontrado nesta Release do GitHub. Certifique-se de anexar o StreamCompanion.exe nos Assets da Release.'
+        'Nenhum binário (.exe / .apk) encontrado nesta Release do GitHub.'
       );
       return;
     }
@@ -150,11 +197,15 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
       downloaded_mb: 0,
       total_mb: updateResult?.asset_size_mb || 0,
       percent: 1,
-      message: 'Iniciando download do novo executável...',
+      message: 'Iniciando download da atualização...',
     });
 
     try {
       await installGithubUpdate(urlToDownload);
+      if (isAndroid) {
+        setIsInstalling(false);
+        setProgress(null);
+      }
     } catch (err: any) {
       setIsInstalling(false);
       setProgress(null);
@@ -175,10 +226,10 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
             </div>
             <div>
               <h2 className="text-sm font-bold text-white uppercase tracking-wider">
-                Atualizador Embutido & Gerenciador Cloudflared
+                Atualizador DisCrab & Diagnóstico do Sistema
               </h2>
               <p className="text-[11px] text-neutral-400">
-                Atualize o app com 1 clique pelo GitHub e gerencie o cloudflared fora da pasta portable
+                Repositório oficial fixo: {FIXED_GITHUB_REPO}
               </p>
             </div>
           </div>
@@ -193,104 +244,38 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
         </div>
 
         {/* Corpo */}
-        <div className="p-5 space-y-5 max-h-[80vh] overflow-y-auto">
-          {/* SEÇÃO 1: CLOUDFLARED AUTOMÁTICO EM %LOCALAPPDATA% */}
-          <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-3">
-            <div className="flex items-center justify-between gap-2 flex-wrap">
-              <div className="flex items-center gap-2">
-                <Cloud className="w-4 h-4 text-emerald-400" />
-                <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-300">
-                  1. Túnel Cloudflare Automático (Sem .exe na pasta Portable)
-                </h3>
-              </div>
-
-              {systemInfo?.cloudflared.installed ? (
-                <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-emerald-950/90 border border-emerald-700 text-emerald-300 font-bold">
-                  <CheckCircle2 className="w-3 h-3" />
-                  Instalado ({systemInfo.cloudflared.size_mb} MB)
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-amber-950/90 border border-amber-700 text-amber-300">
-                  Será baixado automaticamente ao criar sala
-                </span>
-              )}
-            </div>
-
-            <p className="text-[11px] text-neutral-400 leading-relaxed">
-              Você <strong className="text-white">não precisa mais manter o cloudflared.exe na pasta do app</strong>. O StreamCompanion salva e executa o <code className="text-cyan-300">cloudflared.exe</code> automaticamente na pasta oculta do sistema (<code className="text-neutral-300">%LOCALAPPDATA%\StreamCompanion\bin</code>).
-            </p>
-
-            <div className="flex items-center justify-between gap-2 bg-neutral-900/90 border border-neutral-800 rounded-lg px-3 py-2 text-[11px] flex-wrap">
-              <div className="flex items-center gap-2 min-w-0">
-                <FolderCheck className="w-4 h-4 text-cyan-400 shrink-0" />
-                <span className="text-neutral-300 truncate" title={systemInfo?.cloudflared.path}>
-                  {systemInfo?.cloudflared.path || '%LOCALAPPDATA%\\StreamCompanion\\bin\\cloudflared.exe'}
-                </span>
-              </div>
-
-              {isNative && (
-                <button
-                  type="button"
-                  disabled={isCheckingCloudflared}
-                  onClick={handleEnsureCloudflared}
-                  className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-black font-bold text-[11px] flex items-center gap-1.5 cursor-pointer transition-colors shrink-0"
-                >
-                  <HardDriveDownload className={`w-3.5 h-3.5 ${isCheckingCloudflared ? 'animate-bounce' : ''}`} />
-                  <span>
-                    {isCheckingCloudflared
-                      ? 'Baixando para AppData...'
-                      : systemInfo?.cloudflared.installed
-                      ? 'Verificar / Reparar'
-                      : 'Baixar p/ AppData Agora'}
-                  </span>
-                </button>
-              )}
-            </div>
-
-            {cloudflaredMsg && (
-              <p className="text-[11px] text-emerald-300 bg-emerald-950/40 border border-emerald-800/60 rounded-lg px-3 py-1.5">
-                {cloudflaredMsg}
-              </p>
-            )}
-          </div>
-
-          {/* SEÇÃO 2: ATUALIZADOR EMBUTIDO VIA GITHUB RELEASES */}
+        <div className="p-5 space-y-4 max-h-[80vh] overflow-y-auto">
+          {/* SEÇÃO 1: ATUALIZADOR EMBUTIDO VIA GITHUB RELEASES (REPOSITÓRIO FIXO) */}
           <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-3.5">
             <div className="flex items-center justify-between gap-2 flex-wrap">
               <div className="flex items-center gap-2">
                 <ArrowUpCircle className="w-4 h-4 text-cyan-400" />
                 <h3 className="text-xs font-bold uppercase tracking-wider text-cyan-300">
-                  2. Atualizador Embutido (GitHub Releases 1-Clique)
+                  1. Atualizador do DisCrab ({FIXED_GITHUB_REPO})
                 </h3>
               </div>
 
               <span className="text-[10px] px-2 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-neutral-300">
-                Versão Atual: <strong className="text-white">v{systemInfo?.current_version || '1.0.0'}</strong>
+                Versão Atual: <strong className="text-white">v{systemInfo?.current_version || '1.1.0'}</strong>
               </span>
             </div>
 
-            <p className="text-[11px] text-neutral-400 leading-relaxed">
-              Informe o seu repositório do GitHub (<code className="text-cyan-300">usuario/repositorio</code>). Quando você publicar uma nova Release com o <code className="text-white">StreamCompanion.exe</code> anexado, basta clicar em <strong className="text-white">Atualizar Agora</strong> que o app baixa, substitui o próprio <code className="text-white">.exe</code> e reinicia sozinho!
-            </p>
+            <div className="flex items-center justify-between gap-2 bg-neutral-900/90 border border-neutral-800 rounded-lg px-3 py-2 text-xs flex-wrap">
+              <div className="flex items-center gap-2 text-[11px] text-neutral-300">
+                <span>Repositório Oficial:</span>
+                <code className="px-2 py-0.5 rounded bg-neutral-950 border border-neutral-800 text-cyan-300 font-bold">
+                  {FIXED_GITHUB_REPO}
+                </code>
+              </div>
 
-            {/* Input do Repositório GitHub + Botão Buscar */}
-            <div className="flex flex-col sm:flex-row gap-2">
-              <input
-                type="text"
-                value={githubRepo}
-                onChange={(e) => handleSaveRepo(e.target.value)}
-                placeholder="Ex: NTDarkzZ/StreamCompanion"
-                disabled={isInstalling}
-                className="flex-1 bg-neutral-900 border border-neutral-800 focus:border-cyan-500 rounded-lg px-3 py-2 text-xs text-white outline-none"
-              />
               <button
                 type="button"
-                disabled={isCheckingUpdate || isInstalling || !githubRepo.trim()}
-                onClick={handleCheckUpdate}
-                className="px-4 py-2 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-black font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0"
+                disabled={isCheckingUpdate || isInstalling}
+                onClick={handleManualCheckUpdate}
+                className="px-3.5 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 disabled:opacity-50 text-black font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer transition-colors shrink-0"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${isCheckingUpdate ? 'animate-spin' : ''}`} />
-                <span>{isCheckingUpdate ? 'Consultando GitHub...' : 'Verificar Atualizações'}</span>
+                <span>{isCheckingUpdate ? 'Verificando no GitHub...' : 'Verificar Atualizações'}</span>
               </button>
             </div>
 
@@ -317,7 +302,7 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
                     </div>
                     {updateResult.asset_name && (
                       <p className="text-[10px] text-neutral-400 mt-0.5">
-                        Executável na Release: <strong className="text-neutral-200">{updateResult.asset_name}</strong> ({updateResult.asset_size_mb} MB)
+                        Pacote na Release: <strong className="text-neutral-200">{updateResult.asset_name}</strong> ({updateResult.asset_size_mb} MB)
                       </p>
                     )}
                   </div>
@@ -353,7 +338,9 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
                     >
                       <Download className="w-4 h-4" />
                       <span>
-                        {updateResult.has_update
+                        {isAndroid
+                          ? `Baixar APK (${updateResult.latest_version})`
+                          : updateResult.has_update
                           ? `Baixar ${updateResult.latest_version}, Substituir .EXE e Reiniciar`
                           : 'Reinstalar / Forçar Atualização desta Release'}
                       </span>
@@ -361,7 +348,7 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
                   </div>
                 ) : (
                   <p className="text-[11px] text-amber-300">
-                    Aviso: Esta Release não possui um arquivo <code>.exe</code> anexado nos Assets.
+                    Aviso: Esta Release não possui um pacote binário anexado nos Assets.
                   </p>
                 )}
               </div>
@@ -385,41 +372,118 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
                 </div>
               </div>
             )}
+          </div>
 
-            {/* Opção Avançada: Atualizar via Link Direto de .exe */}
-            <div className="pt-1 border-t border-neutral-900">
+          {/* SEÇÃO 2: SISTEMA DE AUTOTESTE DE CONEXÃO P2P & ÁUDIO */}
+          <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <Activity className="w-4 h-4 text-emerald-400" />
+                <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-300">
+                  2. Testes Automáticos de Conexão P2P & Áudio
+                </h3>
+              </div>
+
               <button
                 type="button"
-                onClick={() => setShowCustomUrl(!showCustomUrl)}
-                className="text-[10px] text-neutral-500 hover:text-neutral-300 underline cursor-pointer"
+                disabled={isRunningDiag}
+                onClick={handleRunDiagnostics}
+                className="px-3 py-1 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-cyan-300 text-[11px] font-bold flex items-center gap-1.5 cursor-pointer"
               >
-                {showCustomUrl
-                  ? 'Ocultar atualização por URL direta'
-                  : 'Ou colar link direto de um arquivo .exe para atualizar'}
+                <RefreshCw className={`w-3 h-3 ${isRunningDiag ? 'animate-spin' : ''}`} />
+                <span>{isRunningDiag ? 'Testando...' : 'Executar Testes'}</span>
               </button>
+            </div>
 
-              {showCustomUrl && (
-                <div className="mt-2 flex flex-col sm:flex-row gap-2">
-                  <input
-                    type="text"
-                    value={customExeUrl}
-                    onChange={(e) => setCustomExeUrl(e.target.value)}
-                    placeholder="https://github.com/.../releases/download/v1.1.0/StreamCompanion.exe"
-                    disabled={isInstalling}
-                    className="flex-1 bg-neutral-900 border border-neutral-800 rounded-lg px-2.5 py-1.5 text-xs text-white outline-none"
-                  />
+            {diagReport && (
+              <div className="space-y-1.5 text-[11px]">
+                {diagReport.details.map((line, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-neutral-900/90 border border-neutral-800 text-neutral-200"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                    <span>{line}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* SEÇÃO 3: MOTOR DE ÁUDIO ANDROID OU HOST TÚNEL CLOUDFLARE (WINDOWS) */}
+          {isAndroid ? (
+            <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Volume2 className="w-4 h-4 text-emerald-400" />
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-300">
+                    3. Motor de Áudio Android (DSP 48kHz) & Conexão Cloudflare/Mesh
+                  </h3>
+                </div>
+                <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 border border-emerald-700 text-emerald-300 font-bold">
+                  DSP + Cliente Cloudflare Ativos
+                </span>
+              </div>
+              <p className="text-[11px] text-neutral-400 leading-relaxed">
+                No Android, o app utiliza o pipeline DSP próprio (Filtro High-Pass 25Hz + Soft-Limiter anti-clipping + Mixagem de Áudio Interno e Voz) e conecta normalmente em salas criadas pelo PC via <strong>Cloudflare Tunnel (wss://*.trycloudflare.com)</strong>, <strong>Sala Fixa Mesh P2P</strong> ou <strong>Wi-Fi LAN</strong> (apenas hospedar o binário cloudflared.exe é exclusivo do PC).
+              </p>
+            </div>
+          ) : (
+            <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-3">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-2">
+                  <Cloud className="w-4 h-4 text-emerald-400" />
+                  <h3 className="text-xs font-bold uppercase tracking-wider text-emerald-300">
+                    3. Túnel Cloudflare Automático em %LOCALAPPDATA% (PC)
+                  </h3>
+                </div>
+
+                {systemInfo?.cloudflared.installed ? (
+                  <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-emerald-950/90 border border-emerald-700 text-emerald-300 font-bold">
+                    <CheckCircle2 className="w-3 h-3" />
+                    Instalado ({systemInfo.cloudflared.size_mb} MB)
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded bg-amber-950/90 border border-amber-700 text-amber-300">
+                    Baixado sob demanda em AppData
+                  </span>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between gap-2 bg-neutral-900/90 border border-neutral-800 rounded-lg px-3 py-2 text-[11px] flex-wrap">
+                <div className="flex items-center gap-2 min-w-0">
+                  <FolderCheck className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <span className="text-neutral-300 truncate" title={systemInfo?.cloudflared.path}>
+                    {systemInfo?.cloudflared.path || '%LOCALAPPDATA%\\StreamCompanion\\bin\\cloudflared.exe'}
+                  </span>
+                </div>
+
+                {isNative && (
                   <button
                     type="button"
-                    disabled={isInstalling || !customExeUrl.trim()}
-                    onClick={() => handleInstallUpdate(customExeUrl)}
-                    className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold cursor-pointer shrink-0"
+                    disabled={isCheckingCloudflared}
+                    onClick={handleEnsureCloudflared}
+                    className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-black font-bold text-[11px] flex items-center gap-1.5 cursor-pointer transition-colors shrink-0"
                   >
-                    Baixar e Substituir .EXE
+                    <HardDriveDownload className={`w-3.5 h-3.5 ${isCheckingCloudflared ? 'animate-bounce' : ''}`} />
+                    <span>
+                      {isCheckingCloudflared
+                        ? 'Baixando para AppData...'
+                        : systemInfo?.cloudflared.installed
+                        ? 'Verificar / Reparar'
+                        : 'Baixar p/ AppData'}
+                    </span>
                   </button>
-                </div>
+                )}
+              </div>
+
+              {cloudflaredMsg && (
+                <p className="text-[11px] text-emerald-300 bg-emerald-950/40 border border-emerald-800/60 rounded-lg px-3 py-1.5">
+                  {cloudflaredMsg}
+                </p>
               )}
             </div>
-          </div>
+          )}
         </div>
       </div>
     </div>

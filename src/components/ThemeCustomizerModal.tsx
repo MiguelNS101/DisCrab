@@ -11,7 +11,6 @@ import {
   Sparkles,
   Copy,
   Layers,
-  Image as ImageIcon,
 } from 'lucide-react';
 import {
   useTheme,
@@ -20,7 +19,6 @@ import {
   ButtonSizeScale,
   LayoutMaxWidth,
 } from '../context/ThemeContext';
-import { AppIcon } from './AppIcon';
 
 const CSS_SNIPPETS: { label: string; description: string; css: string }[] = [
   {
@@ -62,7 +60,7 @@ export const ThemeCustomizerModal: React.FC = () => {
     setIsCustomizerOpen,
   } = useTheme();
 
-  const [activeTab, setActiveTab] = useState<'presets' | 'visual' | 'css' | 'icon'>('presets');
+  const [activeTab, setActiveTab] = useState<'presets' | 'visual' | 'css'>('presets');
   const [importText, setImportText] = useState<string>('');
   const [showImportBox, setShowImportBox] = useState<boolean>(false);
   const [copiedJson, setCopiedJson] = useState<boolean>(false);
@@ -209,19 +207,6 @@ export const ThemeCustomizerModal: React.FC = () => {
             >
               <Code2 className="w-3.5 h-3.5" />
               <span>Editor CSS Avançado</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('icon')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg cursor-pointer transition-all ${
-                activeTab === 'icon'
-                  ? 'sc-btn-primary bg-cyan-500 text-black font-bold'
-                  : 'text-neutral-400 hover:text-white bg-neutral-900/60'
-              }`}
-            >
-              <ImageIcon className="w-3.5 h-3.5" />
-              <span>Ícone do App (.EXE / .ICO)</span>
             </button>
           </div>
 
@@ -402,7 +387,6 @@ export const ThemeCustomizerModal: React.FC = () => {
             <div className="space-y-6">
               {/* Sliders de Dimensão e Geometria */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                {/* Escala Global da UI */}
                 <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
                   <div className="flex items-center justify-between text-xs font-mono">
                     <span className="text-neutral-200 font-bold">Escala Geral da Interface (Zoom/Fonte)</span>
@@ -424,7 +408,6 @@ export const ThemeCustomizerModal: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Arredondamento dos Cards */}
                 <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
                   <div className="flex items-center justify-between text-xs font-mono">
                     <span className="text-neutral-200 font-bold">Arredondamento dos Painéis (Card Radius)</span>
@@ -446,7 +429,6 @@ export const ThemeCustomizerModal: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Arredondamento dos Botões */}
                 <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
                   <div className="flex items-center justify-between text-xs font-mono">
                     <span className="text-neutral-200 font-bold">Formato / Curva dos Botões</span>
@@ -474,7 +456,6 @@ export const ThemeCustomizerModal: React.FC = () => {
                   </p>
                 </div>
 
-                {/* Desfoque de Vidro (Backdrop Blur) */}
                 <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
                   <div className="flex items-center justify-between text-xs font-mono">
                     <span className="text-neutral-200 font-bold">Transparência / Glass Blur</span>
@@ -497,7 +478,6 @@ export const ThemeCustomizerModal: React.FC = () => {
                 </div>
               </div>
 
-              {/* Seletores de Tamanho de Botão, Largura de Tela e Fonte */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="p-4 rounded-xl bg-neutral-950 border border-neutral-800 space-y-2">
                   <span className="block text-xs font-mono font-bold text-neutral-200">
@@ -603,7 +583,6 @@ export const ThemeCustomizerModal: React.FC = () => {
                 </button>
               </div>
 
-              {/* Snippets Rápidos de Efeitos CSS */}
               <div className="space-y-1.5">
                 <span className="text-[11px] font-mono text-neutral-400">
                   Adicionar Efeito Rápido ao CSS:
@@ -623,7 +602,6 @@ export const ThemeCustomizerModal: React.FC = () => {
                 </div>
               </div>
 
-              {/* Editor de Código CSS */}
               <textarea
                 value={theme.customCss}
                 onChange={(e) => updateTheme({ customCss: e.target.value })}
@@ -633,7 +611,6 @@ export const ThemeCustomizerModal: React.FC = () => {
                 className="w-full bg-neutral-950 border border-neutral-800 focus:border-cyan-500 rounded-xl p-4 text-xs font-mono text-cyan-200 outline-none leading-relaxed resize-y"
               />
 
-              {/* Guia de Seletores e Variáveis */}
               <div className="p-3.5 rounded-xl bg-neutral-950 border border-neutral-800 text-xs font-mono space-y-2">
                 <span className="text-neutral-200 font-bold block">
                   Guia Rápido de Classes & Variáveis para Modificação Total:
@@ -656,58 +633,6 @@ export const ThemeCustomizerModal: React.FC = () => {
                   </div>
                   <div>
                     <code className="text-cyan-300">.sc-btn-primary</code> — Todos os botões principais de ação
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {activeTab === 'icon' && (
-            <div className="space-y-4">
-              <div className="p-5 rounded-xl bg-neutral-950 border border-neutral-800 flex flex-col sm:flex-row items-center gap-6">
-                <div className="p-4 rounded-2xl bg-neutral-900 border border-neutral-800 flex items-center justify-center shrink-0">
-                  <AppIcon size={112} showLiveDot={true} animated={true} />
-                </div>
-
-                <div className="space-y-3 text-center sm:text-left">
-                  <div>
-                    <h3 className="text-sm font-bold font-mono text-white uppercase tracking-wider">
-                      Ícone Oficial do StreamCompanion (.EXE & Interface)
-                    </h3>
-                    <p className="text-xs text-neutral-400 mt-1 leading-relaxed">
-                      Este ícone já está integrado automaticamente na Home, no Cabeçalho e na pasta{' '}
-                      <code className="text-cyan-300">src-tauri/icons/icon.ico</code> (multi-resolução 16px a 256px) e{' '}
-                      <code className="text-cyan-300">icon.png</code> para a compilação do executável Windows.
-                    </p>
-                  </div>
-
-                  <div className="flex flex-wrap items-center justify-center sm:justify-start gap-2.5">
-                    <a
-                      href="/icon.ico"
-                      download="StreamCompanion-icon.ico"
-                      className="sc-btn-primary flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-cyan-500 text-black font-mono font-bold text-xs cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Baixar icon.ico (Para .EXE)
-                    </a>
-
-                    <a
-                      href="/app-icon.png"
-                      download="StreamCompanion-icon-256x256.png"
-                      className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-200 font-mono text-xs cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5 text-cyan-400" />
-                      Baixar PNG (256x256)
-                    </a>
-
-                    <a
-                      href="/app-icon.svg"
-                      download="StreamCompanion-icon.svg"
-                      className="flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-neutral-200 font-mono text-xs cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5 text-indigo-400" />
-                      Baixar Vetor SVG
-                    </a>
                   </div>
                 </div>
               </div>

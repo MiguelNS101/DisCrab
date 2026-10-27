@@ -13,6 +13,7 @@ import {
   LocalMediaSource,
   VideoInputDeviceInfo,
   AudioInputDeviceInfo,
+  WindowItem,
 } from '../types';
 import { listen } from '@tauri-apps/api/event';
 
@@ -120,6 +121,8 @@ export interface UseWebRtcReturn {
   ) => Promise<void>;
   updateStreamQuality: (resolution: '720p' | '1080p' | '1440p', fps: 30 | 60) => Promise<void>;
   getDetectedWindowPid: () => number;
+  detectedWindow: WindowItem | null;
+  activeScreenTitle: string;
   stopScreenShare: () => void;
   toggleWebcam: () => Promise<void>;
   requestPeerStream: (peerId: string, type: string) => void;
@@ -153,6 +156,8 @@ export function useWebRtc(): UseWebRtcReturn {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [localWebcamStream, setLocalWebcamStream] = useState<MediaStream | null>(null);
   const [localMediaSources, setLocalMediaSources] = useState<LocalMediaSource[]>([]);
+  const [detectedWindow, setDetectedWindow] = useState<WindowItem | null>(null);
+  const [activeScreenTitle, setActiveScreenTitle] = useState<string>('Tela do Usuário');
   const [videoDevices, setVideoDevices] = useState<VideoInputDeviceInfo[]>([]);
   const [audioDevices, setAudioDevices] = useState<AudioInputDeviceInfo[]>([]);
 
@@ -264,6 +269,12 @@ export function useWebRtc(): UseWebRtcReturn {
       },
       onPerformanceLog: (entry) => {
         setPerformanceLogs((prev) => [entry, ...prev].slice(0, 50));
+      },
+      onDetectedWindowChange: (win) => {
+        setDetectedWindow(win);
+        if (win?.title) {
+          setActiveScreenTitle(win.title);
+        }
       },
     });
 
@@ -378,6 +389,8 @@ export function useWebRtc(): UseWebRtcReturn {
           explicitAudioPids
         );
         setLocalStream(stream);
+        setActiveScreenTitle(engine.getScreenTitle() || title);
+        setDetectedWindow(engine.getDetectedWindowInfo());
         setIsScreenSharing(true);
       } catch (err: any) {
         setError(`Falha ao compartilhar tela: ${err.message}`);
@@ -404,6 +417,8 @@ export function useWebRtc(): UseWebRtcReturn {
       engineRef.current.stopScreenShare();
       setIsScreenSharing(false);
       setLocalStream(null);
+      setDetectedWindow(null);
+      setActiveScreenTitle('Tela do Usuário');
     }
   }, []);
 
@@ -520,11 +535,11 @@ export function useWebRtc(): UseWebRtcReturn {
   );
 
   /**
-   * Define e salva no localStorage a altura do áudio (0% a 150%) de uma transmissão assistida/escutada
+   * Define e salva no localStorage a altura do áudio (0% a 200%) de uma transmissão assistida/escutada
    */
   const setStreamVolume = useCallback(
     (streamId: string, volume: number, userName?: string, type: string = 'screen') => {
-      const clamped = Math.max(0, Math.min(150, Math.round(volume)));
+      const clamped = Math.max(0, Math.min(200, Math.round(volume)));
       const userKey = makeUserStreamKey(userName, type);
 
       if (clamped > 0) {
@@ -610,6 +625,8 @@ export function useWebRtc(): UseWebRtcReturn {
     startScreenShare,
     updateStreamQuality,
     getDetectedWindowPid,
+    detectedWindow,
+    activeScreenTitle,
     stopScreenShare,
     toggleWebcam,
     requestPeerStream,

@@ -140,12 +140,12 @@ export const StreamGrid: React.FC<StreamGridProps> = ({
                   )}
                 </button>
 
-                {/* Slider de volume com suporte a boost de 0 a 150% */}
+                {/* Slider de volume com suporte a boost de 0 a 200% */}
                 <div className="flex items-center gap-2">
                   <input
                     type="range"
                     min={0}
-                    max={150}
+                    max={200}
                     value={stream.is_muted ? 0 : stream.volume}
                     onChange={(e) => onChangeVolume(stream.id, Number(e.target.value))}
                     disabled={stream.is_muted}

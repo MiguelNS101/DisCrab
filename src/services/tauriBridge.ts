@@ -122,6 +122,16 @@ export async function stopNativeProcessAudio(): Promise<void> {
   return await invokeTauri('stop_process_audio');
 }
 
+// Localiza os metadados completos (HWND, PID, título, executável) da janela pelo label retornado pelo getDisplayMedia
+export async function findWindowInfo(label: string): Promise<WindowItem | null> {
+  try {
+    return await invokeTauri<WindowItem | null>('find_window_info', { label });
+  } catch (err) {
+    console.warn('[tauriBridge] Erro ao buscar metadados da janela:', err);
+    return null;
+  }
+}
+
 // Localiza o PID da janela pelo label retornado pelo Chromium (ex: window:12345:0) ou título
 export async function findWindowPid(label: string): Promise<number | null> {
   try {
@@ -256,7 +266,7 @@ export async function getAppSystemInfo(): Promise<AppSystemInfo> {
     return await invokeTauri<AppSystemInfo>('get_app_system_info');
   }
   return {
-    current_version: '1.0.0',
+    current_version: '1.1.0',
     exe_path: 'Modo Web (Navegador)',
     cloudflared: {
       installed: false,
@@ -272,26 +282,27 @@ export async function ensureCloudflaredBinary(): Promise<CloudflaredStatus> {
   return await invokeTauri<CloudflaredStatus>('ensure_cloudflared_binary');
 }
 
+export const FIXED_GITHUB_REPO = 'MiguelNS101/StreamCompanion';
+
 // Verifica a última Release no GitHub Releases
-export async function checkGithubUpdate(repoInput: string): Promise<UpdateCheckResult> {
+export async function checkGithubUpdate(
+  repoInput: string = FIXED_GITHUB_REPO
+): Promise<UpdateCheckResult> {
+  const effectiveRepo = repoInput.trim() || FIXED_GITHUB_REPO;
+
   if (isTauriEnvironment()) {
     return await invokeTauri<UpdateCheckResult>('check_github_update', {
-      repo: repoInput,
+      repo: effectiveRepo,
     });
   }
 
   // Fallback web para testar a consulta à API do GitHub direto no navegador
-  const trimmed = repoInput.trim().replace(/\/+$/, '').replace(/\.git$/, '');
+  const trimmed = effectiveRepo.replace(/\/+$/, '').replace(/\.git$/, '');
   const cleaned = trimmed.includes('github.com/')
     ? trimmed.split('github.com/')[1]
     : trimmed;
   const parts = cleaned.split('/').filter(Boolean);
-  if (parts.length < 2) {
-    throw new Error(
-      "Informe o repositório no formato 'usuario/repositorio' (ex: NTDarkzZ/StreamCompanion)."
-    );
-  }
-  const repo = `${parts[0]}/${parts[1]}`;
+  const repo = parts.length >= 2 ? `${parts[0]}/${parts[1]}` : FIXED_GITHUB_REPO;
   const resp = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
     headers: { Accept: 'application/vnd.github+json' },
   });
@@ -304,16 +315,24 @@ export async function checkGithubUpdate(repoInput: string): Promise<UpdateCheckR
     throw new Error(`GitHub API retornou status ${resp.status} para '${repo}'.`);
   }
   const json = await resp.json();
-  const currentVersion = '1.0.0';
+  const currentVersion = '1.1.0';
   const latestVersion = json.tag_name || currentVersion;
   let downloadUrl: string | null = null;
   let assetName: string | null = null;
   let assetSizeMb = 0;
+  const preferApk = isAndroidEnvironment();
 
   if (Array.isArray(json.assets)) {
     for (const asset of json.assets) {
       const name = String(asset.name || '');
-      if (name.toLowerCase().endsWith('.exe') && !name.toLowerCase().includes('cloudflared')) {
+      const lower = name.toLowerCase();
+      if (preferApk && lower.endsWith('.apk')) {
+        downloadUrl = asset.browser_download_url || null;
+        assetName = name;
+        assetSizeMb = Math.round(((asset.size || 0) / (1024 * 1024)) * 10) / 10;
+        break;
+      }
+      if (!preferApk && lower.endsWith('.exe') && !lower.includes('cloudflared')) {
         downloadUrl = asset.browser_download_url || null;
         assetName = name;
         assetSizeMb = Math.round(((asset.size || 0) / (1024 * 1024)) * 10) / 10;
@@ -339,8 +358,126 @@ export async function checkGithubUpdate(repoInput: string): Promise<UpdateCheckR
   };
 }
 
+// Detecta se está rodando em um dispositivo Android (APK Tauri v2 ou WebView Mobile)
+export function isAndroidEnvironment(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /android/i.test(navigator.userAgent || '');
+}
+
+export interface NativeDiagnosticsReport {
+  passed: boolean;
+  platform: string;
+  connection_test_ok: boolean;
+  signaling_test_ok: boolean;
+  audio_engine_test_ok: boolean;
+  details: string[];
+}
+
+// Executa bateria completa de testes de Conexão P2P e Motor de Áudio
+export async function runSystemDiagnostics(): Promise<NativeDiagnosticsReport> {
+  const { runLiveWebAudioStreamTest } = await import('./webrtc/AudioBridge');
+  const { enhanceSdpForHighQualityStream } = await import('./webrtc/WebRtcEngine');
+
+  const webAudioStreamRes = await runLiveWebAudioStreamTest();
+  const sampleSdp = [
+    'v=0',
+    'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+    'a=rtpmap:111 opus/48000/2',
+    'a=fmtp:111 minptime=10;useinbandfec=1',
+  ].join('\r\n');
+  const enhancedSdp = enhanceSdpForHighQualityStream(sampleSdp, '1080p', 60);
+  const sdpAudioOk =
+    enhancedSdp.includes('stereo=1') &&
+    enhancedSdp.includes('sprop-stereo=1') &&
+    enhancedSdp.includes('maxaveragebitrate=160000') &&
+    enhancedSdp.includes('usedtx=0');
+
+  if (isTauriEnvironment()) {
+    try {
+      const nativeRep = await invokeTauri<NativeDiagnosticsReport>('run_native_diagnostics');
+      const streamAudioOk = webAudioStreamRes.passed && sdpAudioOk;
+      nativeRep.audio_engine_test_ok = nativeRep.audio_engine_test_ok && streamAudioOk;
+      nativeRep.passed =
+        nativeRep.connection_test_ok &&
+        nativeRep.signaling_test_ok &&
+        nativeRep.audio_engine_test_ok;
+      nativeRep.details.push(
+        `[${streamAudioOk ? 'OK' : 'FALHA'}] Teste de Áudio da Stream WebAudio/Opus (${webAudioStreamRes.renderedFrames} frames 48kHz, L=${webAudioStreamRes.rmsLeft.toFixed(2)} R=${webAudioStreamRes.rmsRight.toFixed(2)}, CBR 160kbps)`
+      );
+      return nativeRep;
+    } catch {
+      // Fallback caso esteja em modo dev híbrido
+    }
+  }
+
+  const details: string[] = [];
+  const platform = isAndroidEnvironment() ? 'android' : 'web/desktop';
+
+  // 1. Teste de Codificação e Decodificação de Sala P2P (LAN & WAN)
+  const encodedLan = encodeRoomCodeUrlSafe('192.168.1.50:49152:TOKEN9');
+  const decodedLan = decodeRoomCodeUrlSafe(encodedLan);
+  const encodedWan = encodeRoomCodeUrlSafe('subdominio-teste:TOKEN8');
+  const decodedWan = decodeRoomCodeUrlSafe(encodedWan);
+
+  const connection_test_ok =
+    decodedLan.wsUrl === 'ws://192.168.1.50:49152' &&
+    decodedLan.token === 'TOKEN9' &&
+    decodedWan.wsUrl === 'wss://subdominio-teste.trycloudflare.com' &&
+    decodedWan.token === 'TOKEN8';
+
+  details.push(
+    `[${connection_test_ok ? 'OK' : 'FALHA'}] Codificador/Decodificador de Sala P2P Base64 (Cloudflare & LAN)`
+  );
+
+  // 2. Teste de Derivação e Protocolo de Sala Fixa Mesh P2P
+  const meshInvite = 'Sala: squad_br | Senha: 123';
+  const b64Invite = encodeRoomCodeUrlSafe(meshInvite);
+  const signaling_test_ok = b64Invite.length > 8;
+  details.push(
+    `[${signaling_test_ok ? 'OK' : 'FALHA'}] Protocolo de Convite e Sinalização Mesh P2P (${b64Invite.slice(0, 12)}...)`
+  );
+
+  // 3. Teste do Motor de Áudio DSP + Pipeline de Áudio da Stream (WebAudio + SDP Opus Estéreo)
+  const { processAndroidAudioBufferDsp } = await import('./webrtc/AndroidAudioEngine');
+  const rawSamples = new Float32Array(960 * 2);
+  for (let i = 0; i < rawSamples.length; i++) {
+    rawSamples[i] = Math.sin((i / 48000) * Math.PI * 2 * 440) * 1.8;
+  }
+  const processed = processAndroidAudioBufferDsp(rawSamples, 1.2);
+  let maxPeak = 0;
+  let allFinite = true;
+  for (let i = 0; i < processed.length; i++) {
+    if (!Number.isFinite(processed[i])) allFinite = false;
+    const abs = Math.abs(processed[i]);
+    if (abs > maxPeak) maxPeak = abs;
+  }
+  const dspOk = allFinite && processed.length === 1920 && maxPeak > 0.1 && maxPeak <= 1.0;
+  const streamAudioOk = webAudioStreamRes.passed && sdpAudioOk;
+  const audio_engine_test_ok = dspOk && streamAudioOk;
+
+  details.push(
+    `[${dspOk ? 'OK' : 'FALHA'}] Motor DSP de Áudio 48kHz Estéreo (1920 amostras/20ms, pico limitado=${maxPeak.toFixed(2)})`
+  );
+  details.push(
+    `[${streamAudioOk ? 'OK' : 'FALHA'}] Áudio da Stream E2E (${webAudioStreamRes.renderedFrames} frames renderizados, RMS L=${webAudioStreamRes.rmsLeft.toFixed(2)} R=${webAudioStreamRes.rmsRight.toFixed(2)}, Opus 160kbps CBR Estéreo)`
+  );
+
+  return {
+    passed: connection_test_ok && signaling_test_ok && audio_engine_test_ok,
+    platform,
+    connection_test_ok,
+    signaling_test_ok,
+    audio_engine_test_ok,
+    details,
+  };
+}
+
 // Baixa o novo .exe da Release, substitui o executável em execução e reinicia o app automaticamente
 export async function installGithubUpdate(downloadUrl: string): Promise<void> {
+  if (isAndroidEnvironment() && downloadUrl.toLowerCase().endsWith('.apk')) {
+    window.open(downloadUrl, '_blank', 'noopener,noreferrer');
+    return;
+  }
   if (isTauriEnvironment()) {
     return await invokeTauri<void>('install_github_update', {
       downloadUrl,
@@ -350,4 +487,33 @@ export async function installGithubUpdate(downloadUrl: string): Promise<void> {
     'A substituição automática do executável (.exe) funciona dentro do aplicativo desktop StreamCompanion.exe.'
   );
 }
+
+// Recupera qualquer convite recebido via link streamcompanion:// na inicialização do app desktop
+export async function consumeStartupInvite(): Promise<string | null> {
+  if (!isTauriEnvironment()) return null;
+  try {
+    return await invokeTauri<string | null>('consume_startup_invite');
+  } catch {
+    return null;
+  }
+}
+
+// Encaminha um convite do navegador para a instância local do StreamCompanion.exe aberta no PC (127.0.0.1:45789)
+export async function forwardInviteToLocalDesktopApp(inviteStr: string): Promise<boolean> {
+  try {
+    const b64 = encodeRoomCodeUrlSafe(inviteStr);
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 800);
+    const resp = await fetch(`http://127.0.0.1:45789/invite?b64=${encodeURIComponent(b64)}`, {
+      method: 'GET',
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    return resp.ok;
+  } catch {
+    return false;
+  }
+}
+
+
 

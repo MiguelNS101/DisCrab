@@ -64,6 +64,10 @@ pub enum SignalingMessage {
         screen_fps: Option<u32>,
         #[serde(default)]
         screen_track_id: Option<String>,
+        #[serde(default)]
+        screen_audio_track_id: Option<String>,
+        #[serde(default)]
+        screen_stream_id: Option<String>,
         has_webcam: bool,
         #[serde(default)]
         webcam_track_id: Option<String>,
@@ -104,6 +108,10 @@ pub struct PeerSummary {
     #[serde(default)]
     pub screen_track_id: Option<String>,
     #[serde(default)]
+    pub screen_audio_track_id: Option<String>,
+    #[serde(default)]
+    pub screen_stream_id: Option<String>,
+    #[serde(default)]
     pub has_webcam: bool,
     #[serde(default)]
     pub webcam_track_id: Option<String>,
@@ -123,6 +131,8 @@ pub struct PeerSession {
     pub screen_resolution: Option<String>,
     pub screen_fps: Option<u32>,
     pub screen_track_id: Option<String>,
+    pub screen_audio_track_id: Option<String>,
+    pub screen_stream_id: Option<String>,
     pub has_webcam: bool,
     pub webcam_track_id: Option<String>,
     pub media_sources: Option<serde_json::Value>,
@@ -316,6 +326,8 @@ async fn handle_connection(
                         None,
                         None,
                         None,
+                        None,
+                        None,
                         false,
                         None,
                         None,
@@ -335,6 +347,8 @@ async fn handle_connection(
                                 session.screen_resolution.clone(),
                                 session.screen_fps,
                                 session.screen_track_id.clone(),
+                                session.screen_audio_track_id.clone(),
+                                session.screen_stream_id.clone(),
                                 session.has_webcam,
                                 session.webcam_track_id.clone(),
                                 session.media_sources.clone(),
@@ -386,6 +400,8 @@ async fn handle_connection(
                             screen_resolution: p.screen_resolution.clone(),
                             screen_fps: p.screen_fps,
                             screen_track_id: p.screen_track_id.clone(),
+                            screen_audio_track_id: p.screen_audio_track_id.clone(),
+                            screen_stream_id: p.screen_stream_id.clone(),
                             has_webcam: p.has_webcam,
                             webcam_track_id: p.webcam_track_id.clone(),
                             media_sources: p.media_sources.clone(),
@@ -411,10 +427,12 @@ async fn handle_connection(
                     screen_resolution: preserved_stream_state.2.clone(),
                     screen_fps: preserved_stream_state.3,
                     screen_track_id: preserved_stream_state.4.clone(),
-                    has_webcam: preserved_stream_state.5,
-                    webcam_track_id: preserved_stream_state.6.clone(),
-                    media_sources: preserved_stream_state.7.clone(),
-                    has_isolated_audio: preserved_stream_state.8,
+                    screen_audio_track_id: preserved_stream_state.5.clone(),
+                    screen_stream_id: preserved_stream_state.6.clone(),
+                    has_webcam: preserved_stream_state.7,
+                    webcam_track_id: preserved_stream_state.8.clone(),
+                    media_sources: preserved_stream_state.9.clone(),
+                    has_isolated_audio: preserved_stream_state.10,
                 };
 
                 // Registra ou atualiza a sessão
@@ -432,10 +450,12 @@ async fn handle_connection(
                             screen_resolution: preserved_stream_state.2,
                             screen_fps: preserved_stream_state.3,
                             screen_track_id: preserved_stream_state.4,
-                            has_webcam: preserved_stream_state.5,
-                            webcam_track_id: preserved_stream_state.6,
-                            media_sources: preserved_stream_state.7,
-                            has_isolated_audio: preserved_stream_state.8,
+                            screen_audio_track_id: preserved_stream_state.5,
+                            screen_stream_id: preserved_stream_state.6,
+                            has_webcam: preserved_stream_state.7,
+                            webcam_track_id: preserved_stream_state.8,
+                            media_sources: preserved_stream_state.9,
+                            has_isolated_audio: preserved_stream_state.10,
                             connection_seq: my_conn_seq,
                             tx: tx.clone(),
                         },
@@ -518,6 +538,8 @@ async fn handle_connection(
                             screen_resolution,
                             screen_fps,
                             screen_track_id,
+                            screen_audio_track_id,
+                            screen_stream_id,
                             has_webcam,
                             webcam_track_id,
                             media_sources,
@@ -533,6 +555,8 @@ async fn handle_connection(
                                     session.screen_resolution = screen_resolution.clone();
                                     session.screen_fps = screen_fps;
                                     session.screen_track_id = screen_track_id.clone();
+                                    session.screen_audio_track_id = screen_audio_track_id.clone();
+                                    session.screen_stream_id = screen_stream_id.clone();
                                     session.has_webcam = has_webcam;
                                     session.webcam_track_id = webcam_track_id.clone();
                                     session.media_sources = media_sources.clone();
@@ -547,6 +571,8 @@ async fn handle_connection(
                                 screen_resolution,
                                 screen_fps,
                                 screen_track_id,
+                                screen_audio_track_id,
+                                screen_stream_id,
                                 has_webcam,
                                 webcam_track_id,
                                 media_sources,
@@ -639,3 +665,105 @@ fn nanoid_simple() -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_tungstenite::connect_async;
+
+    #[tokio::test]
+    async fn test_signaling_server_auth_and_p2p_relay() {
+        let (port, token, state) = start_signaling_server("Host_Tester".to_string())
+            .await
+            .expect("Servidor de sinalização deve iniciar");
+
+        let url = format!("ws://127.0.0.1:{}", port);
+
+        // 1. Conecta o Peer 1 (Host)
+        let (mut ws1, _) = connect_async(&url).await.expect("Peer 1 deve conectar");
+        let auth1 = serde_json::to_string(&SignalingMessage::Auth {
+            token: token.clone(),
+            nickname: "Miguel_PC".to_string(),
+            client_id: Some("client_host_1".to_string()),
+        })
+        .unwrap();
+        ws1.send(Message::Text(auth1)).await.unwrap();
+
+        let msg1 = ws1.next().await.unwrap().unwrap();
+        let parsed1: SignalingMessage = serde_json::from_str(msg1.to_text().unwrap()).unwrap();
+        let peer1_id = match parsed1 {
+            SignalingMessage::AuthOk {
+                peer_id,
+                is_host,
+                peers,
+            } => {
+                assert!(is_host);
+                assert!(peers.is_empty());
+                peer_id
+            }
+            other => panic!("Esperava AuthOk para Peer 1, recebeu: {:?}", other),
+        };
+
+        // 2. Conecta o Peer 2 (Amigo no Android)
+        let (mut ws2, _) = connect_async(&url).await.expect("Peer 2 deve conectar");
+        let auth2 = serde_json::to_string(&SignalingMessage::Auth {
+            token: token.clone(),
+            nickname: "Amigo_Android".to_string(),
+            client_id: Some("client_android_2".to_string()),
+        })
+        .unwrap();
+        ws2.send(Message::Text(auth2)).await.unwrap();
+
+        let msg2 = ws2.next().await.unwrap().unwrap();
+        let parsed2: SignalingMessage = serde_json::from_str(msg2.to_text().unwrap()).unwrap();
+        let peer2_id = match parsed2 {
+            SignalingMessage::AuthOk { peer_id, peers, .. } => {
+                assert_eq!(peers.len(), 1);
+                assert_eq!(peers[0].id, peer1_id);
+                peer_id
+            }
+            other => panic!("Esperava AuthOk para Peer 2, recebeu: {:?}", other),
+        };
+
+        // 3. Peer 1 deve receber PeerJoined do Peer 2
+        let join_notif = ws1.next().await.unwrap().unwrap();
+        let parsed_join: SignalingMessage =
+            serde_json::from_str(join_notif.to_text().unwrap()).unwrap();
+        match parsed_join {
+            SignalingMessage::PeerJoined { peer } => {
+                assert_eq!(peer.id, peer2_id);
+                assert_eq!(peer.nickname, "Amigo_Android");
+            }
+            other => panic!("Esperava PeerJoined no Peer 1, recebeu: {:?}", other),
+        }
+
+        // 4. Testa relay de WebRtcSignal entre Peer 2 -> Peer 1
+        let signal_out = SignalingMessage::WebRtcSignal {
+            to_peer_id: peer1_id.clone(),
+            from_peer_id: None,
+            payload: serde_json::json!({ "sdp": { "type": "offer", "sdp": "v=0..." } }),
+        };
+        ws2.send(Message::Text(serde_json::to_string(&signal_out).unwrap()))
+            .await
+            .unwrap();
+
+        let relay_in = ws1.next().await.unwrap().unwrap();
+        let parsed_relay: SignalingMessage =
+            serde_json::from_str(relay_in.to_text().unwrap()).unwrap();
+        match parsed_relay {
+            SignalingMessage::WebRtcSignal {
+                to_peer_id,
+                from_peer_id,
+                payload,
+            } => {
+                assert_eq!(to_peer_id, peer1_id);
+                assert_eq!(from_peer_id, Some(peer2_id));
+                assert_eq!(payload["sdp"]["type"], "offer");
+            }
+            other => panic!("Esperava WebRtcSignal no Peer 1, recebeu: {:?}", other),
+        }
+
+        state.running.store(false, Ordering::SeqCst);
+    }
+}
+

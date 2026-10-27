@@ -173,80 +173,86 @@ impl TunnelManager {
         Ok(appdata_bin)
     }
 
-    /// Garante que o cloudflared.exe existe em %LOCALAPPDATA%\StreamCompanion\bin\cloudflared.exe
-    /// ou realiza o download automático silencioso (sem abrir janela preta de terminal).
+    /// Garante que o cloudflared.exe existe em %LOCALAPPDATA%\StreamCompanion\bin\cloudflared.exe (Apenas Windows)
     pub fn ensure_binary_exists() -> Result<PathBuf, String> {
-        let binary_path = Self::resolve_binary_path()?;
-        if Self::is_valid_binary(&binary_path) {
-            return Ok(binary_path);
-        }
-
-        let target_dir = Self::get_appdata_bin_dir();
-        let _ = std::fs::create_dir_all(&target_dir);
-        let final_path = target_dir.join("cloudflared.exe");
-        let temp_path = target_dir.join("cloudflared.download.tmp");
-
-        println!(
-            "[Tunnel] Baixando cloudflared.exe automaticamente para {:?}...",
-            final_path
-        );
-
-        #[cfg(windows)]
+        #[cfg(target_os = "android")]
         {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-            let download_url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe";
-            let temp_str = temp_path.to_string_lossy().to_string();
-
-            let _ = std::fs::remove_file(&temp_path);
-
-            // 1. Tenta curl.exe nativo do Windows 10/11 de forma totalmente invisível (CREATE_NO_WINDOW)
-            let status = Command::new("curl.exe")
-                .args(["-L", "--fail", "-s", "-o", &temp_str, download_url])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status();
-
-            if status.map(|s| s.success()).unwrap_or(false) && Self::is_valid_binary(&temp_path) {
-                let _ = std::fs::remove_file(&final_path);
-                std::fs::rename(&temp_path, &final_path).map_err(|e| {
-                    format!("Falha ao mover cloudflared.exe para pasta final: {}", e)
-                })?;
-                println!(
-                    "[Tunnel] Download automático do cloudflared.exe concluído em {:?}!",
-                    final_path
-                );
-                return Ok(final_path);
-            }
-
-            // 2. Fallback: PowerShell invisível
-            let _ = std::fs::remove_file(&temp_path);
-            let ps_script = format!(
-                "$ProgressPreference = 'SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
-                download_url, temp_str
-            );
-            let status_ps = Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps_script])
-                .creation_flags(CREATE_NO_WINDOW)
-                .status();
-
-            if status_ps.map(|s| s.success()).unwrap_or(false) && Self::is_valid_binary(&temp_path) {
-                let _ = std::fs::remove_file(&final_path);
-                std::fs::rename(&temp_path, &final_path).map_err(|e| {
-                    format!("Falha ao salvar cloudflared.exe: {}", e)
-                })?;
-                println!(
-                    "[Tunnel] Download do cloudflared.exe concluído via PowerShell em {:?}!",
-                    final_path
-                );
-                return Ok(final_path);
-            }
+            return Err("No Android o Cloudflare Tunnel não é utilizado (conecte via Sala Fixa Mesh P2P ou Rede Local Wi-Fi).".to_string());
         }
 
-        if Self::is_valid_binary(&final_path) {
-            Ok(final_path)
-        } else {
-            Err("Não foi possível baixar o cloudflared.exe automaticamente. Verifique sua conexão com a Internet ou use o modo Rede Local (LAN).".to_string())
+        #[cfg(not(target_os = "android"))]
+        {
+            let binary_path = Self::resolve_binary_path()?;
+            if Self::is_valid_binary(&binary_path) {
+                return Ok(binary_path);
+            }
+
+            let target_dir = Self::get_appdata_bin_dir();
+            let _ = std::fs::create_dir_all(&target_dir);
+            let final_path = target_dir.join("cloudflared.exe");
+            let temp_path = target_dir.join("cloudflared.download.tmp");
+
+            println!(
+                "[Tunnel] Baixando cloudflared.exe automaticamente para {:?}...",
+                final_path
+            );
+
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+                let download_url = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe";
+                let temp_str = temp_path.to_string_lossy().to_string();
+
+                let _ = std::fs::remove_file(&temp_path);
+
+                let status = Command::new("curl.exe")
+                    .args(["-L", "--fail", "-s", "-o", &temp_str, download_url])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status();
+
+                if status.map(|s| s.success()).unwrap_or(false) && Self::is_valid_binary(&temp_path) {
+                    let _ = std::fs::remove_file(&final_path);
+                    std::fs::rename(&temp_path, &final_path).map_err(|e| {
+                        format!("Falha ao mover cloudflared.exe para pasta final: {}", e)
+                    })?;
+                    println!(
+                        "[Tunnel] Download automático do cloudflared.exe concluído em {:?}!",
+                        final_path
+                    );
+                    return Ok(final_path);
+                }
+
+                let _ = std::fs::remove_file(&temp_path);
+                let ps_script = format!(
+                    "$ProgressPreference = 'SilentlyContinue'; [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; Invoke-WebRequest -Uri '{}' -OutFile '{}' -UseBasicParsing",
+                    download_url, temp_str
+                );
+                let status_ps = Command::new("powershell.exe")
+                    .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &ps_script])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .status();
+
+                if status_ps.map(|s| s.success()).unwrap_or(false) && Self::is_valid_binary(&temp_path) {
+                    let _ = std::fs::remove_file(&final_path);
+                    std::fs::rename(&temp_path, &final_path).map_err(|e| {
+                        format!("Falha ao salvar cloudflared.exe: {}", e)
+                    })?;
+                    println!(
+                        "[Tunnel] Download do cloudflared.exe concluído via PowerShell em {:?}!",
+                        final_path
+                    );
+                    return Ok(final_path);
+                }
+            }
+
+            let _ = temp_path;
+            if Self::is_valid_binary(&final_path) {
+                Ok(final_path)
+            } else {
+                Err("Não foi possível baixar o cloudflared.exe automaticamente. Verifique sua conexão com a Internet ou use o modo Rede Local (LAN).".to_string())
+            }
         }
     }
 
@@ -318,7 +324,6 @@ impl TunnelManager {
         }
 
         if captured_subdomain.is_some() {
-            // Continua drenando o leitor em background para o buffer não encher
             std::thread::spawn(move || {
                 for _ in reader.lines() {}
             });
@@ -391,3 +396,30 @@ fn which_tool(cmd: &str) -> Result<PathBuf, ()> {
     }
     Err(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_encode_and_decode_cloudflare_room_code() {
+        let code = encode_room_code("fast-neon-tiger", "9K4P2M");
+        let (ws_url, token) = decode_room_code(&code).expect("Deve decodificar código WAN");
+        assert_eq!(ws_url, "wss://fast-neon-tiger.trycloudflare.com");
+        assert_eq!(token, "9K4P2M");
+    }
+
+    #[test]
+    fn test_encode_and_decode_lan_room_code() {
+        let code = encode_room_code("192.168.1.42:54321", "AB12CD");
+        let (ws_url, token) = decode_room_code(&code).expect("Deve decodificar código LAN");
+        assert_eq!(ws_url, "ws://192.168.1.42:54321");
+        assert_eq!(token, "AB12CD");
+    }
+
+    #[test]
+    fn test_invalid_room_code_rejected() {
+        assert!(decode_room_code("!!!invalido!!!").is_err());
+    }
+}
+

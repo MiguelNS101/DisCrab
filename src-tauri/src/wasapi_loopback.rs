@@ -145,52 +145,23 @@ impl ProcessAudioCapturer {
 
             #[cfg(not(windows))]
             {
-                // Simulação de áudio suave para testes de desenvolvimento fora do Windows
                 std::thread::Builder::new()
-                    .name(format!("mock-audio-loopback-pid-{}", target_pid))
+                    .name(format!("android-audio-dsp-pid-{}", target_pid))
                     .spawn(move || {
-                        let mut sample_index: f32 = 0.0;
-                        while running_flag.load(Ordering::SeqCst) {
-                            let sample_rate = 48000u32;
-                            let chunk_size = 960; // 20ms a 48kHz
-                            let mut pcm_floats = Vec::with_capacity(chunk_size * 2);
-
-                            for _ in 0..chunk_size {
-                                let freq = 440.0 + (target_pid as f32 % 5.0) * 80.0;
-                                let val = (sample_index * 2.0 * std::f32::consts::PI * freq
-                                    / 48000.0)
-                                    .sin()
-                                    * 0.15;
-                                pcm_floats.push(val);
-                                pcm_floats.push(val);
-                                sample_index += 1.0;
-                            }
-
-                            let mut byte_data = Vec::with_capacity(pcm_floats.len() * 4);
-                            for sample in pcm_floats {
-                                byte_data.extend_from_slice(&sample.to_le_bytes());
-                            }
-
-                            let packet = PcmAudioPacket {
-                                pid: target_pid,
-                                sample_rate,
-                                channels: 2,
-                                bits_per_sample: 32,
-                                pcm_data: byte_data,
-                            };
-
-                            let _ = sender.send(packet);
-                            std::thread::sleep(Duration::from_millis(20));
-                        }
+                        crate::android_audio::run_android_audio_loop(
+                            target_pid,
+                            running_flag,
+                            sender,
+                        );
                     })
-                    .map_err(|e| format!("Falha ao criar mock de áudio: {}", e))?;
+                    .map_err(|e| format!("Falha ao iniciar motor de áudio Android: {}", e))?;
             }
         }
 
         Ok(())
     }
 
-    /// Inicia a captura WASAPI para um único PID
+    /// Inicia a captura de áudio para um único PID/Modo
     pub fn start(&self, pid: u32) -> Result<(), String> {
         self.start_multiple(vec![pid])
     }
@@ -731,3 +702,29 @@ fn run_wasapi_capture_loop(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_process_audio_capturer_lifecycle_and_deduplication() {
+        let (capturer, _rx) = ProcessAudioCapturer::new();
+        assert!(!capturer.is_running());
+        assert_eq!(capturer.get_current_pid(), None);
+
+        // Inicia com múltiplos PIDs duplicados e verifica deduplicação e estado
+        capturer.start_multiple(vec![4120, 4120, 8840]).unwrap();
+        assert!(capturer.is_running());
+        assert_eq!(capturer.get_current_pid(), Some(4120));
+
+        // Chamar novamente com os mesmos PIDs deve manter o estado sem erro
+        capturer.start_multiple(vec![4120, 8840]).unwrap();
+        assert!(capturer.is_running());
+
+        capturer.stop();
+        assert!(!capturer.is_running());
+        assert_eq!(capturer.get_current_pid(), None);
+    }
+}
+

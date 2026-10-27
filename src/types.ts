@@ -41,10 +41,17 @@ export interface RemoteMediaSourceMeta {
   stream_id?: string;
 }
 
+export interface SavedMeshRoom {
+  roomName: string;
+  password: string;
+  lastUsedAt: number;
+}
+
 export interface RoomDetails {
   code: string;
   token: string;
-  mode: 'cloudflare' | 'lan';
+  mode: 'mesh' | 'cloudflare' | 'lan';
+  room_name?: string;
   ws_url: string;
   subdomain?: string;
   local_ip: string;

@@ -104,8 +104,8 @@ export function openExternalStreamWindowSync(streamId: string, title?: string): 
     const extWin = window.open('', winName, features);
     if (extWin) {
       extWin.document.title = title
-        ? `StreamCompanion · ${title}`
-        : 'StreamCompanion · Transmissão Destacada';
+        ? `DisCrab · ${title}`
+        : 'DisCrab · Transmissão Destacada';
       syncStylesToExternalWindow(extWin.document);
       externalWindowsMap.set(streamId, extWin);
       extWin.focus();
@@ -204,7 +204,7 @@ export const FloatingStreamPopup: React.FC<FloatingStreamPopupProps> = ({
   // Conecta ou inicializa a Nova Janela do Sistema Operacional
   const attachExternalWindow = (win: Window) => {
     externalWinRef.current = win;
-    win.document.title = `${userName} · ${title} — StreamCompanion`;
+    win.document.title = `${userName} · ${title} — DisCrab`;
     syncStylesToExternalWindow(win.document);
 
     let rootEl = win.document.getElementById('sc-popup-root');
@@ -268,24 +268,32 @@ export const FloatingStreamPopup: React.FC<FloatingStreamPopupProps> = ({
   // Atualiza o título da janela externa se mudar
   useEffect(() => {
     if (externalWinRef.current && !externalWinRef.current.closed) {
-      externalWinRef.current.document.title = `${userName} · ${title} — StreamCompanion`;
+      externalWinRef.current.document.title = `${userName} · ${title} — DisCrab`;
     }
   }, [userName, title]);
+
+  const streamTracksKey = stream
+    ? stream
+        .getTracks()
+        .map((t) => `${t.kind}:${t.id}:${t.readyState}`)
+        .join('|')
+    : '';
 
   // Vincula o MediaStream ao elemento <video> (tanto na janela externa quanto no fallback)
   useEffect(() => {
     const el = videoRef.current;
     if (el && stream) {
-      if (el.srcObject !== stream) {
-        el.srcObject = stream;
-      }
+      stream.getAudioTracks().forEach((t) => {
+        t.enabled = true;
+      });
+      el.srcObject = stream;
       el.muted = isSelf ? true : isMuted;
       el.volume = isSelf ? 0 : Math.max(0, Math.min(1.0, isMuted ? 0 : volume / 100));
       el.play().catch((err) => {
         console.warn('[FloatingPopup] Autoplay aguardando interação:', err);
       });
     }
-  }, [stream, externalContainer]);
+  }, [stream, streamTracksKey, externalContainer, isSelf]);
 
   // Controle de Volume (0% a 150% com Boost via Web Audio API sem silenciar o decodificador WebRTC)
   useEffect(() => {
@@ -326,10 +334,16 @@ export const FloatingStreamPopup: React.FC<FloatingStreamPopupProps> = ({
       } catch {}
     }
 
-    if (boostGainRef.current) {
-      boostGainRef.current.gain.value = 0;
+    if (boostSourceRef.current || boostGainRef.current) {
+      try {
+        boostSourceRef.current?.disconnect();
+        boostGainRef.current?.disconnect();
+      } catch {}
+      boostSourceRef.current = null;
+      boostGainRef.current = null;
+      boostStreamRef.current = null;
     }
-  }, [volume, isMuted, isSelf, stream, externalContainer]);
+  }, [volume, isMuted, isSelf, stream, streamTracksKey, externalContainer]);
 
   useEffect(() => {
     return () => {
@@ -343,7 +357,7 @@ export const FloatingStreamPopup: React.FC<FloatingStreamPopupProps> = ({
   }, []);
 
   const handleVolumeUpdate = (newVol: number) => {
-    const clamped = Math.max(0, Math.min(150, Math.round(newVol)));
+    const clamped = Math.max(0, Math.min(200, Math.round(newVol)));
     onChangeVolume(clamped);
     setSavedVolumeFlash(true);
     if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
@@ -723,12 +737,12 @@ export const FloatingStreamPopup: React.FC<FloatingStreamPopupProps> = ({
           <input
             type="range"
             min={0}
-            max={150}
+            max={200}
             value={isSelf ? 0 : isMuted ? 0 : volume}
             onChange={(e) => handleVolumeUpdate(Number(e.target.value))}
             onDoubleClick={() => !isSelf && handleVolumeUpdate(100)}
             disabled={isSelf}
-            title="Altura do áudio salva automaticamente (0% a 150%). Duplo clique volta para 100%."
+            title="Altura do áudio salva automaticamente (0% a 200%). Duplo clique volta para 100%."
             className="w-28 sm:w-36 accent-cyan-400 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
           />
           <span

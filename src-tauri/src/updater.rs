@@ -84,12 +84,18 @@ pub fn get_system_info() -> AppSystemInfo {
     }
 }
 
+pub const FIXED_GITHUB_REPO: &str = "MiguelNS101/StreamCompanion";
+
 /// Normaliza "https://github.com/usuario/repo" ou "usuario/repo" para "usuario/repo"
 fn normalize_github_repo(input: &str) -> Result<String, String> {
     let trimmed = input
         .trim()
         .trim_end_matches('/')
         .trim_end_matches(".git");
+
+    if trimmed.is_empty() {
+        return Ok(FIXED_GITHUB_REPO.to_string());
+    }
 
     let cleaned = if let Some(idx) = trimmed.find("github.com/") {
         &trimmed[idx + "github.com/".len()..]
@@ -99,10 +105,7 @@ fn normalize_github_repo(input: &str) -> Result<String, String> {
 
     let parts: Vec<&str> = cleaned.split('/').filter(|s| !s.is_empty()).collect();
     if parts.len() < 2 {
-        return Err(
-            "Informe o repositório no formato 'usuario/repositorio' (ex: NTDarkzZ/StreamCompanion)."
-                .to_string(),
-        );
+        return Ok(FIXED_GITHUB_REPO.to_string());
     }
 
     Ok(format!("{}/{}", parts[0], parts[1]))
