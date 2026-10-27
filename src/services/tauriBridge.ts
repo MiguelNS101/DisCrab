@@ -269,7 +269,7 @@ export async function getAppSystemInfo(): Promise<AppSystemInfo> {
     return await invokeTauri<AppSystemInfo>('get_app_system_info');
   }
   return {
-    current_version: '1.1.0',
+    current_version: '1.1.1',
     exe_path: 'Modo Web (Navegador)',
     cloudflared: {
       installed: false,
@@ -325,7 +325,7 @@ export async function checkGithubUpdate(
     throw new Error(`GitHub API retornou status ${resp.status} para '${repo}'.`);
   }
   const json = await resp.json();
-  const currentVersion = '1.1.0';
+  const currentVersion = '1.1.1';
   const latestVersion = json.tag_name || currentVersion;
 
   let exeDownloadUrl: string | null = null;

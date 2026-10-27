@@ -11,6 +11,8 @@ import { VideoSourceManager } from './components/VideoSourceManager';
 import { LivePlayer } from './components/LivePlayer';
 import {
   FloatingStreamPopup,
+  StandalonePopupWindowView,
+  getPopupWindowParamsFromUrl,
   openExternalStreamWindowSync,
   closeExternalStreamWindowSync,
 } from './components/FloatingStreamPopup';
@@ -48,6 +50,18 @@ import {
 } from 'lucide-react';
 
 export default function App() {
+  const popupWindowParams = getPopupWindowParamsFromUrl();
+  if (popupWindowParams) {
+    return (
+      <ThemeProvider>
+        <StandalonePopupWindowView params={popupWindowParams} />
+      </ThemeProvider>
+    );
+  }
+  return <MainAppWorkspace />;
+}
+
+function MainAppWorkspace() {
   // Inicializa o apelido do localStorage para não precisar digitar novamente
   const [nickname, setNickname] = useState<string>(() => {
     try {
@@ -80,9 +94,9 @@ export default function App() {
   // Controle Discreto do Seletor de Janela & Áudio WASAPI (inicia fechado para priorizar as lives)
   const [showWindowSelector, setShowWindowSelector] = useState<boolean>(false);
 
-  // Abre ou foca uma nova janela real do Sistema Operacional (permitindo arrastar para outro monitor)
-  const openPopup = (streamId: string, title = 'DisCrab Live') => {
-    openExternalStreamWindowSync(streamId, title);
+  // Abre ou foca imediatamente uma nova janela real do Sistema Operacional (permitindo arrastar para outro monitor)
+  const openPopup = (streamId: string, title = 'DisCrab Live', userName = nickname) => {
+    openExternalStreamWindowSync(streamId, title, userName);
     setActivePopups((prev) => ({
       ...prev,
       [streamId]: true,
@@ -736,7 +750,8 @@ export default function App() {
                       onOpenPopup={() =>
                         openPopup(
                           'self-screen',
-                          `${nickname} - ${selectedWindow ? selectedWindow.title : activeScreenTitle}`
+                          selectedWindow ? selectedWindow.title : activeScreenTitle,
+                          nickname
                         )
                       }
                       onClosePopup={() => closePopup('self-screen')}
@@ -769,7 +784,7 @@ export default function App() {
                         isMirrored={isStreamMirrored(selfId)}
                         onToggleMirror={() => toggleStreamMirror(selfId)}
                         onStopLocalSource={() => stopMediaSource(src.sourceId)}
-                        onOpenPopup={() => openPopup(selfId, `${nickname} - ${src.title}`)}
+                        onOpenPopup={() => openPopup(selfId, src.title, nickname)}
                         onClosePopup={() => closePopup(selfId)}
                         onToggleWatch={() => {}}
                         onChangeVolume={() => {}}
@@ -801,7 +816,7 @@ export default function App() {
                       onToggleMirror={() => toggleStreamMirror(stream.id)}
                       connectionState={stream.connectionState}
                       onOpenPopup={() =>
-                        openPopup(stream.id, `${stream.user_name} - ${stream.title}`)
+                        openPopup(stream.id, stream.title, stream.user_name)
                       }
                       onClosePopup={() => closePopup(stream.id)}
                       onToggleWatch={() => handleToggleWatch(stream)}

@@ -14,10 +14,10 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: 'Nome da Tag da Release (ex: v1.1.0)'
+        description: 'Nome da Tag da Release (ex: v1.1.1)'
         required: false
         type: string
-        default: 'v1.1.0'
+        default: 'v1.1.1'
 
 # Permissão obrigatória para que o GitHub Actions consiga criar Releases e fazer upload de binários
 permissions:

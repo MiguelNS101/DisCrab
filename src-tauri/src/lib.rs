@@ -67,6 +67,7 @@ pub struct AppState {
     pub tunnel_manager: Arc<TunnelManager>,
     pub signaling_state: Arc<Mutex<Option<Arc<SignalingServerState>>>>,
     pub startup_invite: Arc<Mutex<Option<String>>>,
+    pub popup_windows: Arc<Mutex<std::collections::HashMap<String, String>>>,
 }
 
 /// Retorna e limpa qualquer convite recebido via link streamcompanion:// na abertura do app
@@ -382,6 +383,168 @@ async fn install_github_update(
     state.audio_capturer.stop();
     state.screen_capturer.stop();
     download_and_apply_update(app, download_url, &state.tunnel_manager).await
+}
+
+fn make_popup_window_label(stream_id: &str) -> String {
+    let cleaned: String = stream_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .take(48)
+        .collect();
+    if cleaned.is_empty() {
+        "popup-stream".to_string()
+    } else {
+        format!("popup-{}", cleaned)
+    }
+}
+
+/// Abre ou foca imediatamente uma Nova Janela Nativa Real do Sistema Operacional (WebviewWindow) para exibir a live destacada
+#[tauri::command]
+async fn open_stream_popup_window(
+    app: AppHandle,
+    stream_id: String,
+    title: String,
+    user_name: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let label = make_popup_window_label(&stream_id);
+    {
+        if let Ok(mut map) = state.popup_windows.lock() {
+            map.insert(label.clone(), stream_id.clone());
+        }
+    }
+
+    #[cfg(desktop)]
+    {
+        if let Some(existing) = app.get_webview_window(&label) {
+            let _ = existing.unminimize();
+            let _ = existing.show();
+            let _ = existing.set_focus();
+            return Ok(label);
+        }
+
+        let sid_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            stream_id.as_bytes(),
+        );
+        let usr_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            user_name.as_bytes(),
+        );
+        let ttl_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            title.as_bytes(),
+        );
+
+        let url_path = format!(
+            "index.html?popup_sid={}&popup_usr={}&popup_ttl={}",
+            sid_b64, usr_b64, ttl_b64
+        );
+
+        let win_title = if title.trim().is_empty() {
+            format!("DisCrab · {}", user_name)
+        } else {
+            format!("DisCrab · {} — {}", user_name, title)
+        };
+
+        let win = tauri::WebviewWindowBuilder::new(
+            &app,
+            &label,
+            tauri::WebviewUrl::App(url_path.into()),
+        )
+        .title(&win_title)
+        .inner_size(960.0, 580.0)
+        .min_inner_size(420.0, 260.0)
+        .resizable(true)
+        .decorations(true)
+        .center()
+        .build()
+        .map_err(|e| format!("Falha ao abrir nova janela nativa do SO: {}", e))?;
+
+        let raw_icon_rgba = include_bytes!("../icons/icon_rgba_64.bin");
+        if raw_icon_rgba.len() == 64 * 64 * 4 {
+            let app_icon = tauri::image::Image::new(raw_icon_rgba, 64, 64);
+            let _ = win.set_icon(app_icon);
+        }
+
+        let _ = win.show();
+        let _ = win.set_focus();
+        return Ok(label);
+    }
+
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, title, user_name);
+        Err("Janelas múltiplas do SO são suportadas apenas no Desktop".to_string())
+    }
+}
+
+/// Fecha a janela nativa destacada de uma transmissão e retorna o player para a grade principal
+#[tauri::command]
+async fn close_stream_popup_window(
+    app: AppHandle,
+    stream_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let label = make_popup_window_label(&stream_id);
+    if let Ok(mut map) = state.popup_windows.lock() {
+        map.remove(&label);
+    }
+
+    #[cfg(desktop)]
+    {
+        if let Some(win) = app.get_webview_window(&label) {
+            let _ = win.close();
+        }
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = app;
+    }
+
+    Ok(())
+}
+
+/// Ajusta tamanho, modo Sempre no Topo (Always on Top) ou Tela Cheia da janela nativa destacada
+#[tauri::command]
+async fn configure_stream_popup_window(
+    app: AppHandle,
+    stream_id: String,
+    width: Option<f64>,
+    height: Option<f64>,
+    always_on_top: Option<bool>,
+    fullscreen: Option<bool>,
+) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        let label = make_popup_window_label(&stream_id);
+        if let Some(win) = app.get_webview_window(&label) {
+            if let (Some(w), Some(h)) = (width, height) {
+                let _ = win.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                    width: w,
+                    height: h,
+                }));
+            }
+            if let Some(aot) = always_on_top {
+                let _ = win.set_always_on_top(aot);
+            }
+            if let Some(fs) = fullscreen {
+                let _ = win.set_fullscreen(fs);
+            }
+        }
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (app, stream_id, width, height, always_on_top, fullscreen);
+    }
+    Ok(())
+}
+
+/// Retransmite sinais WebRTC Loopback e comandos de controle entre a janela principal e as janelas popup nativas
+#[tauri::command]
+fn relay_popup_signal(app: AppHandle, payload: serde_json::Value) -> Result<(), String> {
+    let _ = app.emit("sc-popup-ipc", payload);
+    Ok(())
 }
 
 /// Executa bateria de autotestes nativos de Conexão P2P, Sinalização WebSocket e Motor de Áudio
@@ -787,6 +950,7 @@ pub fn run() {
         tunnel_manager: tunnel_manager_arc,
         signaling_state: Arc::new(Mutex::new(None)),
         startup_invite: startup_invite_arc.clone(),
+        popup_windows: Arc::new(Mutex::new(std::collections::HashMap::new())),
     };
 
     let builder = tauri::Builder::default().plugin(tauri_plugin_shell::init());
@@ -916,7 +1080,20 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if window.label() != "main" {
+            let label = window.label().to_string();
+            if label != "main" {
+                if let WindowEvent::Destroyed = event {
+                    let app = window.app_handle();
+                    let mut closed_stream_id: Option<String> = None;
+                    if let Some(state) = app.try_state::<AppState>() {
+                        if let Ok(mut map) = state.popup_windows.lock() {
+                            closed_stream_id = map.remove(&label);
+                        }
+                    }
+                    if let Some(sid) = closed_stream_id {
+                        let _ = app.emit("popup-window-closed", sid);
+                    }
+                }
                 return;
             }
             if let WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed = event {
@@ -962,6 +1139,10 @@ pub fn run() {
             ensure_cloudflared_binary,
             check_github_update,
             install_github_update,
+            open_stream_popup_window,
+            close_stream_popup_window,
+            configure_stream_popup_window,
+            relay_popup_signal,
             consume_startup_invite,
             run_native_diagnostics,
         ])
