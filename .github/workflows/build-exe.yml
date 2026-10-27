@@ -220,16 +220,19 @@ jobs:
           fi
           npx @tauri-apps/cli icon src-tauri/icons/icon.png || true
           
-          # Habilita tráfego WebSocket LAN (usesCleartextTraffic) e permissões de áudio/câmera no AndroidManifest
+          # Habilita tráfego WebSocket LAN substituindo o placeholder existente (sem duplicar atributo XML)
           MANIFEST_PATH="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
           if [ -f "$MANIFEST_PATH" ]; then
-            sed -i 's/<application/<application android:usesCleartextTraffic="true"/g' "$MANIFEST_PATH" || true
+            sed -i 's/android:usesCleartextTraffic="${usesCleartextTraffic}"/android:usesCleartextTraffic="true"/g' "$MANIFEST_PATH" || true
           fi
           
-          # Pré-compila a biblioteca Rust para Android ARM64 exibindo log completo em caso de erro
-          cargo build --manifest-path src-tauri/Cargo.toml --target aarch64-linux-android --lib --release
+          GRADLE_PROPS="src-tauri/gen/android/gradle.properties"
+          if [ -f "$GRADLE_PROPS" ]; then
+            echo "" >> "$GRADLE_PROPS"
+            echo "android.suppressUnsupportedCompileSdk=36" >> "$GRADLE_PROPS"
+          fi
           
-          npx @tauri-apps/cli android build --apk --target aarch64 --ci || npx @tauri-apps/cli android build --apk --target aarch64
+          npx @tauri-apps/cli android build --apk --target aarch64 --ci
 
       - name: 🔏 Assinar e Preparar APK Instalável para Release
         run: |
