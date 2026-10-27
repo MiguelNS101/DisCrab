@@ -28,6 +28,7 @@ import { WebcamPreviewPip } from './components/WebcamPreviewPip';
 import { startNativeMultiProcessAudio, isTauriEnvironment } from './services/tauriBridge';
 import { ThemeProvider } from './context/ThemeContext';
 import { ThemeCustomizerModal } from './components/ThemeCustomizerModal';
+import { AppIcon } from './components/AppIcon';
 import {
   Radio,
   Users,
@@ -39,6 +40,11 @@ import {
   ArrowLeft,
   Monitor,
   Video,
+  Shield,
+  Lock,
+  Globe,
+  Wifi,
+  Loader2,
 } from 'lucide-react';
 
 export default function App() {
@@ -64,6 +70,8 @@ export default function App() {
   const [isHost, setIsHost] = useState<boolean>(true);
   const [isLocalStudio, setIsLocalStudio] = useState<boolean>(false);
   const [externalUpdaterOpen, setExternalUpdaterOpen] = useState<boolean>(false);
+  const [isEnteringRoomTransition, setIsEnteringRoomTransition] = useState<boolean>(false);
+  const [hasEstablishedRoomSession, setHasEstablishedRoomSession] = useState<boolean>(false);
 
   // Controle de Popups de Transmissão Flutuantes Individuais
   const [activePopups, setActivePopups] = useState<Record<string, boolean>>({});
@@ -295,11 +303,26 @@ export default function App() {
   // Conecta ao WebSocket de sinalização sempre que uma sala é criada ou acessada
   useEffect(() => {
     if (roomDetails) {
+      setIsEnteringRoomTransition(true);
+      setHasEstablishedRoomSession(false);
       connectToRoom(roomDetails.ws_url, roomDetails.token, nickname).catch((err) => {
         console.error('[App] Erro na conexão WebRTC:', err);
       });
+      const timer = setTimeout(() => {
+        setIsEnteringRoomTransition(false);
+      }, 650);
+      return () => clearTimeout(timer);
+    } else {
+      setIsEnteringRoomTransition(false);
+      setHasEstablishedRoomSession(false);
     }
   }, [roomDetails?.created_at]);
+
+  useEffect(() => {
+    if (isConnected && roomDetails) {
+      setHasEstablishedRoomSession(true);
+    }
+  }, [isConnected, roomDetails]);
 
   // Monta a lista de streams estritamente REAIS a partir dos peers conectados
   const peerStreams: (StreamItem & { peerId: string; connectionState: RTCPeerConnectionState })[] = [];
@@ -398,6 +421,9 @@ export default function App() {
     peerStreams.length + (isScreenSharing ? 1 : 0) + localMediaSources.length;
 
   const isInRoomWorkspace = Boolean(isConnected || roomDetails || isLocalStudio);
+  const isShowingRoomTransition = Boolean(
+    roomDetails && (isEnteringRoomTransition || (!isConnected && !hasEstablishedRoomSession))
+  );
 
   return (
     <ThemeProvider>
@@ -406,7 +432,7 @@ export default function App() {
         <Header
           activePid={isScreenSharing && isolateAudio ? getEffectiveAudioPid() : null}
           activeProcessName={getEffectiveAudioLabel()}
-          isInRoom={isInRoomWorkspace}
+          isInRoom={isInRoomWorkspace && !isShowingRoomTransition}
           externalUpdaterOpen={externalUpdaterOpen}
           onExternalUpdaterClose={() => setExternalUpdaterOpen(false)}
         />
@@ -449,6 +475,113 @@ export default function App() {
               onOpenUpdater={() => setExternalUpdaterOpen(true)}
               onEnterLocalStudio={() => setIsLocalStudio(true)}
             />
+          </main>
+        ) : isShowingRoomTransition && roomDetails ? (
+          /* MODO TRANSIÇÃO DE TELA INTEIRA AO ENTRAR NA SALA */
+          <main className="flex-1 flex flex-col items-center justify-center p-4 sm:p-6">
+            <div className="sc-card w-full max-w-md bg-neutral-900/95 border border-neutral-800 rounded-2xl p-7 sm:p-8 shadow-2xl text-center space-y-6 relative overflow-hidden">
+              <div className="relative flex items-center justify-center mx-auto w-24 h-24">
+                <span className="absolute inset-0 rounded-full border-2 border-cyan-500/30 animate-ping" />
+                <span className="absolute inset-1 rounded-full border-2 border-t-cyan-400 border-r-rose-500 border-b-transparent border-l-transparent animate-spin" />
+                <AppIcon size={64} showLiveDot={true} animated={true} />
+              </div>
+
+              <div className="space-y-2">
+                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-neutral-950 border border-neutral-800 text-[11px] font-mono text-cyan-300">
+                  {roomDetails.mode === 'mesh' ? (
+                    <>
+                      <Shield className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Sala Fixa:</span>
+                      <strong className="text-white">{roomDetails.room_name}</strong>
+                    </>
+                  ) : roomDetails.mode === 'cloudflare' ? (
+                    <>
+                      <Globe className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Túnel P2P WAN</span>
+                    </>
+                  ) : (
+                    <>
+                      <Wifi className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>Rede Local (LAN)</span>
+                    </>
+                  )}
+                </div>
+
+                <h2 className="text-lg font-bold font-mono text-white tracking-wide">
+                  {isConnected
+                    ? 'Sala Conectada! Preparando Palco...'
+                    : 'Conectando à Sala P2P...'}
+                </h2>
+
+                <p className="text-xs font-mono text-neutral-400 max-w-xs mx-auto">
+                  {roomDetails.mode === 'mesh'
+                    ? 'Autenticando chave criptografada AES-256 e sincronizando canais de vídeo e áudio...'
+                    : 'Estabelecendo sinalização WebSocket de baixa latência e preparando canais WebRTC...'}
+                </p>
+              </div>
+
+              {/* Barra de Progresso de Transição */}
+              <div className="w-full space-y-2">
+                <div className="w-full h-2 bg-neutral-950 rounded-full overflow-hidden border border-neutral-800">
+                  <div
+                    className={`h-full bg-gradient-to-r from-cyan-500 via-rose-500 to-emerald-400 transition-all duration-300 ${
+                      isConnected ? 'w-full' : 'w-2/3 animate-pulse'
+                    }`}
+                  />
+                </div>
+                <div className="flex items-center justify-between text-[11px] font-mono text-neutral-400 px-0.5">
+                  <span className="flex items-center gap-1.5">
+                    <Loader2 className="w-3.5 h-3.5 text-cyan-400 animate-spin" />
+                    <span>{isConnected ? 'Sincronizado' : 'Negociando Handshake...'}</span>
+                  </span>
+                  <span className="flex items-center gap-1 text-emerald-400">
+                    <Lock className="w-3 h-3" />
+                    <span>{nickname}</span>
+                  </span>
+                </div>
+              </div>
+
+              {rtcError && (
+                <div className="bg-red-950/80 border border-red-800 rounded-xl p-3 text-left text-xs font-mono space-y-2">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                    <span className="text-red-200">{rtcError}</span>
+                  </div>
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        clearError();
+                        connectToRoom(roomDetails.ws_url, roomDetails.token, nickname).catch(
+                          () => {}
+                        );
+                      }}
+                      className="px-3 py-1 bg-red-900/70 hover:bg-red-800 border border-red-700 text-red-100 rounded-lg cursor-pointer flex items-center gap-1"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Tentar Novamente</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearError();
+                    disconnectFromRoom();
+                    setRoomDetails(null);
+                    setIsEnteringRoomTransition(false);
+                    setHasEstablishedRoomSession(false);
+                  }}
+                  className="sc-btn inline-flex items-center gap-1.5 px-4 py-2 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 hover:text-white rounded-xl text-xs font-mono transition-colors cursor-pointer"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5 text-neutral-400" />
+                  <span>Cancelar e Voltar ao Início</span>
+                </button>
+              </div>
+            </div>
           </main>
         ) : (
           /* MODO 2: SALA ATIVA (PALCO DE TRANSMISSÕES NO TOPO DE PONTA A PONTA + INFO DA SALA E CHAT EMBAIXO) */

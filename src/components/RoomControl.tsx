@@ -581,14 +581,22 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     setRoomDetails(null);
   };
 
-  // MODO 1: Conectado na Sala -> Barra Compacta Discreta
-  if (isConnected && roomDetails) {
+  // MODO 1: Na Sala (Conectado ou Conectando) -> Barra Compacta Discreta
+  if (roomDetails) {
     return (
       <div className="flex items-center justify-between flex-wrap gap-2">
         <div className="flex items-center gap-2.5">
           <span className="relative flex h-2.5 w-2.5 shrink-0">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-            <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+            <span
+              className={`animate-ping absolute inline-flex h-full w-full rounded-full opacity-75 ${
+                isConnected ? 'bg-emerald-400' : 'bg-amber-400'
+              }`}
+            />
+            <span
+              className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                isConnected ? 'bg-emerald-500' : 'bg-amber-500'
+              }`}
+            />
           </span>
           <div className="flex items-center gap-2 font-mono text-xs flex-wrap">
             {roomDetails.mode === 'mesh' ? (
@@ -598,7 +606,12 @@ export const RoomControl: React.FC<RoomControlProps> = ({
               </span>
             ) : (
               <span className="text-emerald-400 font-bold uppercase tracking-wider">
-                {isHost ? 'Host' : 'Sala Ativa'}
+                {isHost ? 'Host' : isConnected ? 'Sala Ativa' : 'Conectando...'}
+              </span>
+            )}
+            {!isConnected && roomDetails.mode === 'mesh' && (
+              <span className="text-[10px] text-amber-400 font-semibold uppercase tracking-wider">
+                (Conectando...)
               </span>
             )}
             <span className="text-neutral-600">·</span>

@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "desktop-capability",
+  "description": "Desktop-only permissions (native file dialog)",
+  "platforms": ["windows", "linux", "macOS"],
+  "windows": ["*"],
+  "permissions": [
+    "dialog:default"
+  ]
+}
