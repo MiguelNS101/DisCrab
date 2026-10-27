@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronUp,
   PowerOff,
+  AppWindow,
 } from 'lucide-react';
 import { WindowItem, AudioSourceMode, LocalMediaSource } from '../types';
 
@@ -17,6 +18,8 @@ interface BroadcastControlsProps {
   localMediaSources?: LocalMediaSource[];
   showSourceManager?: boolean;
   onToggleSourceManager?: () => void;
+  showWindowSelector?: boolean;
+  onToggleWindowSelector?: () => void;
   onStopAllSources?: () => void;
   selectedWindow: WindowItem | null;
   isolateAudio: boolean;
@@ -38,7 +41,10 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
   localMediaSources = [],
   showSourceManager = false,
   onToggleSourceManager,
+  showWindowSelector = false,
+  onToggleWindowSelector,
   onStopAllSources,
+  selectedWindow,
   audioSourceMode,
   onChangeAudioSourceMode,
   fps,
@@ -52,50 +58,72 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
   const activeCount = localMediaSources.length;
 
   return (
-    <div className="bg-neutral-900/90 border border-neutral-800 rounded-xl p-4 shadow-xl flex flex-wrap items-center justify-between gap-4">
-      {/* Botões de Ação Principais */}
-      <div className="flex flex-wrap items-center gap-3">
-        {/* Compartilhar Tela / Jogo */}
+    <div className="flex flex-wrap items-center justify-between gap-2.5">
+      {/* Controles Discretos de Captura: Tela, Câmeras/Captura e Seletor de Janela WASAPI */}
+      <div className="flex flex-wrap items-center gap-2">
+        {/* 1. Transmitir Tela */}
         <button
           onClick={onToggleScreenShare}
-          className={`flex items-center gap-2 px-4 py-2 rounded-lg font-mono font-bold text-xs uppercase tracking-wider transition-all cursor-pointer shadow-lg ${
+          className={`sc-btn sc-btn-sized flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg font-mono font-bold text-xs uppercase tracking-wider transition-all cursor-pointer ${
             isScreenSharing
-              ? 'bg-red-600 hover:bg-red-500 text-white shadow-red-950/60'
-              : 'bg-cyan-500 hover:bg-cyan-400 text-black shadow-cyan-950/60'
+              ? 'bg-red-600 hover:bg-red-500 text-white shadow-md shadow-red-950/60'
+              : 'sc-btn-primary bg-cyan-500 hover:bg-cyan-400 text-black'
           }`}
         >
           {isScreenSharing ? (
             <>
-              <Flame className="w-4 h-4 text-white animate-pulse" />
-              Parar Tela
+              <Flame className="w-3.5 h-3.5 text-white animate-pulse" />
+              <span>Parar Tela</span>
             </>
           ) : (
             <>
-              <Monitor className="w-4 h-4" />
-              Transmitir Tela
+              <Monitor className="w-3.5 h-3.5" />
+              <span>Transmitir Tela</span>
             </>
           )}
         </button>
 
-        {/* Seletor Multi-Fonte: Webcams & Placas de Captura USB */}
+        {/* 2. Botão Discreto: Janela & Áudio WASAPI */}
+        {onToggleWindowSelector && (
+          <button
+            type="button"
+            onClick={onToggleWindowSelector}
+            className={`sc-btn flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-mono text-xs transition-all cursor-pointer border ${
+              showWindowSelector
+                ? 'bg-neutral-800 border-cyan-500 text-white font-bold'
+                : 'bg-neutral-950 border-neutral-800 text-neutral-300 hover:text-white hover:border-neutral-700'
+            }`}
+            title="Abrir seletor de janela específica e roteamento avançado de áudio WASAPI"
+          >
+            <AppWindow className="w-3.5 h-3.5 text-cyan-400" />
+            <span className="truncate max-w-[160px]">
+              {selectedWindow ? selectedWindow.process_name : 'Janela & Áudio'}
+            </span>
+            {showWindowSelector ? (
+              <ChevronUp className="w-3.5 h-3.5 text-neutral-400" />
+            ) : (
+              <ChevronDown className="w-3.5 h-3.5 text-neutral-400" />
+            )}
+          </button>
+        )}
+
+        {/* 3. Botão Discreto: Câmeras & Placa de Captura */}
         <div className="flex items-center gap-1">
           <button
             onClick={onToggleSourceManager || onToggleWebcam}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-lg font-mono text-xs transition-all cursor-pointer border ${
+            className={`sc-btn flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-mono text-xs transition-all cursor-pointer border ${
               activeCount > 0 || isWebcamActive
-                ? 'bg-indigo-950/80 border-indigo-500 text-indigo-200 font-bold shadow-md shadow-indigo-950/40'
+                ? 'bg-indigo-950/80 border-indigo-500 text-indigo-200 font-bold'
                 : showSourceManager
                 ? 'bg-neutral-800 border-indigo-500/60 text-white'
                 : 'bg-neutral-950 border-neutral-800 text-neutral-300 hover:text-white hover:border-neutral-700'
             }`}
-            title="Escolher Webcam(s) ou Placa(s) de Captura USB e transmitir várias fontes ao mesmo tempo"
+            title="Gerenciar Webcams e Placas de Captura USB"
           >
-            <Video className="w-4 h-4 text-indigo-400" />
-            <Tv className="w-3.5 h-3.5 text-emerald-400 -ml-1" />
+            <Video className="w-3.5 h-3.5 text-indigo-400" />
+            <Tv className="w-3 h-3 text-emerald-400 -ml-1" />
             <span>
-              {activeCount > 0
-                ? `Câmeras / Captura (${activeCount} Ativa${activeCount > 1 ? 's' : ''})`
-                : 'Câmeras & Placa de Captura'}
+              {activeCount > 0 ? `Câmeras (${activeCount})` : 'Câmeras / Captura'}
             </span>
             {showSourceManager ? (
               <ChevronUp className="w-3.5 h-3.5 text-neutral-400" />
@@ -107,65 +135,70 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
           {activeCount > 0 && onStopAllSources && (
             <button
               onClick={onStopAllSources}
-              className="p-2 rounded-lg bg-red-950/70 hover:bg-red-900 border border-red-800 text-red-300 cursor-pointer transition-colors"
+              className="p-1.5 rounded-lg bg-red-950/70 hover:bg-red-900 border border-red-800 text-red-300 cursor-pointer transition-colors"
               title="Desligar todas as webcams e placas de captura ativas"
             >
-              <PowerOff className="w-4 h-4" />
+              <PowerOff className="w-3.5 h-3.5" />
             </button>
           )}
         </div>
 
-        {/* Alternador Rápido de Áudio WASAPI Ao Vivo */}
-        <div className="flex items-center bg-neutral-950 border border-neutral-800 rounded-lg p-0.5 text-xs font-mono">
+        {/* 4. Pílula Rápida de Modo de Áudio WASAPI */}
+        <div className="flex items-center bg-neutral-950 border border-neutral-800 rounded-lg p-0.5 text-[11px] font-mono">
           <button
             type="button"
             onClick={() => onChangeAudioSourceMode('selected_window')}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded cursor-pointer transition-all ${
+            className={`px-2 py-1 rounded cursor-pointer transition-all ${
               audioSourceMode === 'selected_window'
-                ? 'bg-cyan-500 text-black font-bold shadow-sm'
+                ? 'sc-btn-primary bg-cyan-500 text-black font-bold'
                 : 'text-neutral-400 hover:text-white'
             }`}
-            title="Mandar áudio apenas da janela transmitida"
+            title="Capturar áudio apenas da janela selecionada"
           >
-            <span>Janela</span>
+            Janela
           </button>
           <button
             type="button"
-            onClick={() => onChangeAudioSourceMode('other_window')}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded cursor-pointer transition-all ${
+            onClick={() => {
+              onChangeAudioSourceMode('other_window');
+              if (onToggleWindowSelector && !showWindowSelector) {
+                onToggleWindowSelector();
+              }
+            }}
+            className={`px-2 py-1 rounded cursor-pointer transition-all ${
               audioSourceMode === 'other_window'
-                ? 'bg-indigo-500 text-white font-bold shadow-sm'
+                ? 'bg-indigo-500 text-white font-bold'
                 : 'text-neutral-400 hover:text-white'
             }`}
-            title="Mandar áudio de outras janelas selecionadas (Multi-Áudio)"
+            title="Mixar áudio de múltiplas janelas escolhidas"
           >
-            <span>Outras Janelas</span>
+            Multi-Áudio
           </button>
           <button
             type="button"
             onClick={() => onChangeAudioSourceMode('all_except_discord')}
-            className={`flex items-center gap-1.5 px-2.5 py-1 rounded cursor-pointer transition-all ${
+            className={`px-2 py-1 rounded cursor-pointer transition-all ${
               audioSourceMode === 'all_except_discord'
-                ? 'bg-emerald-500 text-black font-bold shadow-sm'
+                ? 'bg-emerald-500 text-black font-bold'
                 : 'text-neutral-400 hover:text-white'
             }`}
-            title="Mandar áudio de todas as janelas do PC exceto o Discord"
+            title="Capturar todo o áudio do PC excluindo o Discord"
           >
-            <span>Todo PC (Sem DC)</span>
+            Sem Discord
           </button>
         </div>
       </div>
 
-      {/* Opções de Qualidade de Transmissão & Áudio Atual */}
-      <div className="flex items-center gap-3 flex-wrap">
-        <div className="flex items-center gap-1.5 bg-neutral-950 border border-neutral-800 rounded-lg p-1 text-xs font-mono">
+      {/* Seletores Compactos de Resolução, FPS e Resumo de Áudio */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <div className="flex items-center gap-0.5 bg-neutral-950 border border-neutral-800 rounded-lg p-0.5 text-[11px] font-mono">
           {(['720p', '1080p', '1440p'] as const).map((res) => (
             <button
               key={res}
               onClick={() => onChangeResolution(res)}
-              className={`px-2.5 py-1 rounded text-[11px] cursor-pointer transition-colors ${
+              className={`px-2 py-1 rounded cursor-pointer transition-colors ${
                 resolution === res
-                  ? 'bg-cyan-500 text-black font-bold'
+                  ? 'sc-btn-primary bg-cyan-500 text-black font-bold'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
@@ -174,27 +207,31 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
           ))}
         </div>
 
-        <div className="flex items-center gap-1.5 bg-neutral-950 border border-neutral-800 rounded-lg p-1 text-xs font-mono">
+        <div className="flex items-center gap-0.5 bg-neutral-950 border border-neutral-800 rounded-lg p-0.5 text-[11px] font-mono">
           {([30, 60] as const).map((f) => (
             <button
               key={f}
               onClick={() => onChangeFps(f)}
-              className={`px-2.5 py-1 rounded text-[11px] cursor-pointer transition-colors ${
+              className={`px-2 py-1 rounded cursor-pointer transition-colors ${
                 fps === f
-                  ? 'bg-cyan-500 text-black font-bold'
+                  ? 'sc-btn-primary bg-cyan-500 text-black font-bold'
                   : 'text-neutral-400 hover:text-white'
               }`}
             >
-              {f} FPS
+              {f}fps
             </button>
           ))}
         </div>
 
         {activeAudioLabel && (
-          <div className="hidden lg:flex items-center gap-1.5 text-[11px] font-mono text-neutral-400 bg-neutral-950 px-2.5 py-1.5 rounded-lg border border-neutral-800">
-            <Volume2 className="w-3.5 h-3.5 text-cyan-400" />
-            <span>
-              Áudio: <strong className="text-cyan-300">{activeAudioLabel}</strong>
+          <div
+            onClick={onToggleWindowSelector}
+            className="hidden xl:flex items-center gap-1.5 text-[11px] font-mono text-neutral-400 bg-neutral-950 px-2.5 py-1 rounded-lg border border-neutral-800 cursor-pointer hover:border-neutral-700"
+            title="Clique para abrir configurações de janela e áudio WASAPI"
+          >
+            <Volume2 className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            <span className="truncate max-w-[180px] text-cyan-300 font-semibold">
+              {activeAudioLabel}
             </span>
           </div>
         )}

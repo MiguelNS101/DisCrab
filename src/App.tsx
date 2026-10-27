@@ -21,7 +21,20 @@ import { WindowItem, RoomDetails, StreamItem, ChatAttachment, AudioSourceMode } 
 import { useWebRtc } from './hooks/useWebRtc';
 import { WebcamPreviewPip } from './components/WebcamPreviewPip';
 import { startNativeMultiProcessAudio, isTauriEnvironment } from './services/tauriBridge';
-import { Radio, Users, AlertCircle, X, Tv, ChevronDown, ChevronUp, AppWindow, RefreshCw } from 'lucide-react';
+import { ThemeProvider } from './context/ThemeContext';
+import { ThemeCustomizerModal } from './components/ThemeCustomizerModal';
+import {
+  Radio,
+  Users,
+  AlertCircle,
+  X,
+  Tv,
+  AppWindow,
+  RefreshCw,
+  ArrowLeft,
+  Monitor,
+  Video,
+} from 'lucide-react';
 
 export default function App() {
   // Inicializa o apelido do localStorage para não precisar digitar novamente
@@ -44,11 +57,15 @@ export default function App() {
 
   const [roomDetails, setRoomDetails] = useState<RoomDetails | null>(null);
   const [isHost, setIsHost] = useState<boolean>(true);
+  const [isLocalStudio, setIsLocalStudio] = useState<boolean>(false);
+  const [externalUpdaterOpen, setExternalUpdaterOpen] = useState<boolean>(false);
 
   // Controle de Popups de Transmissão Flutuantes Individuais
   const [activePopups, setActivePopups] = useState<Record<string, boolean>>({});
-  // Controle do Gerenciador de Webcams & Placas de Captura USB
+  // Controle Discreto do Gerenciador de Webcams & Placas de Captura USB
   const [showSourceManager, setShowSourceManager] = useState<boolean>(false);
+  // Controle Discreto do Seletor de Janela & Áudio WASAPI (inicia fechado para priorizar as lives)
+  const [showWindowSelector, setShowWindowSelector] = useState<boolean>(false);
 
   // Abre ou foca uma nova janela real do Sistema Operacional (permitindo arrastar para outro monitor)
   const openPopup = (streamId: string, title = 'StreamCompanion Live') => {
@@ -111,7 +128,6 @@ export default function App() {
   const [selectedWindow, setSelectedWindow] = useState<WindowItem | null>(null);
   const [audioSourceMode, setAudioSourceMode] = useState<AudioSourceMode>('selected_window');
   const [audioCustomWindows, setAudioCustomWindows] = useState<WindowItem[]>([]);
-  const [showWindowSelector, setShowWindowSelector] = useState<boolean>(true);
   const [isolateAudio, setIsolateAudio] = useState<boolean>(true);
   const [fps, setFps] = useState<30 | 60>(60);
   const [resolution, setResolution] = useState<'720p' | '1080p' | '1440p'>('1080p');
@@ -192,7 +208,7 @@ export default function App() {
     }
   }, [roomDetails?.created_at]);
 
-  // Monta a lista de streams estritamente REAIS a partir dos peers conectados (Tela + Múltiplas Webcams / Placas de Captura)
+  // Monta a lista de streams estritamente REAIS a partir dos peers conectados
   const peerStreams: (StreamItem & { peerId: string; connectionState: RTCPeerConnectionState })[] = [];
   for (const p of peers) {
     if (p.hasScreen) {
@@ -288,443 +304,535 @@ export default function App() {
   const totalActiveStreams =
     peerStreams.length + (isScreenSharing ? 1 : 0) + localMediaSources.length;
 
+  const isInRoomWorkspace = Boolean(isConnected || roomDetails || isLocalStudio);
+
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black">
-      {/* Top Header */}
-      <Header
-        activePid={isScreenSharing && isolateAudio ? getEffectiveAudioPid() : null}
-        activeProcessName={getEffectiveAudioLabel()}
-      />
+    <ThemeProvider>
+      <div className="sc-app min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black">
+        {/* Top Header */}
+        <Header
+          activePid={isScreenSharing && isolateAudio ? getEffectiveAudioPid() : null}
+          activeProcessName={getEffectiveAudioLabel()}
+          isInRoom={isInRoomWorkspace}
+          externalUpdaterOpen={externalUpdaterOpen}
+          onExternalUpdaterClose={() => setExternalUpdaterOpen(false)}
+        />
 
-      {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-6">
-        {/* Banner de Reconexão Automática Transparente em Caso de Oscilação */}
-        {isReconnecting && (
-          <div className="bg-amber-950/80 border border-amber-700 rounded-xl p-3.5 flex items-center justify-between gap-3 shadow-lg text-xs font-mono">
-            <div className="flex items-center gap-2.5">
-              <RefreshCw className="w-4 h-4 text-amber-400 animate-spin shrink-0" />
-              <span className="text-amber-200">
-                Oscilação de rede detectada. Reconectando automaticamente à sala sem fechar suas lives (tentativa {reconnectAttempt})...
-              </span>
-            </div>
-            <button
-              onClick={reconnectAllPeers}
-              className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/60 text-amber-200 rounded cursor-pointer transition-colors shrink-0"
-            >
-              Reconectar Agora
-            </button>
-          </div>
-        )}
-
-        {/* Alerta de Erro Real (Sem Mensagens Falsas) */}
-        {rtcError && (
-          <div className="bg-red-950/80 border border-red-800 rounded-xl p-4 flex items-start justify-between gap-3 shadow-lg shadow-red-950/40 text-xs font-mono">
-            <div className="flex items-start gap-2.5">
-              <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-              <div>
-                <strong className="text-red-200 block text-sm">Erro Detectado:</strong>
-                <p className="text-red-300 mt-0.5 leading-relaxed">{rtcError}</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-2">
-              {roomDetails && (
+        {/* MODO 1: TELA INICIAL LIMPA (HOME / LOBBY) */}
+        {!isInRoomWorkspace ? (
+          <main className="flex-1 flex flex-col items-center justify-center p-4 sm:p-6">
+            {rtcError && (
+              <div className="w-full max-w-md mb-4 bg-red-950/80 border border-red-800 rounded-xl p-3.5 flex items-start justify-between gap-3 text-xs font-mono">
+                <div className="flex items-start gap-2">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <span className="text-red-200">{rtcError}</span>
+                </div>
                 <button
-                  onClick={() => {
-                    clearError();
-                    connectToRoom(roomDetails.ws_url, roomDetails.token, nickname).catch(() => {});
-                  }}
-                  className="px-2.5 py-1 bg-red-900/60 hover:bg-red-800 border border-red-700 text-red-100 rounded cursor-pointer flex items-center gap-1"
+                  onClick={clearError}
+                  className="text-red-400 hover:text-white p-0.5 cursor-pointer"
                 >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Tentar Reconectar</span>
+                  <X className="w-4 h-4" />
                 </button>
-              )}
-              <button
-                onClick={clearError}
-                className="text-red-400 hover:text-white p-1 rounded hover:bg-red-900/40 cursor-pointer"
-                title="Fechar erro"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Linha 1: Controle de Sala (Criar / Entrar sem cadastro) */}
-        <RoomControl
-          nickname={nickname}
-          setNickname={setNickname}
-          roomDetails={roomDetails}
-          setRoomDetails={setRoomDetails}
-          isHost={isHost}
-          setIsHost={setIsHost}
-          isConnected={isConnected}
-          setIsConnected={(val) => {
-            if (!val) {
-              disconnectFromRoom();
-              setRoomDetails(null);
-            }
-          }}
-        />
-
-        {/* Barra de Transmissão (Screen Share / Multi-Webcam & Placa de Captura / Resolução / FPS / Roteamento de Áudio) */}
-        <BroadcastControls
-          isScreenSharing={isScreenSharing}
-          isWebcamActive={isWebcamActive}
-          localMediaSources={localMediaSources}
-          showSourceManager={showSourceManager}
-          onToggleSourceManager={() => setShowSourceManager((prev) => !prev)}
-          onStopAllSources={stopAllMediaSources}
-          selectedWindow={selectedWindow}
-          isolateAudio={isolateAudio}
-          audioSourceMode={audioSourceMode}
-          onChangeAudioSourceMode={setAudioSourceMode}
-          fps={fps}
-          resolution={resolution}
-          onToggleScreenShare={handleToggleScreenShare}
-          onToggleWebcam={toggleWebcam}
-          onToggleIsolateAudio={setIsolateAudio}
-          onChangeFps={setFps}
-          onChangeResolution={setResolution}
-          activeAudioLabel={getEffectiveAudioLabel()}
-        />
-
-        {/* Painel Multi-Fonte: Escolher Webcams e Placas de Captura USB (Com suporte simultâneo e botão Inverter) */}
-        <VideoSourceManager
-          isOpen={showSourceManager}
-          onClose={() => setShowSourceManager(false)}
-          videoDevices={videoDevices}
-          audioDevices={audioDevices}
-          localMediaSources={localMediaSources}
-          onRefreshDevices={refreshMediaDevices}
-          onStartSource={startMediaSource}
-          onStopSource={stopMediaSource}
-          onStopAllSources={stopAllMediaSources}
-          isStreamMirrored={isStreamMirrored}
-          onToggleStreamMirror={toggleStreamMirror}
-        />
-
-        {/* Alternador e Painel do Seletor de Janela & Áudio WASAPI */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between">
-            <button
-              type="button"
-              onClick={() => setShowWindowSelector(!showWindowSelector)}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-xs font-mono text-cyan-300 transition-colors cursor-pointer"
-            >
-              <AppWindow className="w-3.5 h-3.5 text-cyan-400" />
-              <span>{showWindowSelector ? 'Ocultar Seletor de Janela & Áudio' : 'Selecionar Janela & Configurar Áudio WASAPI'}</span>
-              {showWindowSelector ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
-            </button>
-
-            <span className="text-xs font-mono text-neutral-400">
-              Fonte Atual: <strong className="text-cyan-300">{getEffectiveAudioLabel()}</strong>
-            </span>
-          </div>
-
-          {showWindowSelector && (
-            <WindowSelector
-              selectedWindow={selectedWindow}
-              onSelectWindow={setSelectedWindow}
-              isolateAudio={isolateAudio}
-              onToggleIsolateAudio={setIsolateAudio}
-              audioSourceMode={audioSourceMode}
-              onChangeAudioSourceMode={setAudioSourceMode}
-              audioCustomWindows={audioCustomWindows}
-              onToggleAudioCustomWindow={handleToggleAudioCustomWindow}
-              onClearAudioCustomWindows={handleClearAudioCustomWindows}
-            />
-          )}
-        </div>
-
-        {/* Linha 3: Transmissões em Tempo Real e Chat WebRTC P2P */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-          {/* Seção das Lives e Transmissões (8 colunas) */}
-          <div className="lg:col-span-8 space-y-4">
-            <div className="flex items-center justify-between flex-wrap gap-2">
-              <div className="flex items-center gap-2">
-                <Radio className="w-4 h-4 text-cyan-400" />
-                <h2 className="text-sm font-bold uppercase tracking-wider text-neutral-200 font-mono">
-                  Transmissões Ativas ({totalActiveStreams})
-                </h2>
-              </div>
-              <div className="flex items-center gap-3 text-xs font-mono text-neutral-400">
-                <span className="flex items-center gap-1.5">
-                  <Users className="w-3.5 h-3.5 text-cyan-400" />
-                  Peers na Sala: <strong className="text-white">{peers.length}</strong>
-                </span>
-                <span>·</span>
-                <span className="text-emerald-400">P2P WebRTC Direto</span>
-                {isConnected && peers.length > 0 && (
-                  <>
-                    <span>·</span>
-                    <button
-                      onClick={reconnectAllPeers}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-cyan-700 text-cyan-300 rounded cursor-pointer transition-colors"
-                      title="Forçar reset e ressincronização de todas as conexões P2P na sala sem fechar o app"
-                    >
-                      <RefreshCw className="w-3 h-3" />
-                      <span>Resetar P2P</span>
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-
-            {/* Se não houver transmissões ativas */}
-            {totalActiveStreams === 0 ? (
-              <div className="bg-neutral-900/60 border border-neutral-800 rounded-xl p-8 text-center space-y-3">
-                <div className="w-12 h-12 rounded-full bg-neutral-950 border border-neutral-800 flex items-center justify-center mx-auto text-neutral-600">
-                  <Tv className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-mono font-bold text-neutral-300">
-                    Nenhuma transmissão ativa no momento
-                  </h3>
-                  <p className="text-xs text-neutral-500 font-mono max-w-md mx-auto mt-1">
-                    Inicie sua transmissão em "Transmitir Tela" ou escolha suas Webcams e Placas de Captura em "Câmeras & Placa de Captura".
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {/* Transmissão de Tela do Próprio Usuário (Local) */}
-                {isScreenSharing && (
-                  <LivePlayer
-                    id="self-screen"
-                    userName={nickname}
-                    title={selectedWindow ? selectedWindow.title : 'Tela do Usuário'}
-                    type="screen"
-                    sourceKind="screen"
-                    stream={localStream}
-                    resolution={resolution}
-                    fps={fps}
-                    isSelf={true}
-                    hasIsolatedAudio={isolateAudio}
-                    processName={selectedWindow?.process_name}
-                    volume={100}
-                    isMuted={false}
-                    isWatched={true}
-                    isPoppedOut={!!activePopups['self-screen']}
-                    isMirrored={isStreamMirrored('self-screen')}
-                    onToggleMirror={() => toggleStreamMirror('self-screen')}
-                    onOpenPopup={() =>
-                      openPopup(
-                        'self-screen',
-                        `${nickname} - ${selectedWindow ? selectedWindow.title : 'Tela do Usuário'}`
-                      )
-                    }
-                    onClosePopup={() => closePopup('self-screen')}
-                    onToggleWatch={() => {}}
-                    onChangeVolume={() => {}}
-                    onToggleMute={() => {}}
-                  />
-                )}
-
-                {/* Webcams e Placas de Captura do Próprio Usuário (Suporte Multi-Fonte Simultâneo) */}
-                {localMediaSources.map((src) => {
-                  const selfId = `self-${src.sourceId}`;
-                  return (
-                    <LivePlayer
-                      key={selfId}
-                      id={selfId}
-                      userName={nickname}
-                      title={src.title}
-                      type="webcam"
-                      sourceKind={src.kind}
-                      stream={src.stream}
-                      resolution={src.resolution}
-                      fps={src.fps}
-                      isSelf={true}
-                      hasIsolatedAudio={false}
-                      volume={0}
-                      isMuted={true}
-                      isWatched={true}
-                      isPoppedOut={!!activePopups[selfId]}
-                      isMirrored={isStreamMirrored(selfId)}
-                      onToggleMirror={() => toggleStreamMirror(selfId)}
-                      onStopLocalSource={() => stopMediaSource(src.sourceId)}
-                      onOpenPopup={() => openPopup(selfId, `${nickname} - ${src.title}`)}
-                      onClosePopup={() => closePopup(selfId)}
-                      onToggleWatch={() => {}}
-                      onChangeVolume={() => {}}
-                      onToggleMute={() => {}}
-                    />
-                  );
-                })}
-
-                {/* Transmissões Reais Recebidas dos Amigos (Tela + Webcams + Placas de Captura) */}
-                {peerStreams.map((stream) => (
-                  <LivePlayer
-                    key={stream.id}
-                    id={stream.id}
-                    userName={stream.user_name}
-                    title={stream.title}
-                    type={stream.type}
-                    sourceKind={stream.source_kind}
-                    stream={stream.stream}
-                    resolution={stream.resolution}
-                    fps={stream.fps}
-                    isSelf={false}
-                    hasIsolatedAudio={stream.isolated_audio}
-                    processName={stream.process_name}
-                    volume={stream.volume}
-                    isMuted={stream.is_muted}
-                    isWatched={stream.is_watched}
-                    isPoppedOut={!!activePopups[stream.id]}
-                    isMirrored={isStreamMirrored(stream.id)}
-                    onToggleMirror={() => toggleStreamMirror(stream.id)}
-                    connectionState={stream.connectionState}
-                    onOpenPopup={() =>
-                      openPopup(stream.id, `${stream.user_name} - ${stream.title}`)
-                    }
-                    onClosePopup={() => closePopup(stream.id)}
-                    onToggleWatch={() => handleToggleWatch(stream)}
-                    onChangeVolume={(vol) =>
-                      setStreamVolume(stream.id, vol, stream.user_name, stream.source_id || stream.type)
-                    }
-                    onToggleMute={() =>
-                      toggleStreamMute(stream.id, stream.user_name, stream.source_id || stream.type)
-                    }
-                    onResetConnection={() => resetPeerConnection(stream.peerId)}
-                  />
-                ))}
               </div>
             )}
-          </div>
 
-          {/* Componente de Chat WebRTC P2P (4 colunas) */}
-          <div className="lg:col-span-4">
-            <ChatBox
-              messages={chatMessages}
-              onSendMessage={handleSendMessage}
+            <RoomControl
+              nickname={nickname}
+              setNickname={setNickname}
+              roomDetails={roomDetails}
+              setRoomDetails={setRoomDetails}
+              isHost={isHost}
+              setIsHost={setIsHost}
               isConnected={isConnected}
-              peerCount={peers.length}
-              myNickname={nickname}
+              setIsConnected={(val) => {
+                if (!val) {
+                  disconnectFromRoom();
+                  setRoomDetails(null);
+                }
+              }}
+              onOpenUpdater={() => setExternalUpdaterOpen(true)}
+              onEnterLocalStudio={() => setIsLocalStudio(true)}
             />
-          </div>
-        </div>
-      </main>
+          </main>
+        ) : (
+          /* MODO 2: SALA ATIVA (TRANSMISSÕES COMO FOCO PRINCIPAL + CONTROLES DISCRETOS) */
+          <main className="sc-container-width flex-1 max-w-7xl w-full mx-auto p-3 sm:p-5 space-y-4">
+            {/* Banner de Reconexão Automática Transparente em Caso de Oscilação */}
+            {isReconnecting && (
+              <div className="bg-amber-950/80 border border-amber-700 rounded-xl p-3 flex items-center justify-between gap-3 shadow-lg text-xs font-mono">
+                <div className="flex items-center gap-2.5">
+                  <RefreshCw className="w-4 h-4 text-amber-400 animate-spin shrink-0" />
+                  <span className="text-amber-200">
+                    Oscilação de rede detectada. Reconectando automaticamente à sala (tentativa {reconnectAttempt})...
+                  </span>
+                </div>
+                <button
+                  onClick={reconnectAllPeers}
+                  className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/60 text-amber-200 rounded cursor-pointer transition-colors shrink-0"
+                >
+                  Reconectar Agora
+                </button>
+              </div>
+            )}
 
-      {/* Janelas Flutuantes (Popups) de Transmissão com Controle de Tamanho, Qualidade e Inversão */}
-      {isScreenSharing && activePopups['self-screen'] && (
-        <FloatingStreamPopup
-          id="self-screen"
-          userName={nickname}
-          title={selectedWindow ? selectedWindow.title : 'Tela do Usuário'}
-          type="screen"
-          sourceKind="screen"
-          stream={localStream}
-          resolution={resolution}
-          fps={fps}
-          isSelf={true}
-          hasIsolatedAudio={isolateAudio}
-          processName={selectedWindow?.process_name}
-          volume={100}
-          isMuted={false}
-          isMirrored={isStreamMirrored('self-screen')}
-          onToggleMirror={() => toggleStreamMirror('self-screen')}
-          initialX={80}
-          initialY={100}
-          onClose={() => closePopup('self-screen')}
-          onChangeVolume={() => {}}
-          onToggleMute={() => {}}
-        />
-      )}
+            {/* Alerta de Erro Real */}
+            {rtcError && (
+              <div className="bg-red-950/80 border border-red-800 rounded-xl p-3.5 flex items-start justify-between gap-3 shadow-lg text-xs font-mono">
+                <div className="flex items-start gap-2.5">
+                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="text-red-200 block">Erro Detectado:</strong>
+                    <p className="text-red-300 mt-0.5">{rtcError}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2">
+                  {roomDetails && (
+                    <button
+                      onClick={() => {
+                        clearError();
+                        connectToRoom(roomDetails.ws_url, roomDetails.token, nickname).catch(() => {});
+                      }}
+                      className="px-2.5 py-1 bg-red-900/60 hover:bg-red-800 border border-red-700 text-red-100 rounded cursor-pointer flex items-center gap-1"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5" />
+                      <span>Reconectar</span>
+                    </button>
+                  )}
+                  <button
+                    onClick={clearError}
+                    className="text-red-400 hover:text-white p-1 rounded cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+              </div>
+            )}
 
-      {localMediaSources.map((src, idx) => {
-        const selfId = `self-${src.sourceId}`;
-        if (!activePopups[selfId]) return null;
-        return (
+            {/* BARRA SUPERIOR COMPACTA & DISCRETA (Sala + Controles de Tela, Áudio WASAPI e Câmeras) */}
+            <div className="sc-card sc-toolbar bg-neutral-900/90 border border-neutral-800 rounded-xl p-3 shadow-lg space-y-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-3 pb-2.5 border-b border-neutral-800/80">
+                {roomDetails ? (
+                  <div className="w-full">
+                    <RoomControl
+                      nickname={nickname}
+                      setNickname={setNickname}
+                      roomDetails={roomDetails}
+                      setRoomDetails={setRoomDetails}
+                      isHost={isHost}
+                      setIsHost={setIsHost}
+                      isConnected={isConnected}
+                      setIsConnected={(val) => {
+                        if (!val) {
+                          disconnectFromRoom();
+                          setRoomDetails(null);
+                          setIsLocalStudio(false);
+                        }
+                      }}
+                    />
+                  </div>
+                ) : (
+                  <div className="w-full flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center gap-2 text-xs font-mono">
+                      <span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" />
+                      <span className="font-bold text-cyan-300 uppercase">Modo Estúdio Local</span>
+                      <span className="text-neutral-500">·</span>
+                      <span className="text-neutral-300">{nickname}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsLocalStudio(false)}
+                      className="sc-btn flex items-center gap-1.5 px-3 py-1 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 rounded-lg text-xs font-mono text-neutral-200 cursor-pointer"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5 text-cyan-400" />
+                      <span>Voltar para Criar / Entrar em Sala</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Controles Discretos de Captura & Qualidade */}
+              <BroadcastControls
+                isScreenSharing={isScreenSharing}
+                isWebcamActive={isWebcamActive}
+                localMediaSources={localMediaSources}
+                showSourceManager={showSourceManager}
+                onToggleSourceManager={() => {
+                  setShowSourceManager((prev) => !prev);
+                  if (!showSourceManager) setShowWindowSelector(false);
+                }}
+                showWindowSelector={showWindowSelector}
+                onToggleWindowSelector={() => {
+                  setShowWindowSelector((prev) => !prev);
+                  if (!showWindowSelector) setShowSourceManager(false);
+                }}
+                onStopAllSources={stopAllMediaSources}
+                selectedWindow={selectedWindow}
+                isolateAudio={isolateAudio}
+                audioSourceMode={audioSourceMode}
+                onChangeAudioSourceMode={setAudioSourceMode}
+                fps={fps}
+                resolution={resolution}
+                onToggleScreenShare={handleToggleScreenShare}
+                onToggleWebcam={toggleWebcam}
+                onToggleIsolateAudio={setIsolateAudio}
+                onChangeFps={setFps}
+                onChangeResolution={setResolution}
+                activeAudioLabel={getEffectiveAudioLabel()}
+              />
+            </div>
+
+            {/* Gaveta Discreta 1: Gerenciador Multi-Fonte (Webcams & Placas de Captura) */}
+            <VideoSourceManager
+              isOpen={showSourceManager}
+              onClose={() => setShowSourceManager(false)}
+              videoDevices={videoDevices}
+              audioDevices={audioDevices}
+              localMediaSources={localMediaSources}
+              onRefreshDevices={refreshMediaDevices}
+              onStartSource={startMediaSource}
+              onStopSource={stopMediaSource}
+              onStopAllSources={stopAllMediaSources}
+              isStreamMirrored={isStreamMirrored}
+              onToggleStreamMirror={toggleStreamMirror}
+            />
+
+            {/* Gaveta Discreta 2: Seletor de Janela & Áudio WASAPI (Apenas quando aberto pelo usuário) */}
+            {showWindowSelector && (
+              <div className="relative">
+                <WindowSelector
+                  selectedWindow={selectedWindow}
+                  onSelectWindow={setSelectedWindow}
+                  isolateAudio={isolateAudio}
+                  onToggleIsolateAudio={setIsolateAudio}
+                  audioSourceMode={audioSourceMode}
+                  onChangeAudioSourceMode={setAudioSourceMode}
+                  audioCustomWindows={audioCustomWindows}
+                  onToggleAudioCustomWindow={handleToggleAudioCustomWindow}
+                  onClearAudioCustomWindows={handleClearAudioCustomWindows}
+                />
+              </div>
+            )}
+
+            {/* ÁREA PRINCIPAL EM DESTAQUE: TRANSMISSÕES ATIVAS + CHAT P2P */}
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+              {/* Coluna Principal das Transmissões (8 colunas) */}
+              <div className="lg:col-span-8 space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-2 px-1">
+                  <div className="flex items-center gap-2">
+                    <Radio className="w-4 h-4 text-cyan-400 animate-pulse" />
+                    <h2 className="text-sm font-bold uppercase tracking-wider text-white font-mono">
+                      Transmissões Ao Vivo ({totalActiveStreams})
+                    </h2>
+                  </div>
+                  <div className="flex items-center gap-3 text-xs font-mono text-neutral-400">
+                    <span className="flex items-center gap-1.5">
+                      <Users className="w-3.5 h-3.5 text-cyan-400" />
+                      Na Sala: <strong className="text-white">{peers.length + 1}</strong>
+                    </span>
+                    {isConnected && peers.length > 0 && (
+                      <>
+                        <span>·</span>
+                        <button
+                          onClick={reconnectAllPeers}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-cyan-700 text-cyan-300 rounded cursor-pointer transition-colors"
+                          title="Forçar ressincronização P2P com todos os participantes"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          <span>Resetar P2P</span>
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+
+                {/* Estado sem lives abertas: botões rápidos diretos no palco principal */}
+                {totalActiveStreams === 0 ? (
+                  <div className="sc-card bg-neutral-900/70 border border-neutral-800 rounded-2xl p-10 text-center space-y-4">
+                    <div className="w-14 h-14 rounded-2xl bg-neutral-950 border border-neutral-800 flex items-center justify-center mx-auto text-cyan-400">
+                      <Tv className="w-7 h-7" />
+                    </div>
+                    <div className="space-y-1">
+                      <h3 className="text-base font-mono font-bold text-white">
+                        Palco de Transmissões Pronto
+                      </h3>
+                      <p className="text-xs text-neutral-400 font-mono max-w-md mx-auto">
+                        As transmissões da sala aparecem aqui em destaque. Inicie sua tela, jogo, webcam ou placa de captura abaixo:
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
+                      <button
+                        type="button"
+                        onClick={handleToggleScreenShare}
+                        className="sc-btn sc-btn-primary sc-btn-sized flex items-center gap-2 px-4 py-2 bg-cyan-500 text-black font-mono font-bold text-xs rounded-xl cursor-pointer"
+                      >
+                        <Monitor className="w-4 h-4" />
+                        <span>Transmitir Tela Agora</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowSourceManager(true)}
+                        className="sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 font-mono text-xs rounded-xl cursor-pointer"
+                      >
+                        <Video className="w-4 h-4 text-indigo-400" />
+                        <span>Ligar Câmera / Placa de Captura</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowWindowSelector(true)}
+                        className="sc-btn sc-btn-sized flex items-center gap-2 px-3.5 py-2 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 font-mono text-xs rounded-xl cursor-pointer"
+                      >
+                        <AppWindow className="w-4 h-4 text-cyan-400" />
+                        <span>Configurar Janela de Áudio</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    className={`sc-stream-grid grid gap-4 ${
+                      totalActiveStreams === 1
+                        ? 'grid-cols-1'
+                        : 'grid-cols-1 md:grid-cols-2'
+                    }`}
+                  >
+                    {/* Transmissão de Tela do Próprio Usuário (Local) */}
+                    {isScreenSharing && (
+                      <LivePlayer
+                        id="self-screen"
+                        userName={nickname}
+                        title={selectedWindow ? selectedWindow.title : 'Tela do Usuário'}
+                        type="screen"
+                        sourceKind="screen"
+                        stream={localStream}
+                        resolution={resolution}
+                        fps={fps}
+                        isSelf={true}
+                        hasIsolatedAudio={isolateAudio}
+                        processName={selectedWindow?.process_name}
+                        volume={100}
+                        isMuted={false}
+                        isWatched={true}
+                        isPoppedOut={!!activePopups['self-screen']}
+                        isMirrored={isStreamMirrored('self-screen')}
+                        onToggleMirror={() => toggleStreamMirror('self-screen')}
+                        onOpenPopup={() =>
+                          openPopup(
+                            'self-screen',
+                            `${nickname} - ${selectedWindow ? selectedWindow.title : 'Tela do Usuário'}`
+                          )
+                        }
+                        onClosePopup={() => closePopup('self-screen')}
+                        onToggleWatch={() => {}}
+                        onChangeVolume={() => {}}
+                        onToggleMute={() => {}}
+                      />
+                    )}
+
+                    {/* Webcams e Placas de Captura do Próprio Usuário */}
+                    {localMediaSources.map((src) => {
+                      const selfId = `self-${src.sourceId}`;
+                      return (
+                        <LivePlayer
+                          key={selfId}
+                          id={selfId}
+                          userName={nickname}
+                          title={src.title}
+                          type="webcam"
+                          sourceKind={src.kind}
+                          stream={src.stream}
+                          resolution={src.resolution}
+                          fps={src.fps}
+                          isSelf={true}
+                          hasIsolatedAudio={false}
+                          volume={0}
+                          isMuted={true}
+                          isWatched={true}
+                          isPoppedOut={!!activePopups[selfId]}
+                          isMirrored={isStreamMirrored(selfId)}
+                          onToggleMirror={() => toggleStreamMirror(selfId)}
+                          onStopLocalSource={() => stopMediaSource(src.sourceId)}
+                          onOpenPopup={() => openPopup(selfId, `${nickname} - ${src.title}`)}
+                          onClosePopup={() => closePopup(selfId)}
+                          onToggleWatch={() => {}}
+                          onChangeVolume={() => {}}
+                          onToggleMute={() => {}}
+                        />
+                      );
+                    })}
+
+                    {/* Transmissões Recebidas dos Amigos */}
+                    {peerStreams.map((stream) => (
+                      <LivePlayer
+                        key={stream.id}
+                        id={stream.id}
+                        userName={stream.user_name}
+                        title={stream.title}
+                        type={stream.type}
+                        sourceKind={stream.source_kind}
+                        stream={stream.stream}
+                        resolution={stream.resolution}
+                        fps={stream.fps}
+                        isSelf={false}
+                        hasIsolatedAudio={stream.isolated_audio}
+                        processName={stream.process_name}
+                        volume={stream.volume}
+                        isMuted={stream.is_muted}
+                        isWatched={stream.is_watched}
+                        isPoppedOut={!!activePopups[stream.id]}
+                        isMirrored={isStreamMirrored(stream.id)}
+                        onToggleMirror={() => toggleStreamMirror(stream.id)}
+                        connectionState={stream.connectionState}
+                        onOpenPopup={() =>
+                          openPopup(stream.id, `${stream.user_name} - ${stream.title}`)
+                        }
+                        onClosePopup={() => closePopup(stream.id)}
+                        onToggleWatch={() => handleToggleWatch(stream)}
+                        onChangeVolume={(vol) =>
+                          setStreamVolume(stream.id, vol, stream.user_name, stream.source_id || stream.type)
+                        }
+                        onToggleMute={() =>
+                          toggleStreamMute(stream.id, stream.user_name, stream.source_id || stream.type)
+                        }
+                        onResetConnection={() => resetPeerConnection(stream.peerId)}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Componente de Chat WebRTC P2P (4 colunas) */}
+              <div className="sc-chat-panel lg:col-span-4">
+                <ChatBox
+                  messages={chatMessages}
+                  onSendMessage={handleSendMessage}
+                  isConnected={isConnected}
+                  peerCount={peers.length}
+                  myNickname={nickname}
+                />
+              </div>
+            </div>
+          </main>
+        )}
+
+        {/* Janelas Flutuantes (Popups Externos Multi-Monitor) de Transmissão */}
+        {isScreenSharing && activePopups['self-screen'] && (
           <FloatingStreamPopup
-            key={`popup-${selfId}`}
-            id={selfId}
+            id="self-screen"
             userName={nickname}
-            title={src.title}
-            type="webcam"
-            sourceKind={src.kind}
-            stream={src.stream}
-            resolution={src.resolution}
-            fps={src.fps}
+            title={selectedWindow ? selectedWindow.title : 'Tela do Usuário'}
+            type="screen"
+            sourceKind="screen"
+            stream={localStream}
+            resolution={resolution}
+            fps={fps}
             isSelf={true}
-            hasIsolatedAudio={false}
-            volume={0}
-            isMuted={true}
-            isMirrored={isStreamMirrored(selfId)}
-            onToggleMirror={() => toggleStreamMirror(selfId)}
-            initialX={100 + idx * 45}
-            initialY={120 + idx * 45}
-            onClose={() => closePopup(selfId)}
+            hasIsolatedAudio={isolateAudio}
+            processName={selectedWindow?.process_name}
+            volume={100}
+            isMuted={false}
+            isMirrored={isStreamMirrored('self-screen')}
+            onToggleMirror={() => toggleStreamMirror('self-screen')}
+            initialX={80}
+            initialY={100}
+            onClose={() => closePopup('self-screen')}
             onChangeVolume={() => {}}
             onToggleMute={() => {}}
           />
-        );
-      })}
+        )}
 
-      {peerStreams.map((stream, idx) => {
-        if (!activePopups[stream.id]) return null;
-        return (
-          <FloatingStreamPopup
-            key={`popup-${stream.id}`}
-            id={stream.id}
-            userName={stream.user_name}
-            title={stream.title}
-            type={stream.type}
-            sourceKind={stream.source_kind}
-            stream={stream.stream}
-            resolution={stream.resolution}
-            fps={stream.fps}
-            isSelf={false}
-            hasIsolatedAudio={stream.isolated_audio}
-            processName={stream.process_name}
-            volume={stream.volume}
-            isMuted={stream.is_muted}
-            isMirrored={isStreamMirrored(stream.id)}
-            onToggleMirror={() => toggleStreamMirror(stream.id)}
-            initialX={120 + idx * 50}
-            initialY={140 + idx * 50}
-            onClose={() => closePopup(stream.id)}
-            onChangeVolume={(vol) =>
-              setStreamVolume(stream.id, vol, stream.user_name, stream.source_id || stream.type)
-            }
-            onToggleMute={() =>
-              toggleStreamMute(stream.id, stream.user_name, stream.source_id || stream.type)
-            }
+        {localMediaSources.map((src, idx) => {
+          const selfId = `self-${src.sourceId}`;
+          if (!activePopups[selfId]) return null;
+          return (
+            <FloatingStreamPopup
+              key={`popup-${selfId}`}
+              id={selfId}
+              userName={nickname}
+              title={src.title}
+              type="webcam"
+              sourceKind={src.kind}
+              stream={src.stream}
+              resolution={src.resolution}
+              fps={src.fps}
+              isSelf={true}
+              hasIsolatedAudio={false}
+              volume={0}
+              isMuted={true}
+              isMirrored={isStreamMirrored(selfId)}
+              onToggleMirror={() => toggleStreamMirror(selfId)}
+              initialX={100 + idx * 45}
+              initialY={120 + idx * 45}
+              onClose={() => closePopup(selfId)}
+              onChangeVolume={() => {}}
+              onToggleMute={() => {}}
+            />
+          );
+        })}
+
+        {peerStreams.map((stream, idx) => {
+          if (!activePopups[stream.id]) return null;
+          return (
+            <FloatingStreamPopup
+              key={`popup-${stream.id}`}
+              id={stream.id}
+              userName={stream.user_name}
+              title={stream.title}
+              type={stream.type}
+              sourceKind={stream.source_kind}
+              stream={stream.stream}
+              resolution={stream.resolution}
+              fps={stream.fps}
+              isSelf={false}
+              hasIsolatedAudio={stream.isolated_audio}
+              processName={stream.process_name}
+              volume={stream.volume}
+              isMuted={stream.is_muted}
+              isMirrored={isStreamMirrored(stream.id)}
+              onToggleMirror={() => toggleStreamMirror(stream.id)}
+              initialX={120 + idx * 50}
+              initialY={140 + idx * 50}
+              onClose={() => closePopup(stream.id)}
+              onChangeVolume={(vol) =>
+                setStreamVolume(stream.id, vol, stream.user_name, stream.source_id || stream.type)
+              }
+              onToggleMute={() =>
+                toggleStreamMute(stream.id, stream.user_name, stream.source_id || stream.type)
+              }
+            />
+          );
+        })}
+
+        {/* Telinha Flutuante Rápida da Primeira Fonte Ativa */}
+        {localMediaSources.length > 0 && (
+          <WebcamPreviewPip
+            stream={localMediaSources[0].stream}
+            nickname={nickname}
+            title={localMediaSources[0].title}
+            sourceKind={localMediaSources[0].kind}
+            isMirrored={isStreamMirrored(`self-${localMediaSources[0].sourceId}`)}
+            onToggleMirror={() => toggleStreamMirror(`self-${localMediaSources[0].sourceId}`)}
+            onStopWebcam={() => stopMediaSource(localMediaSources[0].sourceId)}
           />
-        );
-      })}
+        )}
 
-      {/* Telinha Flutuante Rápida da Primeira Fonte Ativa (Com botão de Inverter sincronizado) */}
-      {localMediaSources.length > 0 && (
-        <WebcamPreviewPip
-          stream={localMediaSources[0].stream}
-          nickname={nickname}
-          title={localMediaSources[0].title}
-          sourceKind={localMediaSources[0].kind}
-          isMirrored={isStreamMirrored(`self-${localMediaSources[0].sourceId}`)}
-          onToggleMirror={() => toggleStreamMirror(`self-${localMediaSources[0].sourceId}`)}
-          onStopWebcam={() => stopMediaSource(localMediaSources[0].sourceId)}
-        />
-      )}
+        {/* Monitor Discreto de Desempenho e Telemetria P2P (Exibido quando na sala/estúdio) */}
+        {isInRoomWorkspace && (
+          <PerformanceDrawer
+            logs={performanceLogs}
+            telemetryHistory={telemetryHistory}
+            peers={peers}
+            onClearLogs={clearPerformanceLogs}
+            myNickname={nickname}
+            selectedWindow={selectedWindow}
+            isolateAudio={isolateAudio}
+            onToggleIsolateAudio={setIsolateAudio}
+            isBroadcasting={isScreenSharing || localMediaSources.length > 0}
+            activeAudioLabel={getEffectiveAudioLabel()}
+          />
+        )}
 
-      {/* Monitor Discreto de Desempenho e Telemetria P2P com Gráfico Recharts em Tempo Real */}
-      <PerformanceDrawer
-        logs={performanceLogs}
-        telemetryHistory={telemetryHistory}
-        peers={peers}
-        onClearLogs={clearPerformanceLogs}
-        myNickname={nickname}
-        selectedWindow={selectedWindow}
-        isolateAudio={isolateAudio}
-        onToggleIsolateAudio={setIsolateAudio}
-        isBroadcasting={isScreenSharing || localMediaSources.length > 0}
-        activeAudioLabel={getEffectiveAudioLabel()}
-      />
-
-      {/* Footer */}
-      <footer className="border-t border-neutral-900 bg-neutral-950/80 px-4 py-3 text-center text-xs font-mono text-neutral-500">
-        StreamCompanion · P2P WebRTC DataChannel Chat & WASAPI Process Streaming · Sem Servidor Central
-      </footer>
-    </div>
+        {/* Modal do Estúdio de Temas & Customização CSS */}
+        <ThemeCustomizerModal />
+      </div>
+    </ThemeProvider>
   );
 }

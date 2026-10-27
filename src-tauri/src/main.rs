@@ -4,12 +4,17 @@
 mod scrap_capture;
 mod signaling;
 mod tunnel;
+mod updater;
 mod wasapi_loopback;
 mod window_manager;
 
 use scrap_capture::{DisplayInfo, ScreenCapturerService};
 use signaling::{start_signaling_server, SignalingServerState};
-use tunnel::{decode_room_code, encode_room_code, TunnelManager};
+use tunnel::{decode_room_code, encode_room_code, CloudflaredStatus, TunnelManager};
+use updater::{
+    check_github_release, cleanup_old_executable, download_and_apply_update, get_system_info,
+    AppSystemInfo, UpdateCheckResult,
+};
 use wasapi_loopback::ProcessAudioCapturer;
 use window_manager::{enumerate_windows, WindowInfo};
 
@@ -270,6 +275,41 @@ fn close_app(state: State<'_, AppState>) {
     std::process::exit(0);
 }
 
+/// Retorna informações da versão atual do executável e status do cloudflared em %LOCALAPPDATA%
+#[tauri::command]
+fn get_app_system_info() -> AppSystemInfo {
+    get_system_info()
+}
+
+/// Garante que o cloudflared.exe está baixado e instalado em %LOCALAPPDATA%\StreamCompanion\bin
+#[tauri::command]
+async fn ensure_cloudflared_binary() -> Result<CloudflaredStatus, String> {
+    tokio::task::spawn_blocking(|| {
+        let _ = TunnelManager::ensure_binary_exists()?;
+        Ok(TunnelManager::get_binary_status())
+    })
+    .await
+    .map_err(|e| format!("Erro na tarefa do cloudflared: {}", e))?
+}
+
+/// Consulta a última Release publicada no GitHub Releases para o repositório informado
+#[tauri::command]
+async fn check_github_update(repo: String) -> Result<UpdateCheckResult, String> {
+    check_github_release(&repo).await
+}
+
+/// Baixa o novo .exe da Release do GitHub, substitui o executável atual e reinicia o aplicativo
+#[tauri::command]
+async fn install_github_update(
+    app: AppHandle,
+    download_url: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.audio_capturer.stop();
+    state.screen_capturer.stop();
+    download_and_apply_update(app, download_url, &state.tunnel_manager).await
+}
+
 /// Localiza o PID de uma janela baseado no label retornado pelo seletor nativo do navegador (ex: "window:12345:0") ou título
 #[tauri::command]
 fn find_window_pid(label: String) -> Option<u32> {
@@ -346,6 +386,11 @@ fn assign_to_job_object() {
 fn main() {
     #[cfg(windows)]
     assign_to_job_object();
+
+    // Remove qualquer arquivo .old.exe deixado por uma atualização anterior
+    cleanup_old_executable();
+    // Se houver um cloudflared.exe na pasta portable, já copia para %LOCALAPPDATA%\StreamCompanion\bin
+    let _ = TunnelManager::resolve_binary_path();
 
     let (audio_capturer, mut audio_rx) = ProcessAudioCapturer::new();
     let audio_capturer_arc = Arc::new(audio_capturer);
@@ -458,6 +503,10 @@ fn main() {
             find_window_pid,
             get_process_memory,
             save_file_dialog,
+            get_app_system_info,
+            ensure_cloudflared_binary,
+            check_github_update,
+            install_github_update,
         ])
         .run(tauri::generate_context!())
         .expect("Erro ao executar StreamCompanion");

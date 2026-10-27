@@ -215,3 +215,139 @@ export async function downloadFileWithSaveDialog(fileName: string, dataUrl: stri
   document.body.removeChild(link);
   return true;
 }
+
+export interface CloudflaredStatus {
+  installed: boolean;
+  path: string;
+  size_mb: number;
+  location_type: string;
+}
+
+export interface AppSystemInfo {
+  current_version: string;
+  exe_path: string;
+  cloudflared: CloudflaredStatus;
+}
+
+export interface UpdateCheckResult {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  release_title: string;
+  release_notes: string;
+  published_at: string;
+  download_url?: string | null;
+  asset_name?: string | null;
+  asset_size_mb: number;
+  html_url: string;
+}
+
+export interface UpdateProgressPayload {
+  stage: string;
+  downloaded_mb: number;
+  total_mb: number;
+  percent: number;
+  message: string;
+}
+
+// Obtém informações da versão atual do executável e do cloudflared.exe em %LOCALAPPDATA%\StreamCompanion\bin
+export async function getAppSystemInfo(): Promise<AppSystemInfo> {
+  if (isTauriEnvironment()) {
+    return await invokeTauri<AppSystemInfo>('get_app_system_info');
+  }
+  return {
+    current_version: '1.0.0',
+    exe_path: 'Modo Web (Navegador)',
+    cloudflared: {
+      installed: false,
+      path: '%LOCALAPPDATA%\\StreamCompanion\\bin\\cloudflared.exe',
+      size_mb: 0,
+      location_type: 'appdata',
+    },
+  };
+}
+
+// Baixa ou verifica automaticamente o cloudflared.exe em %LOCALAPPDATA%\StreamCompanion\bin
+export async function ensureCloudflaredBinary(): Promise<CloudflaredStatus> {
+  return await invokeTauri<CloudflaredStatus>('ensure_cloudflared_binary');
+}
+
+// Verifica a última Release no GitHub Releases
+export async function checkGithubUpdate(repoInput: string): Promise<UpdateCheckResult> {
+  if (isTauriEnvironment()) {
+    return await invokeTauri<UpdateCheckResult>('check_github_update', {
+      repo: repoInput,
+    });
+  }
+
+  // Fallback web para testar a consulta à API do GitHub direto no navegador
+  const trimmed = repoInput.trim().replace(/\/+$/, '').replace(/\.git$/, '');
+  const cleaned = trimmed.includes('github.com/')
+    ? trimmed.split('github.com/')[1]
+    : trimmed;
+  const parts = cleaned.split('/').filter(Boolean);
+  if (parts.length < 2) {
+    throw new Error(
+      "Informe o repositório no formato 'usuario/repositorio' (ex: NTDarkzZ/StreamCompanion)."
+    );
+  }
+  const repo = `${parts[0]}/${parts[1]}`;
+  const resp = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+    headers: { Accept: 'application/vnd.github+json' },
+  });
+  if (resp.status === 404) {
+    throw new Error(
+      `Nenhuma Release encontrada em '${repo}' (ou o repositório ainda não possui Releases publicadas).`
+    );
+  }
+  if (!resp.ok) {
+    throw new Error(`GitHub API retornou status ${resp.status} para '${repo}'.`);
+  }
+  const json = await resp.json();
+  const currentVersion = '1.0.0';
+  const latestVersion = json.tag_name || currentVersion;
+  let downloadUrl: string | null = null;
+  let assetName: string | null = null;
+  let assetSizeMb = 0;
+
+  if (Array.isArray(json.assets)) {
+    for (const asset of json.assets) {
+      const name = String(asset.name || '');
+      if (name.toLowerCase().endsWith('.exe') && !name.toLowerCase().includes('cloudflared')) {
+        downloadUrl = asset.browser_download_url || null;
+        assetName = name;
+        assetSizeMb = Math.round(((asset.size || 0) / (1024 * 1024)) * 10) / 10;
+        break;
+      }
+    }
+  }
+
+  const cleanCur = currentVersion.replace(/^[vV]/, '');
+  const cleanLat = String(latestVersion).replace(/^[vV]/, '');
+
+  return {
+    current_version: currentVersion,
+    latest_version: latestVersion,
+    has_update: cleanCur !== cleanLat,
+    release_title: json.name || latestVersion,
+    release_notes: json.body || 'Sem notas de versão.',
+    published_at: json.published_at || '',
+    download_url: downloadUrl,
+    asset_name: assetName,
+    asset_size_mb: assetSizeMb,
+    html_url: json.html_url || '',
+  };
+}
+
+// Baixa o novo .exe da Release, substitui o executável em execução e reinicia o app automaticamente
+export async function installGithubUpdate(downloadUrl: string): Promise<void> {
+  if (isTauriEnvironment()) {
+    return await invokeTauri<void>('install_github_update', {
+      downloadUrl,
+    });
+  }
+  throw new Error(
+    'A substituição automática do executável (.exe) funciona dentro do aplicativo desktop StreamCompanion.exe.'
+  );
+}
+
