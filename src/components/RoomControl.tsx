@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   KeyRound,
   Copy,
@@ -19,6 +19,7 @@ import {
   Shield,
   Trash2,
   ClipboardPaste,
+  X,
 } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { RoomDetails, SavedMeshRoom } from '../types';
@@ -298,8 +299,17 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     [handleConnectMeshRoom, handleJoinRoom]
   );
 
-  // Carrega apelido, sala fixa, parâmetros de URL e deep-links streamcompanion://
+  const didInitStartupRef = useRef<boolean>(false);
+  const applyParsedInviteRef = useRef(applyParsedInvite);
   useEffect(() => {
+    applyParsedInviteRef.current = applyParsedInvite;
+  }, [applyParsedInvite]);
+
+  // Carrega apelido, último código salvo (sem travar o input!), parâmetros de URL e deep-links streamcompanion:// apenas 1 vez na montagem
+  useEffect(() => {
+    if (didInitStartupRef.current) return;
+    didInitStartupRef.current = true;
+
     try {
       const savedNick = localStorage.getItem('sc_nickname');
       if (savedNick && !nickname) {
@@ -309,7 +319,6 @@ export const RoomControl: React.FC<RoomControlProps> = ({
       const savedRoom = localStorage.getItem('sc_last_room_code') || '';
       if (savedRoom) {
         setLastSavedRoom(savedRoom);
-        setInputCode(savedRoom);
       }
 
       // 1. Verifica se a janela foi aberta com parâmetros de convite (?mesh_room=... ou ?room=...)
@@ -321,11 +330,10 @@ export const RoomControl: React.FC<RoomControlProps> = ({
             window.history.replaceState({}, document.title, window.location.pathname);
           } catch {}
 
-          // Se abriu no navegador externo, tenta encaminhar para o StreamCompanion.exe aberto no PC
+          // Se abriu no navegador externo, tenta encaminhar para o DisCrab.exe aberto no PC
           if (!isTauriEnvironment()) {
             forwardInviteToLocalDesktopApp(window.location.search).then((forwarded) => {
               if (!forwarded) {
-                // Tenta também acionar o protocolo nativo streamcompanion:// registrado no Windows
                 const deepUrl = `streamcompanion://join${window.location.search}`;
                 const iframe = document.createElement('iframe');
                 iframe.style.display = 'none';
@@ -337,7 +345,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
           }
 
           // Entra automaticamente na sala
-          applyParsedInvite(parsedFromUrl);
+          applyParsedInviteRef.current(parsedFromUrl);
         }
       }
     } catch {
@@ -349,7 +357,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
       consumeStartupInvite().then((inviteStr) => {
         if (inviteStr) {
           const parsed = parseInviteText(inviteStr);
-          if (parsed) applyParsedInvite(parsed);
+          if (parsed) applyParsedInviteRef.current(parsed);
         }
       });
 
@@ -357,7 +365,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
       listen<string>('deep-link-invite', (event) => {
         if (event.payload) {
           const parsed = parseInviteText(event.payload);
-          if (parsed) applyParsedInvite(parsed);
+          if (parsed) applyParsedInviteRef.current(parsed);
         }
       })
         .then((fn) => {
@@ -369,7 +377,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
         if (unlistenFn) unlistenFn();
       };
     }
-  }, [applyParsedInvite]);
+  }, []);
 
   // Suporte a Ctrl+V direto na tela inicial (mesmo sem clicar em nenhuma caixa de texto)
   useEffect(() => {
@@ -958,27 +966,72 @@ export const RoomControl: React.FC<RoomControlProps> = ({
             <div className="space-y-1.5">
               <div className="flex items-center justify-between text-xs font-mono text-neutral-400">
                 <span>Código da Sala (Cloudflare ou LAN):</span>
-                {lastSavedRoom && (
+                <div className="flex items-center gap-2">
+                  {inputCode && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInputCode('');
+                        setErrorMsg(null);
+                      }}
+                      className="text-[11px] text-rose-400 hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <X className="w-3 h-3" />
+                      Limpar
+                    </button>
+                  )}
+                  {lastSavedRoom && inputCode !== lastSavedRoom && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInputCode(lastSavedRoom);
+                        setErrorMsg(null);
+                      }}
+                      className="text-[11px] text-cyan-400 hover:underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Usar Último Código
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="relative">
+                <input
+                  type="text"
+                  value={inputCode}
+                  onChange={(e) => {
+                    const rawVal = e.target.value;
+                    setErrorMsg(null);
+                    // Se o usuário colou o bloco completo "Código da Sala: xxx...", extrai apenas o código limpo
+                    if (rawVal.includes('Código') || rawVal.includes('streamcompanion://')) {
+                      const parsed = parseInviteText(rawVal);
+                      if (parsed?.kind === 'code') {
+                        setInputCode(parsed.code);
+                        return;
+                      }
+                    }
+                    setInputCode(rawVal);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleJoinRoom();
+                  }}
+                  placeholder="Cole o código Cloudflare (PC Host) ou LAN..."
+                  className="sc-input w-full h-11 bg-neutral-950 border border-neutral-800 focus:border-cyan-500 rounded-xl pl-4 pr-9 text-xs text-white font-mono outline-none transition-colors"
+                />
+                {inputCode && (
                   <button
                     type="button"
-                    onClick={() => setInputCode(lastSavedRoom)}
-                    className="text-[11px] text-cyan-400 hover:underline flex items-center gap-1 cursor-pointer"
+                    onClick={() => {
+                      setInputCode('');
+                      setErrorMsg(null);
+                    }}
+                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-white p-1 cursor-pointer"
+                    title="Apagar código"
                   >
-                    <RotateCcw className="w-3 h-3" />
-                    Usar Último Código
+                    <X className="w-4 h-4" />
                   </button>
                 )}
               </div>
-              <input
-                type="text"
-                value={inputCode}
-                onChange={(e) => setInputCode(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleJoinRoom();
-                }}
-                placeholder="Cole o código Cloudflare (PC Host) ou LAN..."
-                className="sc-input w-full h-11 bg-neutral-950 border border-neutral-800 focus:border-cyan-500 rounded-xl px-4 text-xs text-white font-mono outline-none transition-colors"
-              />
             </div>
 
             <button

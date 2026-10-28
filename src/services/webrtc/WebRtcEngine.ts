@@ -30,12 +30,10 @@ import {
 export const RTC_CONFIGURATION: RTCConfiguration = {
   iceServers: [
     { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
     { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:stun1.l.google.com:19302' },
   ],
-  iceCandidatePoolSize: 8,
+  iceCandidatePoolSize: 4,
 };
 
 export interface VideoQualityProfile {
@@ -203,6 +201,7 @@ interface InternalPeerEntry {
   pendingNegotiation: boolean;
   isFreshJoinOffer: boolean;
   resetTimer?: any;
+  handshakeTimer?: any;
   recoveryAttempts: number;
   watchedScreen: boolean;
   watchedWebcam: boolean;
@@ -421,6 +420,46 @@ export class WebRtcEngine {
       }
 
       let connected = false;
+      let attemptFailureHandled = false;
+
+      const handleInitialConnectFailure = () => {
+        if (attemptFailureHandled || connected || this.manualDisconnect) return;
+        attemptFailureHandled = true;
+
+        if (retryCount < 6 && wsUrl.includes('trycloudflare')) {
+          console.log(
+            `[WebRTC Engine] Aguardando propagação do túnel Cloudflare... Tentativa ${retryCount + 1}/6`
+          );
+          this.callbacks.onReconnectingChange?.(true, retryCount + 1);
+          if (this.reconnectTimer) {
+            clearTimeout(this.reconnectTimer);
+          }
+          this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = null;
+            if (this.manualDisconnect) return;
+            this.connect(wsUrl, token, nickname, retryCount + 1, isAutoReconnect)
+              .then(resolve)
+              .catch(reject);
+          }, 1500);
+        } else if (!isAutoReconnect) {
+          this.callbacks.onReconnectingChange?.(false, 0);
+          let detailedMsg = `Não foi possível conectar ao servidor (${wsUrl}).`;
+          if (wsUrl.includes('trycloudflare')) {
+            detailedMsg +=
+              ' O túnel Cloudflare pode ter sido encerrado ou o código é de uma sessão antiga. Peça um código novo ao Host ou use uma Sala Fixa.';
+          } else if (wsUrl.includes('127.0.0.1') || wsUrl.includes('localhost')) {
+            detailedMsg +=
+              ' Servidor local não respondeu. Certifique-se de que o Host iniciou a sala antes de tentar entrar.';
+          } else {
+            detailedMsg +=
+              ' Verifique se o Host está com a sala aberta, se o código digitado está correto e se o firewall permite a conexão.';
+          }
+          this.callbacks.onError?.(detailedMsg);
+          reject(detailedMsg);
+        } else {
+          reject('Falha na tentativa de reconexão automática');
+        }
+      };
 
       this.ws.onopen = () => {
         connected = true;
@@ -448,40 +487,19 @@ export class WebRtcEngine {
 
       this.ws.onerror = (e) => {
         console.error('[WebRTC Engine] Erro no WebSocket:', e);
-        if (!connected && retryCount < 5 && wsUrl.includes('trycloudflare')) {
-          console.log(
-            `[WebRTC Engine] Aguardando propagação do túnel Cloudflare... Tentativa ${retryCount + 1}/5`
-          );
-          this.callbacks.onError?.(
-            `Aguardando propagação do túnel Cloudflare... Tentativa ${retryCount + 1}/5`
-          );
-          setTimeout(() => {
-            this.connect(wsUrl, token, nickname, retryCount + 1, isAutoReconnect)
-              .then(resolve)
-              .catch(reject);
-          }, 2000);
-        } else if (!connected && !isAutoReconnect) {
-          let detailedMsg = `Não foi possível conectar ao servidor (${wsUrl}).`;
-          if (wsUrl.includes('trycloudflare')) {
-            detailedMsg +=
-              ' O túnel Cloudflare pode estar inativo ou o Host fechou a sala. Verifique se o Host está com o app aberto e com o cloudflared.exe ativo.';
-          } else if (wsUrl.includes('127.0.0.1') || wsUrl.includes('localhost')) {
-            detailedMsg +=
-              ' Servidor local não respondeu. Certifique-se de que o Host iniciou a sala antes de tentar entrar.';
-          } else {
-            detailedMsg +=
-              ' Verifique se o Host está com a sala aberta, se o código digitado está correto e se o firewall permite a conexão.';
-          }
-          this.callbacks.onError?.(detailedMsg);
-          reject(detailedMsg);
-        } else if (!connected && isAutoReconnect) {
-          reject('Falha na tentativa de reconexão automática');
+        if (!connected) {
+          handleInitialConnectFailure();
         }
       };
 
       this.ws.onclose = () => {
         console.log('[WebRTC Engine] WebSocket desconectado.');
         this.stopPingHeartbeat();
+
+        if (!connected) {
+          handleInitialConnectFailure();
+          return;
+        }
 
         if (!this.manualDisconnect && this.lastWsUrl && this.lastToken && this.lastNickname) {
           this.scheduleWsReconnect();
@@ -595,6 +613,9 @@ export class WebRtcEngine {
 
     if (existing.resetTimer) {
       clearTimeout(existing.resetTimer);
+    }
+    if (existing.handshakeTimer) {
+      clearTimeout(existing.handshakeTimer);
     }
     try {
       existing.pc.onconnectionstatechange = null;
@@ -749,6 +770,21 @@ export class WebRtcEngine {
           const st = existing.pc.connectionState;
           if (st === 'failed' || st === 'disconnected' || st === 'closed') {
             this.resetPeerConnection(p.id, false);
+          } else if (
+            msg.initiator === true &&
+            !existing.initialHandshakeDone &&
+            existing.pc.signalingState === 'stable' &&
+            !existing.makingOffer
+          ) {
+            if (!existing.dc) {
+              try {
+                const dc = existing.pc.createDataChannel('streamcompanion-chat', {
+                  ordered: true,
+                });
+                this.setupDataChannel(dc, p.id, existing);
+              } catch {}
+            }
+            this.renegotiatePeer(p.id);
           }
         } else {
           const shouldInitiate = typeof msg.initiator === 'boolean' ? msg.initiator : false;
@@ -768,7 +804,13 @@ export class WebRtcEngine {
         }
 
         this.emitPeersChange();
-        this.broadcastStreamStatus();
+        if (
+          this.isBroadcastingScreen ||
+          this.isBroadcastingWebcam ||
+          this.localMediaSources.size > 0
+        ) {
+          this.broadcastStreamStatus();
+        }
         break;
       }
 
@@ -1001,6 +1043,10 @@ export class WebRtcEngine {
           clearTimeout(peerEntry.resetTimer);
           peerEntry.resetTimer = null;
         }
+        if (peerEntry.handshakeTimer) {
+          clearTimeout(peerEntry.handshakeTimer);
+          peerEntry.handshakeTimer = null;
+        }
         peerEntry.recoveryAttempts = 0;
 
         // Reaplica os parâmetros de alto bitrate / 60fps assim que o transporte DTLS/SRTP estiver ativo
@@ -1063,6 +1109,32 @@ export class WebRtcEngine {
     if (initiator) {
       this.renegotiatePeer(peerId);
     }
+
+    // Watchdog de Handshake Inicial: se após 3.2s a conexão ainda não completou o handshake inicial,
+    // garante que o iniciador determinístico reenvie a oferta SDP.
+    peerEntry.handshakeTimer = setTimeout(() => {
+      const current = this.peers.get(peerId);
+      if (!current || current.pc.connectionState === 'connected') return;
+      const shouldWeInitiate =
+        initiator || (this.myPeerId !== null && this.myPeerId > peerId);
+      if (shouldWeInitiate) {
+        if (!current.dc) {
+          try {
+            const dc = current.pc.createDataChannel('streamcompanion-chat', { ordered: true });
+            this.setupDataChannel(dc, peerId, current);
+          } catch {}
+        }
+        if (current.pc.signalingState === 'stable' && !current.makingOffer) {
+          current.isFreshJoinOffer = true;
+          this.renegotiatePeer(peerId);
+        } else if (
+          current.pc.connectionState === 'new' ||
+          current.pc.connectionState === 'connecting'
+        ) {
+          this.resetPeerConnection(peerId, true);
+        }
+      }
+    }, 3200);
 
     return pc;
   }
@@ -1666,7 +1738,11 @@ export class WebRtcEngine {
     }
 
     let peerEntry = this.peers.get(fromPeerId);
-    if (!peerEntry) return;
+    if (!peerEntry) {
+      this.createPeerConnection(fromPeerId, 'Participante', false, false);
+      peerEntry = this.peers.get(fromPeerId);
+      if (!peerEntry) return;
+    }
 
     if (payload?.fresh_join && payload?.sdp?.type === 'offer' && peerEntry.pc.remoteDescription !== null) {
       console.log(
@@ -2447,6 +2523,7 @@ export class WebRtcEngine {
     const entry = this.peers.get(peerId);
     if (entry) {
       if (entry.resetTimer) clearTimeout(entry.resetTimer);
+      if (entry.handshakeTimer) clearTimeout(entry.handshakeTimer);
       try {
         entry.pc.close();
       } catch {}
@@ -2647,6 +2724,7 @@ export class WebRtcEngine {
     this.prevStatsMap.clear();
     this.peers.forEach((p) => {
       if (p.resetTimer) clearTimeout(p.resetTimer);
+      if (p.handshakeTimer) clearTimeout(p.handshakeTimer);
       try {
         p.pc.close();
       } catch {}

@@ -408,44 +408,7 @@ export class MeshRoomSignaling {
       }
     } catch {}
 
-    // 3. Relay WebSocket local/servidor web quando aplicável
-    this.setupOptionalServerRelay();
-
-    // 4. Conecta simultaneamente aos brokers MQTT sobre WSS públicos para alcance global sem cloudflared
-    let resolved = false;
-    await new Promise<void>((resolve) => {
-      const completeOnce = () => {
-        if (!resolved) {
-          resolved = true;
-          resolve();
-        }
-      };
-
-      PUBLIC_MQTT_WSS_BROKERS.forEach((brokerUrl, index) => {
-        const mqttClientId = `sc_${this.myPeerId.slice(-10)}_${index}_${Math.random()
-          .toString(36)
-          .substring(2, 6)}`;
-        const client = new LightMqttWsClient(
-          brokerUrl,
-          this.mqttTopic,
-          mqttClientId,
-          (rawText) => this.handleRawEnvelope(rawText),
-          () => {
-            completeOnce();
-            // Assim que cada broker conecta, anuncia presença para descobrir amigos imediatamente
-            this.sendHello(true);
-          }
-        );
-        this.mqttClients.push(client);
-      });
-
-      // Fallback rápido caso a rede esteja em LAN/BroadcastChannel ou brokers demorem > 1.2s
-      setTimeout(completeOnce, 1200);
-    });
-
-    if (this.closed) return;
-
-    // 5. Notifica o WebRtcEngine que estamos autenticados na Sala Mesh
+    // 3. Notifica o WebRtcEngine imediatamente que estamos autenticados na Sala Mesh (define myPeerId antes de processar pacotes)
     this.onSignalingMessage({
       type: 'auth_ok',
       peer_id: this.myPeerId,
@@ -453,16 +416,38 @@ export class MeshRoomSignaling {
       peers: [],
     });
 
+    // 4. Relay WebSocket local/servidor web quando aplicável
+    this.setupOptionalServerRelay();
+
+    // 5. Conecta simultaneamente aos brokers MQTT sobre WSS públicos para alcance global sem cloudflared
+    PUBLIC_MQTT_WSS_BROKERS.forEach((brokerUrl, index) => {
+      const mqttClientId = `sc_${this.myPeerId.slice(-10)}_${index}_${Math.random()
+        .toString(36)
+        .substring(2, 6)}`;
+      const client = new LightMqttWsClient(
+        brokerUrl,
+        this.mqttTopic,
+        mqttClientId,
+        (rawText) => this.handleRawEnvelope(rawText),
+        () => {
+          // Assim que cada broker conecta, anuncia presença para descobrir amigos imediatamente
+          this.sendHello(true);
+        }
+      );
+      this.mqttClients.push(client);
+    });
+
     // 6. Dispara anúncios iniciais rápidos e mantém heartbeat leve
     this.sendHello(true);
-    this.fastHelloTimers.push(setTimeout(() => this.sendHello(true), 700));
-    this.fastHelloTimers.push(setTimeout(() => this.sendHello(true), 2200));
+    this.fastHelloTimers.push(setTimeout(() => this.sendHello(true), 450));
+    this.fastHelloTimers.push(setTimeout(() => this.sendHello(true), 1200));
+    this.fastHelloTimers.push(setTimeout(() => this.sendHello(true), 2500));
 
     this.heartbeatTimer = setInterval(() => {
       if (!this.closed) {
         this.sendHello(false);
       }
-    }, 5000);
+    }, 4500);
   }
 
   private setupOptionalServerRelay() {
@@ -738,51 +723,25 @@ export class MeshRoomSignaling {
       // Regra determinística de iniciador WebRTC: exatamente 1 dos 2 cria a oferta inicial
       const shouldInitiate = this.myPeerId > remotePeerId;
 
-      if (isNewPeer) {
-        if (!shouldInitiate) {
-          // Criamos nossa RTCPeerConnection passiva primeiro e já avisamos o iniciador
-          this.onSignalingMessage({
-            type: 'peer_joined',
-            initiator: false,
-            peer: peerSummary,
-          });
-          if (inner.reply_needed) {
-            this.sendHello(false, remotePeerId);
-          }
-        } else {
-          // Respondemos para garantir que o par crie a RTCPeerConnection passiva e iniciamos a oferta
-          if (inner.reply_needed) {
-            await this.sendHello(false, remotePeerId);
-          }
-          setTimeout(() => {
-            if (!this.closed) {
-              this.onSignalingMessage({
-                type: 'peer_joined',
-                initiator: true,
-                peer: peerSummary,
-              });
-            }
-          }, 50);
-        }
-      } else {
-        // Atualiza metadados do peer já conhecido e responde se ele pediu confirmação
-        this.onSignalingMessage({
-          type: 'peer_joined',
-          initiator: false,
-          peer: peerSummary,
-        });
-        if (inner.reply_needed) {
-          this.sendHello(false, remotePeerId);
-        }
+      if (inner.reply_needed) {
+        this.sendHello(false, remotePeerId);
       }
+
+      this.onSignalingMessage({
+        type: 'peer_joined',
+        initiator: shouldInitiate,
+        peer: peerSummary,
+      });
       return;
     }
 
-    // Se qualquer sinal WebRTC chegar antes do mesh_hello, registra o peer passivamente na hora
+    // Se qualquer sinal WebRTC chegar antes do mesh_hello, registra o peer na hora
     if (isNewPeer) {
+      const shouldInitiate =
+        inner.type === 'webrtc_signal' ? false : this.myPeerId > remotePeerId;
       this.onSignalingMessage({
         type: 'peer_joined',
-        initiator: false,
+        initiator: shouldInitiate,
         peer: {
           id: remotePeerId,
           nickname: remoteNickname,

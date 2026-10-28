@@ -272,6 +272,8 @@ impl TunnelManager {
             "--url",
             &format!("http://127.0.0.1:{}", local_port),
             "--no-autoupdate",
+            "--protocol",
+            "http2",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -303,6 +305,7 @@ impl TunnelManager {
 
         let mut captured_subdomain = None;
         let mut captured_url = None;
+        let mut url_found_at: Option<Instant> = None;
 
         for line_result in (&mut reader).lines() {
             if start_time.elapsed() > timeout {
@@ -311,13 +314,29 @@ impl TunnelManager {
 
             if let Ok(line) = line_result {
                 println!("[Cloudflared log] {}", line);
-                if let Some(caps) = url_regex.captures(&line) {
-                    if let Some(sub) = caps.get(1) {
-                        let subdomain = sub.as_str().to_string();
-                        let full_url = format!("https://{}.trycloudflare.com", subdomain);
-                        captured_subdomain = Some(subdomain);
-                        captured_url = Some(full_url);
+                if captured_subdomain.is_none() {
+                    if let Some(caps) = url_regex.captures(&line) {
+                        if let Some(sub) = caps.get(1) {
+                            let subdomain = sub.as_str().to_string();
+                            let full_url = format!("https://{}.trycloudflare.com", subdomain);
+                            captured_subdomain = Some(subdomain);
+                            captured_url = Some(full_url);
+                            url_found_at = Some(Instant::now());
+                        }
+                    }
+                } else {
+                    // Aguarda o cloudflared confirmar que a conexão do túnel foi registrada na borda da Cloudflare
+                    let lower = line.to_lowercase();
+                    if lower.contains("registered tunnel connection")
+                        || (lower.contains("connection") && lower.contains("registered"))
+                    {
+                        std::thread::sleep(Duration::from_millis(350));
                         break;
+                    }
+                    if let Some(found_instant) = url_found_at {
+                        if found_instant.elapsed() > Duration::from_secs(4) {
+                            break;
+                        }
                     }
                 }
             }
