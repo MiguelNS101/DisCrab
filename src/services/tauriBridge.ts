@@ -331,6 +331,7 @@ export async function checkGithubUpdate(
   let exeDownloadUrl: string | null = null;
   let exeAssetName: string | null = null;
   let exeSizeMb = 0;
+  let exeIsPortable = false;
 
   let apkDownloadUrl: string | null = null;
   let apkAssetName: string | null = null;
@@ -342,10 +343,16 @@ export async function checkGithubUpdate(
       const lower = name.toLowerCase();
       const sizeMb = Math.round(((asset.size || 0) / (1024 * 1024)) * 10) / 10;
 
-      if (!exeDownloadUrl && lower.endsWith('.exe') && !lower.includes('cloudflared')) {
-        exeDownloadUrl = asset.browser_download_url || null;
-        exeAssetName = name;
-        exeSizeMb = sizeMb;
+      if (lower.endsWith('.exe') && !lower.includes('cloudflared')) {
+        const isPortableCandidate =
+          lower.includes('portable') ||
+          (!lower.includes('setup') && !lower.includes('install'));
+        if (!exeDownloadUrl || (isPortableCandidate && !exeIsPortable)) {
+          exeDownloadUrl = asset.browser_download_url || null;
+          exeAssetName = name;
+          exeSizeMb = sizeMb;
+          exeIsPortable = isPortableCandidate;
+        }
       }
       if (!apkDownloadUrl && lower.endsWith('.apk')) {
         apkDownloadUrl = asset.browser_download_url || null;

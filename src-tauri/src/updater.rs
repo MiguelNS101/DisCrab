@@ -54,13 +54,15 @@ pub fn cleanup_old_executable() {
             let stem = current_exe
                 .file_stem()
                 .and_then(|s| s.to_str())
-                .unwrap_or("StreamCompanion");
+                .unwrap_or("DisCrab");
 
             let old_exe = parent.join(format!("{}.old.exe", stem));
             let tmp_exe = parent.join(format!("{}.update.tmp", stem));
             let generic_old = parent.join("StreamCompanion.old.exe");
+            let discrab_old = parent.join("DisCrab.old.exe");
+            let temp_script = std::env::temp_dir().join("discrab_apply_update.cmd");
 
-            for file in [old_exe, tmp_exe, generic_old] {
+            for file in [old_exe, tmp_exe, generic_old, discrab_old, temp_script] {
                 if file.exists() {
                     if std::fs::remove_file(&file).is_ok() {
                         println!("[Updater] Arquivo residual removido com sucesso: {:?}", file);
@@ -216,6 +218,7 @@ pub async fn check_github_release(repo_input: &str) -> Result<UpdateCheckResult,
     let mut exe_download_url: Option<String> = None;
     let mut exe_asset_name: Option<String> = None;
     let mut exe_size_mb: f64 = 0.0;
+    let mut exe_is_portable: bool = false;
 
     let mut apk_download_url: Option<String> = None;
     let mut apk_asset_name: Option<String> = None;
@@ -228,13 +231,18 @@ pub async fn check_github_release(repo_input: &str) -> Result<UpdateCheckResult,
             let size_bytes = asset["size"].as_u64().unwrap_or(0);
             let size_mb = ((size_bytes as f64) / (1024.0 * 1024.0) * 10.0).round() / 10.0;
 
-            if exe_download_url.is_none()
-                && lower.ends_with(".exe")
-                && !lower.contains("cloudflared")
-            {
-                exe_download_url = asset["browser_download_url"].as_str().map(|s| s.to_string());
-                exe_asset_name = Some(name.to_string());
-                exe_size_mb = size_mb;
+            if lower.ends_with(".exe") && !lower.contains("cloudflared") {
+                // Prioriza sempre o executável standalone (DisCrab-Portable.exe) sobre instaladores NSIS (*-setup.exe)
+                let is_portable_candidate = lower.contains("portable")
+                    || (!lower.contains("setup") && !lower.contains("install"));
+
+                if exe_download_url.is_none() || (is_portable_candidate && !exe_is_portable) {
+                    exe_download_url =
+                        asset["browser_download_url"].as_str().map(|s| s.to_string());
+                    exe_asset_name = Some(name.to_string());
+                    exe_size_mb = size_mb;
+                    exe_is_portable = is_portable_candidate;
+                }
             }
 
             if apk_download_url.is_none() && lower.ends_with(".apk") {
@@ -404,7 +412,7 @@ pub async fn download_and_apply_update(
 }
 
 /// No Desktop (Windows): baixa o novo .exe, substitui o executável atual em execução
-/// (renomeando o atual para .old.exe) e reinicia o aplicativo automaticamente!
+/// e reinicia o aplicativo automaticamente em um processo desvinculado do Job Object!
 #[cfg(not(target_os = "android"))]
 pub async fn download_and_apply_update(
     app: AppHandle,
@@ -423,9 +431,9 @@ pub async fn download_and_apply_update(
     let stem = current_exe
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or("StreamCompanion");
+        .unwrap_or("DisCrab");
 
-    let temp_update_path = exe_dir.join(format!("{}.update.tmp", stem));
+    let mut temp_update_path = exe_dir.join(format!("{}.update.tmp", stem));
     let backup_old_path = exe_dir.join(format!("{}.old.exe", stem));
 
     let _ = app.emit(
@@ -461,12 +469,20 @@ pub async fn download_and_apply_update(
     let total_mb = ((total_bytes as f64) / (1024.0 * 1024.0) * 10.0).round() / 10.0;
 
     let _ = std::fs::remove_file(&temp_update_path);
-    let mut file = std::fs::File::create(&temp_update_path).map_err(|e| {
-        format!(
-            "Sem permissão para criar arquivo de atualização na pasta {:?}: {}",
-            exe_dir, e
-        )
-    })?;
+    let mut file = match std::fs::File::create(&temp_update_path) {
+        Ok(f) => f,
+        Err(_) => {
+            // Fallback para %TEMP% caso o diretório atual exija elevação
+            temp_update_path = std::env::temp_dir().join(format!("{}.update.tmp", stem));
+            let _ = std::fs::remove_file(&temp_update_path);
+            std::fs::File::create(&temp_update_path).map_err(|e| {
+                format!(
+                    "Sem permissão para criar arquivo temporário de atualização: {}",
+                    e
+                )
+            })?
+        }
+    };
 
     let mut downloaded_bytes: u64 = 0;
     let mut stream = resp.bytes_stream();
@@ -530,31 +546,105 @@ pub async fn download_and_apply_update(
             stage: "installing".to_string(),
             downloaded_mb: total_mb,
             total_mb,
-            percent: 98,
-            message: "Substituindo executável e reiniciando o DisCrab...".to_string(),
+            percent: 100,
+            message: "Aplicando atualização e reiniciando o DisCrab...".to_string(),
         },
     );
 
-    let _ = std::fs::remove_file(&backup_old_path);
-
-    std::fs::rename(&current_exe, &backup_old_path).map_err(|e| {
-        format!(
-            "Falha ao renomear executável atual para backup ({:?}): {}",
-            backup_old_path, e
-        )
-    })?;
-
-    if let Err(e) = std::fs::rename(&temp_update_path, &current_exe) {
-        let _ = std::fs::rename(&backup_old_path, &current_exe);
-        return Err(format!("Falha ao ativar novo executável: {}", e));
-    }
-
     tunnel_manager.stop();
 
-    let _ = Command::new(&current_exe).spawn();
+    let lower_url = download_url.to_lowercase();
+    let is_installer_setup =
+        lower_url.ends_with("-setup.exe") || lower_url.contains("_setup.exe");
+
+    // Se o executável não for um instalador NSIS, tentamos também a troca atômica imediata
+    // (renomeando o atual para .old.exe) ANTES do script auxiliar entrar em ação.
+    if !is_installer_setup {
+        let _ = std::fs::remove_file(&backup_old_path);
+        if std::fs::rename(&current_exe, &backup_old_path).is_ok() {
+            if std::fs::rename(&temp_update_path, &current_exe).is_err() {
+                // Caso o move direto falhe (ex: volumes diferentes ou lock de antivírus), tenta copiar
+                if std::fs::copy(&temp_update_path, &current_exe).is_ok() {
+                    let _ = std::fs::remove_file(&temp_update_path);
+                } else {
+                    // Restaura o original para que o script .cmd faça a substituição após o encerramento
+                    let _ = std::fs::rename(&backup_old_path, &current_exe);
+                }
+            }
+        }
+    }
+
+    // Cria e executa um script .cmd independente fora do Job Object para aguardar o encerramento
+    // completo do processo antigo, garantir a substituição do .exe e reabrir o DisCrab limpo.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x01000000;
+
+        let script_path = std::env::temp_dir().join("discrab_apply_update.cmd");
+        let current_exe_str = current_exe.to_string_lossy().to_string();
+        let exe_dir_str = exe_dir.to_string_lossy().to_string();
+        let temp_update_str = temp_update_path.to_string_lossy().to_string();
+        let backup_old_str = backup_old_path.to_string_lossy().to_string();
+
+        let script_content = if is_installer_setup {
+            format!(
+                "@echo off\r\n\
+                 chcp 65001 >nul 2>&1\r\n\
+                 ping 127.0.0.1 -n 3 >nul\r\n\
+                 \"{}\"\r\n\
+                 del /F /Q \"%~f0\" >nul 2>&1\r\n",
+                temp_update_str
+            )
+        } else {
+            format!(
+                "@echo off\r\n\
+                 chcp 65001 >nul 2>&1\r\n\
+                 ping 127.0.0.1 -n 3 >nul\r\n\
+                 for /L %%i in (1,1,10) do (\r\n\
+                   if exist \"{tmp}\" (\r\n\
+                     move /Y \"{tmp}\" \"{dst}\" >nul 2>&1\r\n\
+                     if exist \"{tmp}\" (\r\n\
+                       copy /Y /B \"{tmp}\" \"{dst}\" >nul 2>&1 && del /F /Q \"{tmp}\" >nul 2>&1\r\n\
+                     )\r\n\
+                     if exist \"{tmp}\" ping 127.0.0.1 -n 2 >nul\r\n\
+                   )\r\n\
+                 )\r\n\
+                 if exist \"{old}\" del /F /Q \"{old}\" >nul 2>&1\r\n\
+                 start \"\" /D \"{dir}\" \"{dst}\"\r\n\
+                 del /F /Q \"%~f0\" >nul 2>&1\r\n",
+                tmp = temp_update_str,
+                dst = current_exe_str,
+                old = backup_old_str,
+                dir = exe_dir_str
+            )
+        };
+
+        let _ = std::fs::write(&script_path, script_content);
+
+        let spawn_breakaway = Command::new("cmd.exe")
+            .args(["/C", &script_path.to_string_lossy()])
+            .current_dir(exe_dir)
+            .creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB)
+            .spawn();
+
+        if spawn_breakaway.is_err() {
+            let _ = Command::new("cmd.exe")
+                .args(["/C", &script_path.to_string_lossy()])
+                .current_dir(exe_dir)
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
+        }
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new(&current_exe).current_dir(exe_dir).spawn();
+    }
 
     std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_millis(350));
+        std::thread::sleep(std::time::Duration::from_millis(250));
         std::process::exit(0);
     });
 
