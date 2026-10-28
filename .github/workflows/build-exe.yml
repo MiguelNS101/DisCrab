@@ -14,10 +14,10 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: 'Nome da Tag da Release (ex: v1.1.1)'
+        description: 'Nome da Tag da Release (ex: v1.1.2)'
         required: false
         type: string
-        default: 'v1.1.1'
+        default: 'v1.1.2'
 
 # Permissão obrigatória para que o GitHub Actions consiga criar Releases e fazer upload de binários
 permissions:
@@ -289,8 +289,8 @@ jobs:
       - name: 🚀 Criar ou Atualizar Release no GitHub (.exe + .apk)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.0') }}
-          name: DisCrab ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.0') }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.2') }}
+          name: DisCrab ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.2') }}
           files: release_assets/*
           draft: false
           prerelease: false
