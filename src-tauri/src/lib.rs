@@ -435,7 +435,7 @@ fn window_is_maximized(window: tauri::Window) -> Result<bool, String> {
 fn window_start_dragging(window: tauri::Window) -> Result<(), String> {
     #[cfg(desktop)]
     {
-        let _ = window.start_dragging();
+        window.start_dragging().map_err(|e| e.to_string())?;
     }
     #[cfg(not(desktop))]
     {
@@ -479,7 +479,7 @@ fn window_close_current(window: tauri::Window, state: State<'_, AppState>) -> Re
     Ok(())
 }
 
-/// Alterna o tamanho da janela nativa entre o Modo Cartão de Login ("lobby") e o Modo Sala Completa ("workspace")
+/// Alterna o tamanho da janela nativa entre o Modo Cartão de Login ("lobby", fixo e sem redimensionamento) e o Modo Sala Completa ("workspace", redimensionável)
 #[tauri::command]
 fn window_set_layout_mode(
     window: tauri::Window,
@@ -498,11 +498,10 @@ fn window_set_layout_mode(
                 let _ = window.unmaximize();
             }
             let target_w = card_width.unwrap_or(460.0).clamp(400.0, 560.0);
-            let target_h = card_height.unwrap_or(680.0).clamp(480.0, 920.0);
-            let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
-                width: 420.0,
-                height: 480.0,
-            })));
+            let target_h = card_height.unwrap_or(680.0).clamp(460.0, 920.0);
+            let _ = window.set_min_size(None::<tauri::Size>);
+            let _ = window.set_max_size(None::<tauri::Size>);
+            let _ = window.set_resizable(false);
             let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
                 width: target_w,
                 height: target_h,
@@ -511,6 +510,8 @@ fn window_set_layout_mode(
                 let _ = window.center();
             }
         } else {
+            let _ = window.set_max_size(None::<tauri::Size>);
+            let _ = window.set_resizable(true);
             let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
                 width: 960.0,
                 height: 640.0,
@@ -1196,6 +1197,7 @@ pub fn run() {
                         let app_icon = tauri::image::Image::new(raw_icon_rgba, 64, 64);
                         let _ = main_win.set_icon(app_icon);
                     }
+                    let _ = main_win.set_resizable(false);
                     #[cfg(windows)]
                     apply_windows_frameless_dwm_style(&main_win);
                 }

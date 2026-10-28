@@ -40,7 +40,7 @@ interface WindowTitleBarProps {
 }
 
 export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
-  currentVersion = '1.1.4',
+  currentVersion = '1.1.5',
   isInRoom = false,
   activeProcessName,
   activePid,
@@ -95,6 +95,7 @@ export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
       return;
     }
     if (e.detail >= 2) return;
+    e.preventDefault();
     startDraggingAppWindow();
   };
 
@@ -147,10 +148,10 @@ export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
         }}
       />
 
-      {/* Lado Esquerdo: Identidade DisCrab + Versão (Arrastável) */}
+      {/* Área Esquerda + Central (100% Arrastável: clicar em qualquer parte fora dos botões move a janela) */}
       <div
         data-tauri-drag-region
-        className="flex items-center gap-2.5 pl-3 pr-2 h-full overflow-hidden"
+        className="flex-1 flex items-center gap-2.5 pl-3 pr-2 h-full overflow-hidden cursor-default"
       >
         <div className="pointer-events-none flex items-center gap-2 shrink-0">
           <AppIcon size={20} showLiveDot={true} animated={isInRoom} />
@@ -179,17 +180,13 @@ export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
 
         {/* Telemetria Compacta na Barra de Moldura (quando em Sala) */}
         {!isPopupWindow && isInRoom && (
-          <div
-            data-tauri-drag-region
-            className="hidden md:flex items-center gap-1.5 ml-1 pointer-events-none"
-          >
+          <div className="hidden md:flex items-center gap-1.5 ml-1 pointer-events-none">
             <div
               className="flex items-center gap-1.5 px-2 py-0.5 rounded font-mono text-[10px]"
               style={{
                 backgroundColor: 'rgba(var(--sc-bg-surface-rgb, 18, 19, 24), 0.9)',
                 border: '1px solid var(--sc-border-color, #27272a)',
               }}
-              title="Status do isolamento de áudio WASAPI por processo"
             >
               <ShieldCheck
                 className={`w-3 h-3 shrink-0 ${

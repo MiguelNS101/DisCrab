@@ -381,11 +381,75 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     styleEl.textContent = `
       :root {
         font-size: ${theme.uiScale}%;
+        scrollbar-color: rgba(var(--sc-accent-rgb), 0.48) var(--sc-bg-elevated);
+        scrollbar-width: thin;
       }
       body, .sc-app {
         background-color: var(--sc-bg-primary) !important;
         color: var(--sc-text-primary) !important;
         font-family: ${fontStack} !important;
+      }
+      /* Bloqueio total de Scroll na Tela de Login (Cartão Compacto) */
+      html[data-view-mode="lobby"],
+      html[data-view-mode="lobby"] body,
+      html[data-view-mode="lobby"] #root,
+      html[data-view-mode="lobby"] .sc-app {
+        overflow: hidden !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        scrollbar-width: none !important;
+      }
+      .sc-lobby-card {
+        overflow: hidden !important;
+        scrollbar-width: none !important;
+      }
+      html[data-view-mode="lobby"]::-webkit-scrollbar,
+      html[data-view-mode="lobby"] body::-webkit-scrollbar,
+      html[data-view-mode="lobby"] .sc-app::-webkit-scrollbar,
+      .sc-lobby-card::-webkit-scrollbar {
+        display: none !important;
+        width: 0px !important;
+        height: 0px !important;
+      }
+      /* Barras de Rolagem (Scrollbars) Estilizadas com o Tema Ativo na Tela do Palco e Painéis */
+      ::-webkit-scrollbar {
+        width: 8px;
+        height: 8px;
+      }
+      .sc-card ::-webkit-scrollbar,
+      .overflow-y-auto::-webkit-scrollbar,
+      .overflow-x-auto::-webkit-scrollbar,
+      textarea::-webkit-scrollbar {
+        width: 6px;
+        height: 6px;
+      }
+      ::-webkit-scrollbar-track {
+        background: var(--sc-bg-elevated) !important;
+        border-left: 1px solid rgba(var(--sc-bg-surface-rgb), 0.65);
+        border-radius: 9999px;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: linear-gradient(
+          180deg,
+          rgba(var(--sc-accent-rgb), 0.52) 0%,
+          rgba(var(--sc-accent-secondary-rgb), 0.52) 100%
+        ) !important;
+        border: 1.5px solid var(--sc-bg-elevated) !important;
+        border-radius: 9999px !important;
+      }
+      ::-webkit-scrollbar-thumb:hover {
+        background: linear-gradient(
+          180deg,
+          var(--sc-accent) 0%,
+          var(--sc-accent-secondary) 100%
+        ) !important;
+        box-shadow: 0 0 8px rgba(var(--sc-accent-rgb), 0.45);
+      }
+      ::-webkit-scrollbar-thumb:active {
+        background: var(--sc-accent) !important;
+      }
+      ::-webkit-scrollbar-corner {
+        background: var(--sc-bg-elevated) !important;
       }
       .sc-container-width {
         max-width: ${maxWValue} !important;

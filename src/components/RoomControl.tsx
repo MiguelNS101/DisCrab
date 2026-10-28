@@ -127,6 +127,8 @@ interface RoomControlProps {
   onOpenUpdater?: () => void;
   onEnterLocalStudio?: () => void;
   isModalOpen?: boolean;
+  externalError?: string | null;
+  onClearExternalError?: () => void;
 }
 
 export const RoomControl: React.FC<RoomControlProps> = ({
@@ -141,6 +143,8 @@ export const RoomControl: React.FC<RoomControlProps> = ({
   onOpenUpdater,
   onEnterLocalStudio,
   isModalOpen = false,
+  externalError = null,
+  onClearExternalError,
 }) => {
   // Modo principal: 'mesh' (Sala Fixa com Nome e Senha) | 'create' (Criar Código) | 'join' (Entrar Código)
   const [tab, setTab] = useState<'mesh' | 'create' | 'join'>('mesh');
@@ -212,7 +216,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
   const [lastSavedRoom, setLastSavedRoom] = useState<string>('');
   const [isCreating, setIsCreating] = useState<boolean>(false);
 
-  // Ajusta dinamicamente a janela nativa do SO para o exato tamanho do cartão de login (sc-lobby-card)
+  // Ajusta dinamicamente a janela nativa do SO (sem redimensionamento manual e sem scrollbar) para o exato tamanho do cartão de login
   useEffect(() => {
     if (roomDetails || !isTauriEnvironment() || isAndroidEnvironment()) return;
 
@@ -225,9 +229,10 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     if (!el) return;
 
     const applyCardBounds = () => {
-      const rect = el.getBoundingClientRect();
-      const targetW = Math.ceil(rect.width || 452);
-      const targetH = Math.ceil(el.scrollHeight || rect.height || 660);
+      const contentH = Math.ceil(el.offsetHeight || el.scrollHeight || 620);
+      // 36px da barra superior do cartão + altura exata do conteúdo interno + 2px de borda
+      const targetW = 460;
+      const targetH = Math.max(500, contentH + 38);
       setAppWindowLayoutMode('lobby', targetW, targetH, false);
     };
 
@@ -237,7 +242,15 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     });
     observer.observe(el);
     return () => observer.disconnect();
-  }, [roomDetails, tab, savedMeshRooms.length, errorMsg, isCustomizerOpen, isModalOpen]);
+  }, [
+    roomDetails,
+    tab,
+    savedMeshRooms.length,
+    errorMsg,
+    externalError,
+    isCustomizerOpen,
+    isModalOpen,
+  ]);
 
   const saveMeshRoomToFavorites = useCallback((roomName: string, password: string) => {
     try {
@@ -781,6 +794,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     ) {
       return;
     }
+    e.preventDefault();
     startDraggingAppWindow();
   };
 
@@ -798,107 +812,147 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     applyPreset(THEME_PRESETS[nextIndex].id);
   };
 
-  // MODO 2: Tela Inicial Limpa (Cartão de Login Independente)
+  const displayError = errorMsg || externalError;
+
+  // MODO 2: Tela Inicial Limpa (Cartão de Login Independente esticado 100% na janela sem scroll)
   return (
     <div
       className={
         isDesktopTauri
-          ? 'w-full h-full flex items-stretch justify-center'
+          ? 'w-screen h-screen overflow-hidden flex items-stretch justify-stretch'
           : 'w-full max-w-md mx-auto my-auto py-4'
       }
     >
       <div
-        ref={lobbyCardRef}
+        data-tauri-drag-region
         onMouseDown={handleCardDragMouseDown}
         className={`sc-card sc-lobby-card w-full bg-neutral-900/95 border border-neutral-800 ${
-          isDesktopTauri ? 'rounded-xl' : 'rounded-2xl shadow-2xl'
-        } p-6 sm:p-7 space-y-5 relative overflow-hidden`}
+          isDesktopTauri
+            ? 'h-full rounded-xl flex flex-col justify-between overflow-hidden select-none'
+            : 'rounded-2xl shadow-2xl overflow-hidden'
+        } relative`}
       >
         {/* Filete luminoso no topo do cartão nas cores do tema */}
         <div
-          className="absolute top-0 left-0 right-0 h-[2px] pointer-events-none opacity-95"
+          className="absolute top-0 left-0 right-0 h-[2px] pointer-events-none opacity-95 z-30"
           style={{
             background:
               'linear-gradient(90deg, var(--sc-accent, #06b6d4) 0%, var(--sc-accent-secondary, #6366f1) 50%, var(--sc-accent, #06b6d4) 100%)',
           }}
         />
 
-        {/* Controles da Janela no Canto Superior Direito do Cartão (Fixar, Minimizar, Fechar) */}
+        {/* Barra de Topo do Cartão (100% Arrastável em qualquer parte que não seja botão) */}
         {!isAndroid && (
           <div
-            data-no-drag="true"
-            className="absolute top-2.5 right-2.5 z-20 flex items-center gap-1"
+            data-tauri-drag-region
+            onMouseDown={handleCardDragMouseDown}
+            className="sc-titlebar w-full h-9 shrink-0 flex items-center justify-between pl-3 pr-0 border-b select-none"
+            style={{
+              backgroundColor: 'var(--sc-bg-elevated, #09090b)',
+              borderColor: 'var(--sc-border-color, #27272a)',
+            }}
           >
-            <button
-              type="button"
-              onClick={handleToggleCardPin}
-              className="w-7 h-7 flex items-center justify-center rounded-lg border transition-colors cursor-pointer"
-              style={{
-                backgroundColor: isCardPinned
-                  ? 'rgba(var(--sc-accent-rgb, 6, 182, 212), 0.18)'
-                  : 'rgba(var(--sc-bg-elevated, 9, 9, 11), 0.75)',
-                borderColor: isCardPinned
-                  ? 'var(--sc-accent, #06b6d4)'
-                  : 'var(--sc-border-color, #27272a)',
-                color: isCardPinned
-                  ? 'var(--sc-accent, #06b6d4)'
-                  : 'var(--sc-text-muted, #a1a1aa)',
-              }}
-              title={
-                isCardPinned
-                  ? 'Janela fixada no topo (clique para desafixar)'
-                  : 'Fixar cartão sempre no topo'
-              }
+            {/* Área de Arraste Esquerda/Central */}
+            <div
+              data-tauri-drag-region
+              className="flex-1 h-full flex items-center gap-2 cursor-default"
             >
-              <Pin
-                className={`w-3.5 h-3.5 ${isCardPinned ? 'rotate-45' : ''} transition-transform`}
-              />
-            </button>
+              <div className="pointer-events-none flex items-center gap-2">
+                <AppIcon size={18} showLiveDot={true} animated={false} />
+                <span className="text-xs font-black tracking-wider font-mono text-white">
+                  Dis<span className="text-rose-400">Crab</span>
+                </span>
+                <span
+                  className="text-[9px] px-1.5 py-0.5 rounded font-mono tracking-wider"
+                  style={{
+                    backgroundColor: 'rgba(var(--sc-accent-rgb, 6, 182, 212), 0.12)',
+                    color: 'var(--sc-accent, #06b6d4)',
+                    border: '1px solid rgba(var(--sc-accent-rgb, 6, 182, 212), 0.28)',
+                  }}
+                >
+                  v1.1.5
+                </span>
+              </div>
+            </div>
 
-            <button
-              type="button"
-              onClick={minimizeAppWindow}
-              className="w-7 h-7 flex items-center justify-center rounded-lg border transition-colors cursor-pointer hover:brightness-125"
-              style={{
-                backgroundColor: 'rgba(var(--sc-bg-elevated, 9, 9, 11), 0.75)',
-                borderColor: 'var(--sc-border-color, #27272a)',
-                color: 'var(--sc-text-muted, #a1a1aa)',
-              }}
-              title="Minimizar janela"
-              aria-label="Minimizar janela"
-            >
-              <Minus className="w-3.5 h-3.5" />
-            </button>
+            {/* Botões de Controle da Janela (Fixar, Minimizar, Fechar) */}
+            <div data-no-drag="true" className="flex items-center h-full shrink-0">
+              <button
+                type="button"
+                onClick={handleToggleCardPin}
+                className="sc-win-btn h-full w-9 flex items-center justify-center transition-colors cursor-pointer"
+                style={{
+                  color: isCardPinned
+                    ? 'var(--sc-accent, #06b6d4)'
+                    : 'var(--sc-text-muted, #a1a1aa)',
+                  backgroundColor: isCardPinned
+                    ? 'rgba(var(--sc-accent-rgb, 6, 182, 212), 0.16)'
+                    : 'transparent',
+                  borderRadius: 0,
+                }}
+                title={
+                  isCardPinned
+                    ? 'Janela fixada no topo (clique para desafixar)'
+                    : 'Fixar cartão sempre no topo'
+                }
+              >
+                <Pin
+                  className={`w-3.5 h-3.5 ${isCardPinned ? 'rotate-45' : ''} transition-transform`}
+                />
+              </button>
 
-            <button
-              type="button"
-              onClick={closeCurrentAppWindow}
-              className="w-7 h-7 flex items-center justify-center rounded-lg border border-neutral-800 bg-neutral-950/80 text-neutral-400 hover:bg-rose-600 hover:border-rose-500 hover:text-white transition-all cursor-pointer"
-              title="Fechar aplicativo"
-              aria-label="Fechar aplicativo"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
+              <button
+                type="button"
+                onClick={minimizeAppWindow}
+                className="sc-win-btn h-full w-10 flex items-center justify-center transition-colors cursor-pointer"
+                style={{
+                  color: 'var(--sc-text-muted, #a1a1aa)',
+                  borderRadius: 0,
+                }}
+                title="Minimizar janela"
+                aria-label="Minimizar janela"
+              >
+                <Minus className="w-3.5 h-3.5" />
+              </button>
+
+              <button
+                type="button"
+                onClick={closeCurrentAppWindow}
+                className="sc-win-btn-close h-full w-11 flex items-center justify-center transition-all cursor-pointer text-neutral-400 hover:bg-rose-600 hover:text-white"
+                style={{ borderRadius: 0 }}
+                title="Fechar aplicativo"
+                aria-label="Fechar aplicativo"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
 
-        {/* Identidade Central com o Novo Ícone DisCrab (Área Arrastável) */}
+        {/* Corpo Interno Medido Automaticamente para Ajustar a Altura Exata do Cartão */}
         <div
+          ref={lobbyCardRef}
           data-tauri-drag-region
-          className="flex flex-col items-center text-center space-y-2.5 pt-1 cursor-grab active:cursor-grabbing"
+          onMouseDown={handleCardDragMouseDown}
+          className="w-full px-6 pt-4 pb-5 space-y-4"
         >
-          <div className="pointer-events-none">
-            <AppIcon size={68} showLiveDot={true} animated={true} />
+          {/* Identidade Central com o Ícone DisCrab */}
+          <div
+            data-tauri-drag-region
+            className="flex flex-col items-center text-center space-y-2 cursor-default"
+          >
+            <div className="pointer-events-none">
+              <AppIcon size={62} showLiveDot={true} animated={true} />
+            </div>
+            <div className="pointer-events-none">
+              <h2 className="text-xl font-black tracking-wider text-white font-mono">
+                Dis<span className="text-rose-400">Crab</span>
+              </h2>
+              <p className="text-xs text-neutral-400 mt-0.5">
+                Entre na sua Sala Fixa com Nome e Senha ou use Código P2P
+              </p>
+            </div>
           </div>
-          <div className="pointer-events-none">
-            <h2 className="text-xl font-black tracking-wider text-white font-mono">
-              Dis<span className="text-rose-400">Crab</span>
-            </h2>
-            <p className="text-xs text-neutral-400 mt-0.5">
-              Entre na sua Sala Fixa com Nome e Senha ou use Código P2P
-            </p>
-          </div>
-        </div>
 
         {/* Campo 1: Seu Apelido */}
         <div className="space-y-1.5">
@@ -1233,57 +1287,69 @@ export const RoomControl: React.FC<RoomControlProps> = ({
           </div>
         )}
 
-        {errorMsg && (
-          <p className="text-xs font-mono text-red-400 bg-red-950/40 border border-red-900/60 rounded-lg px-3 py-2 text-center">
-            {errorMsg}
-          </p>
-        )}
-
-        {/* Rodapé do Cartão: Abrir Estúdio Local + Tema & CSS e Atualizar App logo abaixo */}
-        <div className="pt-3.5 border-t border-neutral-800/80 space-y-2.5">
-          {onEnterLocalStudio && (
-            <button
-              type="button"
-              onClick={onEnterLocalStudio}
-              className="sc-btn w-full py-2 px-3 rounded-xl bg-neutral-950/90 hover:bg-neutral-800 border border-neutral-800 text-[11px] font-mono text-neutral-300 hover:text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
-            >
-              <Sliders className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-              <span>Abrir Estúdio Local (Testar Câmera, Tela e Áudio)</span>
-            </button>
+          {displayError && (
+            <div className="text-xs font-mono text-red-300 bg-red-950/60 border border-red-800/80 rounded-lg px-3 py-2 flex items-center justify-between gap-2">
+              <span className="text-left flex-1">{displayError}</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setErrorMsg(null);
+                  if (onClearExternalError) onClearExternalError();
+                }}
+                className="text-red-400 hover:text-white p-0.5 cursor-pointer shrink-0"
+                title="Fechar aviso"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
           )}
 
-          {/* Linha de Botões: Tema & CSS + Atualizar App (embaixo do Estúdio Local) */}
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              type="button"
-              onClick={() => setIsCustomizerOpen(true)}
-              onContextMenu={handleCyclePresetRightClick}
-              className="sc-btn py-2 px-3 rounded-xl bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 font-mono text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
-              title={`Tema atual: ${activePreset.name} — Clique para personalizar Tema & CSS | Botão direito alterna o preset`}
-            >
-              <Palette className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-              <span className="truncate">Tema & CSS</span>
-            </button>
+          {/* Rodapé do Cartão: Abrir Estúdio Local + Tema & CSS e Atualizar App logo abaixo */}
+          <div className="pt-3 border-t border-neutral-800/80 space-y-2">
+            {onEnterLocalStudio && (
+              <button
+                type="button"
+                onClick={onEnterLocalStudio}
+                className="sc-btn w-full py-2 px-3 rounded-xl bg-neutral-950/90 hover:bg-neutral-800 border border-neutral-800 text-[11px] font-mono text-neutral-300 hover:text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              >
+                <Sliders className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span>Abrir Estúdio Local (Testar Câmera, Tela e Áudio)</span>
+              </button>
+            )}
 
-            <button
-              type="button"
-              onClick={() => onOpenUpdater && onOpenUpdater()}
-              className={`sc-btn py-2 px-3 rounded-xl border font-mono text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
-                hasUpdateAvailable
-                  ? 'bg-emerald-950/90 hover:bg-emerald-900/90 border-emerald-500 text-emerald-200 shadow-lg shadow-emerald-950/50 animate-pulse'
-                  : 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-cyan-300'
-              }`}
-              title="Verificar atualizações do aplicativo e gerenciar o Cloudflared"
-            >
-              <ArrowUpCircle
-                className={`w-3.5 h-3.5 shrink-0 ${
-                  hasUpdateAvailable ? 'text-emerald-400' : 'text-cyan-400'
+            {/* Linha de Botões: Tema & CSS + Atualizar App (embaixo do Estúdio Local) */}
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => setIsCustomizerOpen(true)}
+                onContextMenu={handleCyclePresetRightClick}
+                className="sc-btn py-2 px-3 rounded-xl bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 font-mono text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                title={`Tema atual: ${activePreset.name} — Clique para personalizar Tema & CSS | Botão direito alterna o preset`}
+              >
+                <Palette className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="truncate">Tema & CSS</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onOpenUpdater && onOpenUpdater()}
+                className={`sc-btn py-2 px-3 rounded-xl border font-mono text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                  hasUpdateAvailable
+                    ? 'bg-emerald-950/90 hover:bg-emerald-900/90 border-emerald-500 text-emerald-200 shadow-lg shadow-emerald-950/50 animate-pulse'
+                    : 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-cyan-300'
                 }`}
-              />
-              <span className="font-semibold truncate">
-                {hasUpdateAvailable ? `Atualizar (${latestTag})` : 'Atualizar App'}
-              </span>
-            </button>
+                title="Verificar atualizações do aplicativo e gerenciar o Cloudflared"
+              >
+                <ArrowUpCircle
+                  className={`w-3.5 h-3.5 shrink-0 ${
+                    hasUpdateAvailable ? 'text-emerald-400' : 'text-cyan-400'
+                  }`}
+                />
+                <span className="font-semibold truncate">
+                  {hasUpdateAvailable ? `Atualizar (${latestTag})` : 'Atualizar App'}
+                </span>
+              </button>
+            </div>
           </div>
         </div>
       </div>

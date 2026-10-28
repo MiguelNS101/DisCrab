@@ -446,8 +446,14 @@ function MainAppWorkspace() {
   const isDesktopTauri = isTauriEnvironment() && !isAndroidEnvironment();
   const prevInWorkspaceRef = useRef<boolean>(false);
 
-  // Alterna o tamanho da janela nativa entre o Cartão de Login (compacto) e a Sala (tamanho normal 1280x820)
+  // Alterna o tamanho da janela nativa e o modo de scroll entre o Cartão de Login (compacto e sem scroll) e a Sala (tamanho normal 1280x820 com scroll)
   useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.setAttribute(
+        'data-view-mode',
+        isInRoomWorkspace ? 'workspace' : 'lobby'
+      );
+    }
     if (isInRoomWorkspace) {
       prevInWorkspaceRef.current = true;
       setAppWindowLayoutMode('workspace', undefined, undefined, true);
@@ -459,7 +465,13 @@ function MainAppWorkspace() {
 
   return (
     <ThemeProvider>
-      <div className="sc-app min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black">
+      <div
+        className={`sc-app bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black ${
+          !isInRoomWorkspace
+            ? 'h-screen w-screen overflow-hidden'
+            : 'min-h-screen overflow-x-hidden'
+        }`}
+      >
         {/* Barra de Moldura Superior (Oculta na tela de Login/Cartão, visível após entrar na Sala/Estúdio) */}
         <Header
           activePid={isScreenSharing && isolateAudio ? getEffectiveAudioPid() : null}
@@ -473,30 +485,15 @@ function MainAppWorkspace() {
         {/* Notificações Toast de Presença (Entrada / Saída de Amigos na Sala) */}
         <PresenceToastContainer toasts={presenceToasts} onDismiss={dismissPresenceToast} />
 
-        {/* MODO 1: TELA INICIAL LIMPA (CARTÃO DE LOGIN COMPACTO) */}
+        {/* MODO 1: TELA INICIAL LIMPA (CARTÃO DE LOGIN COMPACTO SEM SCROLL) */}
         {!isInRoomWorkspace ? (
           <main
             className={
               isDesktopTauri
-                ? 'flex-1 flex flex-col items-stretch justify-center p-0 overflow-hidden'
-                : 'flex-1 flex flex-col items-center justify-center p-4 sm:p-6'
+                ? 'flex-1 w-full h-full flex flex-col items-stretch justify-stretch p-0 overflow-hidden'
+                : 'flex-1 w-full h-full flex flex-col items-center justify-center p-4 sm:p-6 overflow-hidden'
             }
           >
-            {rtcError && (
-              <div className="w-full max-w-md mb-4 bg-red-950/80 border border-red-800 rounded-xl p-3.5 flex items-start justify-between gap-3 text-xs font-mono">
-                <div className="flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
-                  <span className="text-red-200">{rtcError}</span>
-                </div>
-                <button
-                  onClick={clearError}
-                  className="text-red-400 hover:text-white p-0.5 cursor-pointer"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            )}
-
             <RoomControl
               nickname={nickname}
               setNickname={setNickname}
@@ -514,6 +511,8 @@ function MainAppWorkspace() {
               onOpenUpdater={() => setExternalUpdaterOpen(true)}
               onEnterLocalStudio={() => setIsLocalStudio(true)}
               isModalOpen={externalUpdaterOpen}
+              externalError={rtcError}
+              onClearExternalError={clearError}
             />
           </main>
         ) : isShowingRoomTransition && roomDetails ? (

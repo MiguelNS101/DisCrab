@@ -1,4 +1,5 @@
 import { invoke as tauriCoreInvoke, isTauri } from '@tauri-apps/api/core';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { WindowItem } from '../types';
 
 // Utilitário para codificar em Base64 URL-Safe sem padding '='
@@ -269,7 +270,7 @@ export async function getAppSystemInfo(): Promise<AppSystemInfo> {
     return await invokeTauri<AppSystemInfo>('get_app_system_info');
   }
   return {
-    current_version: '1.1.4',
+    current_version: '1.1.5',
     exe_path: 'Modo Web (Navegador)',
     cloudflared: {
       installed: false,
@@ -325,7 +326,7 @@ export async function checkGithubUpdate(
     throw new Error(`GitHub API retornou status ${resp.status} para '${repo}'.`);
   }
   const json = await resp.json();
-  const currentVersion = '1.1.4';
+  const currentVersion = '1.1.5';
   const latestVersion = json.tag_name || currentVersion;
 
   let exeDownloadUrl: string | null = null;
@@ -582,12 +583,11 @@ export async function forwardInviteToLocalDesktopApp(inviteStr: string): Promise
 export async function minimizeAppWindow(): Promise<void> {
   if (isTauriEnvironment()) {
     try {
-      await invokeTauri<void>('window_minimize');
+      await getCurrentWindow().minimize();
       return;
     } catch {
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        await getCurrentWindow().minimize();
+        await invokeTauri<void>('window_minimize');
       } catch {}
     }
   }
@@ -599,7 +599,6 @@ export async function toggleMaximizeAppWindow(): Promise<boolean> {
       return await invokeTauri<boolean>('window_toggle_maximize');
     } catch {
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
         const win = getCurrentWindow();
         const isMax = await win.isMaximized();
         if (isMax) {
@@ -631,7 +630,6 @@ export async function isAppWindowMaximized(): Promise<boolean> {
       return await invokeTauri<boolean>('window_is_maximized');
     } catch {
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
         return await getCurrentWindow().isMaximized();
       } catch {}
     }
@@ -644,12 +642,11 @@ export async function isAppWindowMaximized(): Promise<boolean> {
 export async function startDraggingAppWindow(): Promise<void> {
   if (isTauriEnvironment()) {
     try {
-      await invokeTauri<void>('window_start_dragging');
+      await getCurrentWindow().startDragging();
       return;
     } catch {
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
-        await getCurrentWindow().startDragging();
+        await invokeTauri<void>('window_start_dragging');
       } catch {}
     }
   }
@@ -661,7 +658,6 @@ export async function setAppWindowAlwaysOnTop(alwaysOnTop: boolean): Promise<boo
       return await invokeTauri<boolean>('window_set_always_on_top', { alwaysOnTop });
     } catch {
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
         await getCurrentWindow().setAlwaysOnTop(alwaysOnTop);
         return alwaysOnTop;
       } catch {}
@@ -677,7 +673,6 @@ export async function closeCurrentAppWindow(): Promise<void> {
       return;
     } catch {
       try {
-        const { getCurrentWindow } = await import('@tauri-apps/api/window');
         await getCurrentWindow().close();
         return;
       } catch {}
