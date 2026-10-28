@@ -94,6 +94,8 @@ function MainAppWorkspace() {
 
   // Controle de Popups de Transmissão Flutuantes Individuais
   const [activePopups, setActivePopups] = useState<Record<string, boolean>>({});
+  // Controle de Transmissões Pausadas Manualmente pelo Usuário (botão "Pausar" no LivePlayer)
+  const [pausedStreams, setPausedStreams] = useState<Record<string, boolean>>({});
   // Controle Discreto do Gerenciador de Webcams & Placas de Captura USB
   const [showSourceManager, setShowSourceManager] = useState<boolean>(false);
   // Controle Discreto do Seletor de Janela & Áudio WASAPI (inicia fechado para priorizar as lives)
@@ -409,6 +411,7 @@ function MainAppWorkspace() {
     if (p.hasScreen) {
       const sId = `${p.id}-screen`;
       const savedVol = getStreamVolume(sId, p.nickname, 'screen');
+      const isManuallyPaused = Boolean(pausedStreams[sId]);
       peerStreams.push({
         id: sId,
         peerId: p.id,
@@ -421,7 +424,7 @@ function MainAppWorkspace() {
         fps: p.screenFps || 60,
         volume: savedVol,
         is_muted: savedVol === 0,
-        is_watched: !!p.screenStream,
+        is_watched: !!p.screenStream && !isManuallyPaused,
         isolated_audio: p.hasIsolatedAudio,
         process_name: p.hasIsolatedAudio ? 'WASAPI Process' : undefined,
         stream: p.screenStream,
@@ -433,6 +436,7 @@ function MainAppWorkspace() {
         const mId = `${p.id}-source-${src.source_id}`;
         const savedVol = getStreamVolume(mId, p.nickname, src.source_id);
         const remoteStream = p.mediaStreams?.[src.source_id] || null;
+        const isManuallyPaused = Boolean(pausedStreams[mId]);
         peerStreams.push({
           id: mId,
           peerId: p.id,
@@ -446,7 +450,7 @@ function MainAppWorkspace() {
           fps: src.fps || 30,
           volume: savedVol,
           is_muted: savedVol === 0,
-          is_watched: !!remoteStream,
+          is_watched: !!remoteStream && !isManuallyPaused,
           isolated_audio: false,
           stream: remoteStream,
         });
@@ -454,6 +458,7 @@ function MainAppWorkspace() {
     } else if (p.hasWebcam) {
       const wId = `${p.id}-webcam`;
       const savedVol = getStreamVolume(wId, p.nickname, 'webcam');
+      const isManuallyPaused = Boolean(pausedStreams[wId]);
       peerStreams.push({
         id: wId,
         peerId: p.id,
@@ -466,7 +471,7 @@ function MainAppWorkspace() {
         fps: 30,
         volume: savedVol,
         is_muted: savedVol === 0,
-        is_watched: !!p.webcamStream,
+        is_watched: !!p.webcamStream && !isManuallyPaused,
         isolated_audio: false,
         stream: p.webcamStream,
       });
@@ -474,6 +479,34 @@ function MainAppWorkspace() {
   }
 
   const handleToggleWatch = (stream: StreamItem & { peerId: string }) => {
+    if (stream.is_watched) {
+      // Usuário clicou em "Pausar": desativa a reprodução local e suspende as tracks sem derrubar a conexão P2P
+      setPausedStreams((prev) => ({
+        ...prev,
+        [stream.id]: true,
+      }));
+      if (stream.stream) {
+        stream.stream.getTracks().forEach((t) => {
+          t.enabled = false;
+        });
+      }
+      return;
+    }
+
+    // Usuário clicou em "Assistir Live (On-Demand)" / "Retomar": reativa as tracks e solicita o stream caso ainda não tenha chegado
+    setPausedStreams((prev) => {
+      if (!prev[stream.id]) return prev;
+      const next = { ...prev };
+      delete next[stream.id];
+      return next;
+    });
+
+    if (stream.stream) {
+      stream.stream.getTracks().forEach((t) => {
+        t.enabled = true;
+      });
+    }
+
     if (stream.source_id) {
       requestPeerStream(stream.peerId, `source:${stream.source_id}`);
     } else {

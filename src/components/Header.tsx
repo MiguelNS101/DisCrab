@@ -3,6 +3,7 @@ import {
   getProcessMemory,
   checkGithubUpdate,
   getAppSystemInfo,
+  isStrictlyNewerVersion,
   FIXED_GITHUB_REPO,
   UpdateCheckResult,
 } from '../services/tauriBridge';
@@ -50,13 +51,19 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [memoryMb, setMemoryMb] = useState<number>(38.4);
   const [internalUpdaterOpen, setInternalUpdaterOpen] = useState<boolean>(false);
-  const [hasUpdateAvailable, setHasUpdateAvailable] = useState<boolean>(
-    Boolean(startupCachedResult?.has_update)
+  const [currentVersion, setCurrentVersion] = useState<string>('1.1.6');
+  const [hasUpdateAvailable, setHasUpdateAvailable] = useState<boolean>(() =>
+    Boolean(
+      startupCachedResult?.has_update &&
+        isStrictlyNewerVersion(
+          startupCachedResult.current_version || '1.1.6',
+          startupCachedResult.latest_version
+        )
+    )
   );
   const [latestTag, setLatestTag] = useState<string>(
     startupCachedResult?.latest_version || ''
   );
-  const [currentVersion, setCurrentVersion] = useState<string>('1.1.6');
   const [cachedUpdateResult, setCachedUpdateResult] = useState<UpdateCheckResult | null>(
     startupCachedResult
   );
@@ -72,9 +79,15 @@ export const Header: React.FC<HeaderProps> = ({
 
   const handleUpdateDetected = useCallback(
     (hasUpdate: boolean, tag?: string, result?: UpdateCheckResult) => {
-      setHasUpdateAvailable(hasUpdate);
+      const effectiveCur = result?.current_version || currentVersion || '1.1.6';
+      const effectiveLat = tag || result?.latest_version || '';
+      const verifiedNewer = Boolean(
+        hasUpdate && effectiveLat && isStrictlyNewerVersion(effectiveCur, effectiveLat)
+      );
+      setHasUpdateAvailable(verifiedNewer);
       if (tag) setLatestTag(tag);
       if (result) {
+        result.has_update = verifiedNewer;
         startupCachedResult = result;
         startupUpdateError = null;
         setCachedUpdateResult(result);
@@ -82,12 +95,12 @@ export const Header: React.FC<HeaderProps> = ({
       if (typeof window !== 'undefined') {
         window.dispatchEvent(
           new CustomEvent('sc-update-status', {
-            detail: { hasUpdate, latestTag: tag || '' },
+            detail: { hasUpdate: verifiedNewer, latestTag: effectiveLat },
           })
         );
       }
     },
-    []
+    [currentVersion]
   );
 
   // Monitoramento em tempo real da memória do processo
@@ -129,13 +142,18 @@ export const Header: React.FC<HeaderProps> = ({
       startupUpdateChecked = true;
       startupUpdatePromise = checkGithubUpdate(FIXED_GITHUB_REPO)
         .then((res) => {
+          const verifiedNewer = Boolean(
+            res.has_update &&
+              isStrictlyNewerVersion(res.current_version || '1.1.6', res.latest_version)
+          );
+          res.has_update = verifiedNewer;
           startupCachedResult = res;
           startupUpdateError = null;
           if (typeof window !== 'undefined') {
             window.dispatchEvent(
               new CustomEvent('sc-update-status', {
                 detail: {
-                  hasUpdate: res.has_update,
+                  hasUpdate: verifiedNewer,
                   latestTag: res.latest_version || '',
                 },
               })
@@ -143,13 +161,13 @@ export const Header: React.FC<HeaderProps> = ({
           }
           if (mounted) {
             setCachedUpdateResult(res);
-            setHasUpdateAvailable(res.has_update);
+            setHasUpdateAvailable(verifiedNewer);
             if (res.latest_version) {
               setLatestTag(res.latest_version);
             }
             // No Android, quando há atualização de APK disponível na primeira entrada, abre o modal automaticamente
             if (
-              res.has_update &&
+              verifiedNewer &&
               typeof navigator !== 'undefined' &&
               /android/i.test(navigator.userAgent || '') &&
               (res.apk_download_url || res.download_url)
@@ -167,8 +185,16 @@ export const Header: React.FC<HeaderProps> = ({
           startupUpdatePromise = null;
         });
     } else if (startupCachedResult && mounted) {
+      const verifiedNewer = Boolean(
+        startupCachedResult.has_update &&
+          isStrictlyNewerVersion(
+            startupCachedResult.current_version || '1.1.6',
+            startupCachedResult.latest_version
+          )
+      );
+      startupCachedResult.has_update = verifiedNewer;
       setCachedUpdateResult(startupCachedResult);
-      setHasUpdateAvailable(startupCachedResult.has_update);
+      setHasUpdateAvailable(verifiedNewer);
       if (startupCachedResult.latest_version) {
         setLatestTag(startupCachedResult.latest_version);
       }

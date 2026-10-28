@@ -15,7 +15,234 @@ import {
   FlipHorizontal,
   Tv,
   PowerOff,
+  Activity,
 } from 'lucide-react';
+
+interface AudioWaveformVisualizerProps {
+  stream?: MediaStream | null;
+  isWatched: boolean;
+  isMuted: boolean;
+  isSelf?: boolean;
+  tracksKey: string;
+}
+
+/**
+ * Pequeno visualizador de forma de onda (waveform / espectro) em tempo real para cada stream.
+ * Fornece feedback visual imediato de que o áudio está sendo capturado e transmitido/recebido.
+ */
+const AudioWaveformVisualizer: React.FC<AudioWaveformVisualizerProps> = ({
+  stream,
+  isWatched,
+  isMuted,
+  isSelf = false,
+  tracksKey,
+}) => {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [isSignalActive, setIsSignalActive] = useState(false);
+
+  const hasLiveAudioTrack = Boolean(
+    stream &&
+      isWatched &&
+      stream.getAudioTracks().some((t) => t.readyState === 'live' && t.enabled)
+  );
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx2d = canvas.getContext('2d');
+    if (!ctx2d) return;
+
+    const drawIdleBars = (mutedStyle: boolean) => {
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx2d.clearRect(0, 0, width, height);
+      const barCount = 14;
+      const gap = 2;
+      const barWidth = Math.max(2, Math.floor((width - gap * (barCount - 1)) / barCount));
+      ctx2d.fillStyle = mutedStyle ? 'rgba(239, 68, 68, 0.35)' : 'rgba(82, 82, 91, 0.55)';
+      for (let i = 0; i < barCount; i++) {
+        const x = i * (barWidth + gap);
+        const barH = 3;
+        const y = Math.round((height - barH) / 2);
+        ctx2d.beginPath();
+        ctx2d.roundRect(x, y, barWidth, barH, 1.5);
+        ctx2d.fill();
+      }
+    };
+
+    if (!stream || !isWatched || !hasLiveAudioTrack) {
+      setIsSignalActive(false);
+      drawIdleBars(false);
+      return;
+    }
+
+    const audioTracks = stream.getAudioTracks().filter((t) => t.readyState === 'live');
+    if (audioTracks.length === 0) {
+      setIsSignalActive(false);
+      drawIdleBars(false);
+      return;
+    }
+
+    let audioCtx: AudioContext | null = null;
+    let sourceNode: MediaStreamAudioSourceNode | null = null;
+    let analyser: AnalyserNode | null = null;
+    let rafId = 0;
+    let lastActiveState = false;
+
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      audioCtx = new AudioCtx({ latencyHint: 'interactive' });
+      const audioOnlyStream = new MediaStream(audioTracks);
+      sourceNode = audioCtx.createMediaStreamSource(audioOnlyStream);
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 64;
+      analyser.smoothingTimeConstant = 0.74;
+      // Conecta apenas ao AnalyserNode (NÃO conecta ao destination para jamais duplicar áudio ou causar eco)
+      sourceNode.connect(analyser);
+    } catch {
+      drawIdleBars(false);
+      return;
+    }
+
+    const freqData = new Uint8Array(analyser.frequencyBinCount);
+    const timeData = new Uint8Array(analyser.fftSize);
+
+    const renderFrame = () => {
+      if (!analyser || !canvas) return;
+
+      if (audioCtx && audioCtx.state === 'suspended') {
+        audioCtx.resume().catch(() => {});
+      }
+
+      analyser.getByteFrequencyData(freqData);
+      analyser.getByteTimeDomainData(timeData);
+
+      // Calcula energia RMS do sinal no domínio do tempo para saber se há som real sendo capturado/transmitido
+      let sumSquares = 0;
+      for (let i = 0; i < timeData.length; i++) {
+        const centered = (timeData[i] - 128) / 128;
+        sumSquares += centered * centered;
+      }
+      const rms = Math.sqrt(sumSquares / timeData.length);
+      const activeNow = rms > 0.012;
+      if (activeNow !== lastActiveState) {
+        lastActiveState = activeNow;
+        setIsSignalActive(activeNow);
+      }
+
+      const width = canvas.width;
+      const height = canvas.height;
+      ctx2d.clearRect(0, 0, width, height);
+
+      const barCount = 14;
+      const gap = 2;
+      const barWidth = Math.max(2, Math.floor((width - gap * (barCount - 1)) / barCount));
+      const effectivelyMuted = !isSelf && isMuted;
+
+      for (let i = 0; i < barCount; i++) {
+        const binIndex = Math.min(freqData.length - 1, Math.floor((i * (freqData.length * 0.75)) / barCount));
+        const freqVal = freqData[binIndex] / 255;
+        const timeIdx = Math.min(timeData.length - 1, Math.floor((i * timeData.length) / barCount));
+        const waveDeviation = Math.abs(timeData[timeIdx] - 128) / 128;
+
+        const combined = Math.min(1, freqVal * 0.75 + waveDeviation * 0.85);
+        const minBarH = 3;
+        const maxBarH = height - 2;
+        const barH = Math.max(
+          minBarH,
+          Math.round(minBarH + combined * (maxBarH - minBarH))
+        );
+        const x = i * (barWidth + gap);
+        const y = Math.round((height - barH) / 2);
+
+        if (effectivelyMuted) {
+          ctx2d.fillStyle = combined > 0.08 ? 'rgba(248, 113, 113, 0.7)' : 'rgba(239, 68, 68, 0.3)';
+        } else if (isSelf) {
+          ctx2d.fillStyle =
+            combined > 0.35
+              ? '#34d399'
+              : combined > 0.08
+              ? '#06b6d4'
+              : 'rgba(6, 182, 212, 0.35)';
+        } else {
+          ctx2d.fillStyle =
+            combined > 0.45
+              ? '#22d3ee'
+              : combined > 0.08
+              ? '#06b6d4'
+              : 'rgba(113, 113, 122, 0.45)';
+        }
+
+        ctx2d.beginPath();
+        ctx2d.roundRect(x, y, barWidth, barH, 1.5);
+        ctx2d.fill();
+      }
+
+      rafId = requestAnimationFrame(renderFrame);
+    };
+
+    rafId = requestAnimationFrame(renderFrame);
+
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      try {
+        sourceNode?.disconnect();
+        analyser?.disconnect();
+        audioCtx?.close();
+      } catch {}
+    };
+  }, [stream, isWatched, isMuted, isSelf, hasLiveAudioTrack, tracksKey]);
+
+  return (
+    <div
+      className={`inline-flex items-center gap-1.5 px-2 py-1 rounded border transition-colors ${
+        !hasLiveAudioTrack
+          ? 'bg-neutral-900/60 border-neutral-800 text-neutral-500'
+          : !isSelf && isMuted
+          ? 'bg-red-950/30 border-red-900/50 text-red-300'
+          : isSignalActive
+          ? 'bg-cyan-950/40 border-cyan-500/40 text-cyan-300'
+          : 'bg-neutral-900/80 border-neutral-800 text-neutral-400'
+      }`}
+      title={
+        !hasLiveAudioTrack
+          ? 'Sem sinal de áudio ativo nesta transmissão'
+          : isSelf
+          ? isSignalActive
+            ? 'Áudio sendo capturado e transmitido em tempo real'
+            : 'Canal de áudio ativo (aguardando som)'
+          : isMuted
+          ? 'Áudio recebido em tempo real (mutado localmente para você)'
+          : isSignalActive
+          ? 'Recebendo áudio em tempo real nesta transmissão'
+          : 'Canal de áudio conectado (silêncio no momento)'
+      }
+    >
+      <span
+        className={`w-1.5 h-1.5 rounded-full shrink-0 transition-all ${
+          !hasLiveAudioTrack
+            ? 'bg-neutral-600'
+            : !isSelf && isMuted
+            ? 'bg-red-400'
+            : isSignalActive
+            ? 'bg-emerald-400 shadow-[0_0_6px_#34d399] animate-pulse'
+            : 'bg-cyan-500/60'
+        }`}
+      />
+      <canvas
+        ref={canvasRef}
+        width={68}
+        height={18}
+        className="w-[68px] h-[18px] block shrink-0"
+      />
+      {isSelf && hasLiveAudioTrack && (
+        <span className="text-[9px] font-mono uppercase tracking-wider text-emerald-300 hidden sm:inline">
+          TX
+        </span>
+      )}
+    </div>
+  );
+};
 
 interface LivePlayerProps {
   id: string;
@@ -85,7 +312,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   const streamTracksKey = stream
     ? stream
         .getTracks()
-        .map((t) => `${t.kind}:${t.id}:${t.readyState}`)
+        .map((t) => `${t.kind}:${t.id}:${t.readyState}:${t.enabled}`)
         .join('|')
     : '';
 
@@ -99,7 +326,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   useEffect(() => {
     const el = videoRef.current;
     if (el && stream && isWatched && !isPoppedOut) {
-      stream.getAudioTracks().forEach((t) => {
+      stream.getTracks().forEach((t) => {
         t.enabled = true;
       });
 
@@ -127,6 +354,12 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
           }
         });
     } else {
+      if (el) {
+        try {
+          el.pause();
+          el.srcObject = null;
+        } catch {}
+      }
       setAutoplayBlocked(false);
     }
   }, [stream, streamTracksKey, isWatched, isPoppedOut, isSelf]);
@@ -247,6 +480,8 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
     return 'TELA';
   };
 
+  const hasAudioInStream = Boolean(stream && stream.getAudioTracks().length > 0);
+
   return (
     <div
       ref={containerRef}
@@ -357,7 +592,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 </span>
               )}
 
-              {effectiveKind === 'capture_card' && stream && stream.getAudioTracks().length > 0 && (
+              {effectiveKind === 'capture_card' && hasAudioInStream && (
                 <span className="text-[10px] font-mono bg-emerald-950/85 border border-emerald-700 text-emerald-300 px-2 py-0.5 rounded backdrop-blur flex items-center gap-1">
                   <Volume2 className="w-2.5 h-2.5 text-emerald-400" />
                   Áudio Captura Estéreo
@@ -450,34 +685,37 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
             </div>
           </>
         ) : (
-          /* Estado On-Demand Desativado (Economia de Banda e CPU) */
+          /* Estado Pausado / On-Demand Desativado (Economia de Banda e CPU) */
           <div className="text-center p-6 space-y-3">
             <div className="w-12 h-12 rounded-full bg-neutral-900 border border-neutral-800 flex items-center justify-center mx-auto text-neutral-500">
               <EyeOff className="w-6 h-6" />
             </div>
             <div>
               <h4 className="text-xs font-mono font-bold text-neutral-300">
-                {userName} está transmitindo{' '}
-                {effectiveKind === 'screen'
-                  ? 'a Tela'
-                  : effectiveKind === 'capture_card'
-                  ? 'Placa de Captura'
-                  : 'Câmera'}
+                {stream ? 'Transmissão Pausada Localmente' : `${userName} está transmitindo`}{' '}
+                {!stream &&
+                  (effectiveKind === 'screen'
+                    ? 'a Tela'
+                    : effectiveKind === 'capture_card'
+                    ? 'Placa de Captura'
+                    : 'Câmera')}
               </h4>
               <p className="text-[11px] text-neutral-500 font-mono">
-                {title} ({resolution} · {fps} FPS)
+                {userName} · {title} ({resolution} · {fps} FPS)
               </p>
             </div>
             <div className="flex items-center justify-center gap-2">
               <button
+                type="button"
                 onClick={onToggleWatch}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 border border-cyan-500/40 text-cyan-300 text-xs font-mono font-semibold rounded cursor-pointer transition-all shadow-sm"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/15 hover:bg-cyan-500/25 border border-cyan-500/50 text-cyan-300 text-xs font-mono font-semibold rounded cursor-pointer transition-all shadow-sm"
               >
                 <Eye className="w-3.5 h-3.5" />
-                Assistir Live (On-Demand)
+                {stream ? 'Retomar Transmissão' : 'Assistir Live (On-Demand)'}
               </button>
               {onResetConnection && !isSelf && (
                 <button
+                  type="button"
                   onClick={onResetConnection}
                   className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 text-neutral-400 hover:text-cyan-300 text-xs font-mono rounded cursor-pointer transition-all"
                   title="Resetar conexão P2P com este participante"
@@ -490,19 +728,21 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
         )}
       </div>
 
-      {/* Controles de Áudio & Volume Individual com Memória Persistente */}
+      {/* Controles de Áudio, Visualizador de Forma de Onda em Tempo Real & Volume Individual */}
       <div
         onWheel={handleVolumeWheel}
         className="p-3 bg-neutral-950/80 border-t border-neutral-800 flex items-center justify-between gap-2 flex-wrap"
       >
-        <div className="flex items-center gap-2">
-          {effectiveKind === 'webcam' && (!stream || stream.getAudioTracks().length === 0) ? (
-            <span className="text-[11px] font-mono text-neutral-500 bg-neutral-900/70 border border-neutral-800 px-2.5 py-1 rounded">
+        <div className="flex items-center gap-2 flex-wrap">
+          {effectiveKind === 'webcam' && !hasAudioInStream ? (
+            <span className="text-[11px] font-mono text-neutral-500 bg-neutral-900/70 border border-neutral-800 px-2.5 py-1 rounded flex items-center gap-1.5">
+              <Activity className="w-3 h-3 text-neutral-600" />
               Câmera (Apenas Vídeo · Sem Áudio)
             </span>
           ) : (
             <>
               <button
+                type="button"
                 onClick={onToggleMute}
                 disabled={isSelf}
                 className={`p-1.5 rounded border cursor-pointer transition-colors ${
@@ -527,6 +767,15 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                 )}
               </button>
 
+              {/* Visualizador de Forma de Onda (Waveform) em Tempo Real para confirmar captura e transmissão de áudio */}
+              <AudioWaveformVisualizer
+                stream={stream}
+                isWatched={isWatched}
+                isMuted={isMuted}
+                isSelf={isSelf}
+                tracksKey={streamTracksKey}
+              />
+
               {/* Slider de Volume Individual (0% até 200% boost) com salvamento automático */}
               <div className="flex items-center gap-2">
                 <input
@@ -538,7 +787,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
                   onDoubleClick={() => !isSelf && handleVolumeUpdate(100)}
                   disabled={isSelf}
                   title="Arraste ou use a roda do mouse para ajustar a altura do áudio até 200% (duplo clique volta para 100%). Salvo automaticamente."
-                  className="w-24 sm:w-28 accent-cyan-400 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
+                  className="w-20 sm:w-24 accent-cyan-400 h-1.5 bg-neutral-800 rounded-lg cursor-pointer"
                 />
                 <span
                   onClick={() => !isSelf && handleVolumeUpdate(100)}
@@ -574,6 +823,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
           {/* Botão explícito para Inverter / Espelhar qualquer fonte */}
           {isWatched && onToggleMirror && (
             <button
+              type="button"
               onClick={onToggleMirror}
               className={`text-[11px] font-mono flex items-center gap-1.5 cursor-pointer px-2 py-1 rounded border transition-colors ${
                 isMirrored
@@ -590,6 +840,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
           {/* Botão de Destacar em Popup */}
           {isWatched && onOpenPopup && !isPoppedOut && (
             <button
+              type="button"
               onClick={onOpenPopup}
               className="text-[11px] font-mono text-cyan-400 hover:text-cyan-300 flex items-center gap-1.5 cursor-pointer bg-cyan-950/40 hover:bg-cyan-950/80 border border-cyan-800/60 px-2 py-1 rounded transition-colors"
               title="Abrir esta live em janela popup com tamanho e qualidade ajustáveis"
@@ -602,9 +853,10 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
           {/* Botão de Pausar Visualização */}
           {isWatched && !isSelf && (
             <button
+              type="button"
               onClick={onToggleWatch}
-              className="text-[11px] font-mono text-neutral-400 hover:text-neutral-200 flex items-center gap-1 cursor-pointer"
-              title="Economizar banda parando de assistir este stream"
+              className="text-[11px] font-mono text-neutral-300 hover:text-amber-300 bg-neutral-900 hover:bg-amber-950/40 border border-neutral-800 hover:border-amber-700/60 px-2 py-1 rounded flex items-center gap-1 cursor-pointer transition-colors"
+              title="Pausar reprodução deste stream para economizar CPU/GPU e áudio"
             >
               <EyeOff className="w-3.5 h-3.5" />
               <span>Pausar</span>

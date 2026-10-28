@@ -127,24 +127,28 @@ pub fn normalize_github_repo(input: &str) -> Result<String, String> {
     Ok(format!("{}/{}", parts[0], parts[1]))
 }
 
-/// Compara duas versões semânticas (ex: "1.0.0" vs "v1.1.0")
+/// Compara duas versões semânticas estritamente (retorna `true` SOMENTE se `latest > current`, ex: "1.1.5" vs "v1.1.6" -> true; "1.1.6" vs "v1.1.5" -> false)
 pub fn is_newer_version(current: &str, latest: &str) -> bool {
-    let clean_cur = current.trim().trim_start_matches(['v', 'V']);
-    let clean_lat = latest.trim().trim_start_matches(['v', 'V']);
+    let parse_semver = |s: &str| -> Vec<u32> {
+        let trimmed = s.trim().trim_start_matches(['v', 'V']);
+        // Isola apenas o núcleo numérico major.minor.patch antes de sufixos (-beta, +build, etc.)
+        let core = trimmed
+            .split(|c: char| !c.is_ascii_digit() && c != '.')
+            .find(|segment| !segment.is_empty() && segment.chars().any(|c| c.is_ascii_digit()))
+            .unwrap_or("");
 
-    if clean_cur == clean_lat {
-        return false;
-    }
-
-    let parse_parts = |s: &str| -> Vec<u32> {
-        s.split(|c: char| !c.is_ascii_digit())
+        core.split('.')
             .filter(|p| !p.is_empty())
             .filter_map(|p| p.parse::<u32>().ok())
             .collect()
     };
 
-    let cur_parts = parse_parts(clean_cur);
-    let lat_parts = parse_parts(clean_lat);
+    let cur_parts = parse_semver(current);
+    let lat_parts = parse_semver(latest);
+
+    if cur_parts.is_empty() || lat_parts.is_empty() {
+        return false;
+    }
 
     let max_len = std::cmp::max(cur_parts.len(), lat_parts.len());
     for i in 0..max_len {
@@ -157,7 +161,7 @@ pub fn is_newer_version(current: &str, latest: &str) -> bool {
         }
     }
 
-    clean_lat != clean_cur
+    false
 }
 
 /// Realiza a troca atômica do executável atual (funciona tanto para modo Portable quanto modo Instalado em %LOCALAPPDATA%).
@@ -746,7 +750,11 @@ mod tests {
     fn test_is_newer_version_semantics() {
         assert!(is_newer_version("1.1.2", "v1.1.3"));
         assert!(is_newer_version("1.0.0", "1.1.0"));
+        assert!(is_newer_version("1.1.5", "v1.1.6"));
         assert!(!is_newer_version("1.1.3", "v1.1.3"));
+        assert!(!is_newer_version("1.1.6", "v1.1.6"));
+        assert!(!is_newer_version("1.1.6", "v1.1.5"));
+        assert!(!is_newer_version("1.1.6", "1.1.5"));
         assert!(!is_newer_version("1.2.0", "v1.1.9"));
     }
 

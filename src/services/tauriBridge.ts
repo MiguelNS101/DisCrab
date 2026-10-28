@@ -288,6 +288,36 @@ export async function ensureCloudflaredBinary(): Promise<CloudflaredStatus> {
 
 export const FIXED_GITHUB_REPO = 'MiguelNS101/StreamCompanion';
 
+// Compara duas versões semânticas estritamente (retorna true SOMENTE se latest > current; nunca marca versões antigas como atualização)
+export function isStrictlyNewerVersion(current: string, latest: string): boolean {
+  const parseSemver = (v: string): number[] => {
+    const cleaned = String(v || '')
+      .trim()
+      .replace(/^[vV]+/, '');
+    const match = cleaned.match(/\d+(?:\.\d+)*/);
+    if (!match) return [];
+    return match[0]
+      .split('.')
+      .map((n) => parseInt(n, 10))
+      .filter((n) => !Number.isNaN(n));
+  };
+
+  const curParts = parseSemver(current);
+  const latParts = parseSemver(latest);
+  if (curParts.length === 0 || latParts.length === 0) {
+    return false;
+  }
+
+  const maxLen = Math.max(curParts.length, latParts.length);
+  for (let i = 0; i < maxLen; i++) {
+    const c = curParts[i] ?? 0;
+    const l = latParts[i] ?? 0;
+    if (l > c) return true;
+    if (l < c) return false;
+  }
+  return false;
+}
+
 // Verifica a última Release no GitHub Releases (extraindo .exe para Windows e .apk para Android)
 export async function checkGithubUpdate(
   repoInput: string = FIXED_GITHUB_REPO
@@ -299,6 +329,8 @@ export async function checkGithubUpdate(
     const res = await invokeTauri<UpdateCheckResult>('check_github_update', {
       repo: effectiveRepo,
     });
+    // Garante validação semântica estrita também no lado TypeScript (latest > current)
+    res.has_update = isStrictlyNewerVersion(res.current_version || '1.1.6', res.latest_version);
     if (preferApk && res.apk_download_url) {
       res.download_url = res.apk_download_url;
       res.asset_name = res.apk_asset_name || res.asset_name;
@@ -373,13 +405,10 @@ export async function checkGithubUpdate(
     ? apkSizeMb || exeSizeMb
     : exeSizeMb || apkSizeMb;
 
-  const cleanCur = currentVersion.replace(/^[vV]/, '');
-  const cleanLat = String(latestVersion).replace(/^[vV]/, '');
-
   return {
     current_version: currentVersion,
     latest_version: latestVersion,
-    has_update: cleanCur !== cleanLat,
+    has_update: isStrictlyNewerVersion(currentVersion, String(latestVersion)),
     release_title: json.name || latestVersion,
     release_notes: json.body || 'Sem notas de versão.',
     published_at: json.published_at || '',

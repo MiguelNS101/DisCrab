@@ -39,6 +39,7 @@ import {
   startDraggingAppWindow,
   setAppWindowAlwaysOnTop,
   setAppWindowLayoutMode,
+  isStrictlyNewerVersion,
 } from '../services/tauriBridge';
 import { AppIcon } from './AppIcon';
 import { useTheme, THEME_PRESETS } from '../context/ThemeContext';
@@ -151,9 +152,13 @@ export const RoomControl: React.FC<RoomControlProps> = ({
   const { theme, applyPreset, isCustomizerOpen, setIsCustomizerOpen } = useTheme();
   const lobbyCardRef = useRef<HTMLDivElement | null>(null);
   const [isCardPinned, setIsCardPinned] = useState<boolean>(false);
-  const [hasUpdateAvailable, setHasUpdateAvailable] = useState<boolean>(
-    () => Boolean(getStartupUpdateState().result?.has_update)
-  );
+  const [hasUpdateAvailable, setHasUpdateAvailable] = useState<boolean>(() => {
+    const res = getStartupUpdateState().result;
+    return Boolean(
+      res?.has_update &&
+        isStrictlyNewerVersion(res.current_version || '1.1.6', res.latest_version)
+    );
+  });
   const [latestTag, setLatestTag] = useState<string>(
     () => getStartupUpdateState().result?.latest_version || ''
   );
@@ -162,7 +167,14 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     const syncFromStartup = () => {
       const st = getStartupUpdateState();
       if (st.result) {
-        setHasUpdateAvailable(Boolean(st.result.has_update));
+        const verified = Boolean(
+          st.result.has_update &&
+            isStrictlyNewerVersion(
+              st.result.current_version || '1.1.6',
+              st.result.latest_version
+            )
+        );
+        setHasUpdateAvailable(verified);
         setLatestTag(st.result.latest_version || '');
       }
     };
@@ -171,8 +183,12 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     const onUpdateStatus = (ev: Event) => {
       const custom = ev as CustomEvent<{ hasUpdate: boolean; latestTag: string }>;
       if (custom.detail) {
-        setHasUpdateAvailable(Boolean(custom.detail.hasUpdate));
-        setLatestTag(custom.detail.latestTag || '');
+        const tag = custom.detail.latestTag || '';
+        const verified = Boolean(
+          custom.detail.hasUpdate && tag && isStrictlyNewerVersion('1.1.6', tag)
+        );
+        setHasUpdateAvailable(verified);
+        setLatestTag(tag);
       }
     };
     window.addEventListener('sc-update-status', onUpdateStatus);

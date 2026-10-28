@@ -21,6 +21,7 @@ import {
   checkGithubUpdate,
   installGithubUpdate,
   runSystemDiagnostics,
+  isStrictlyNewerVersion,
   FIXED_GITHUB_REPO,
   AppSystemInfo,
   UpdateCheckResult,
@@ -87,6 +88,11 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
     setUpdateError(null);
     try {
       const res = await checkGithubUpdate(FIXED_GITHUB_REPO);
+      const effectiveCur =
+        systemInfo?.current_version || res.current_version || '1.1.6';
+      res.has_update = Boolean(
+        res.has_update && isStrictlyNewerVersion(effectiveCur, res.latest_version)
+      );
       setUpdateResult(res);
       onUpdateDetectedRef.current?.(res.has_update, res.latest_version, res);
     } catch (err: any) {
@@ -94,7 +100,7 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
     } finally {
       setIsCheckingUpdate(false);
     }
-  }, []);
+  }, [systemInfo?.current_version]);
 
   const handleRunDiagnostics = useCallback(async () => {
     setIsRunningDiag(true);
@@ -256,7 +262,7 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
               </div>
 
               <span className="text-[10px] px-2 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-neutral-300">
-                Versão Atual: <strong className="text-white">v{systemInfo?.current_version || '1.1.0'}</strong>
+                Versão Atual: <strong className="text-white">v{systemInfo?.current_version || '1.1.6'}</strong>
               </span>
             </div>
 
@@ -307,13 +313,17 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
                     )}
                   </div>
 
-                  {updateResult.has_update ? (
+                  {updateResult.has_update &&
+                  isStrictlyNewerVersion(
+                    systemInfo?.current_version || updateResult.current_version || '1.1.6',
+                    updateResult.latest_version
+                  ) ? (
                     <span className="text-[10px] px-2.5 py-1 rounded-full bg-emerald-500/20 border border-emerald-500 text-emerald-300 font-bold animate-pulse">
                       Nova Atualização Disponível!
                     </span>
                   ) : (
                     <span className="text-[10px] px-2.5 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-neutral-300">
-                      Você já está na versão mais recente
+                      Você já está na versão mais recente (v{systemInfo?.current_version || updateResult.current_version || '1.1.6'})
                     </span>
                   )}
                 </div>
