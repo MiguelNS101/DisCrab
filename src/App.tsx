@@ -195,39 +195,99 @@ function MainAppWorkspace() {
     []
   );
 
-  // Monitora alterações na lista de participantes para disparar toasts quando amigos entram ou saem
+  // Filtra e deduplica visualmente participantes com o mesmo apelido (ex: quando a internet de um amigo oscila
+  // e ele reconecta várias vezes antes da sessão anterior expirar), priorizando a sessão ativa/mais recente
+  // sem alterar absolutamente nada na lógica interna de conexão WebRTC.
+  const visiblePeers = React.useMemo(() => {
+    const scorePeer = (p: (typeof peers)[number], index: number): number => {
+      let score = index; // Em caso de empate, prioriza a sessão mais recente (maior índice)
+      if (p.connectionState === 'connected') score += 10000;
+      else if (p.connectionState === 'connecting' || p.connectionState === 'new') score += 2000;
+      if (p.screenStream || p.webcamStream) score += 5000;
+      if (p.mediaStreams && Object.keys(p.mediaStreams).length > 0) score += 4000;
+      if (p.hasScreen || p.hasWebcam || (p.mediaSources && p.mediaSources.length > 0)) {
+        score += 1000;
+      }
+      return score;
+    };
+
+    const byKey = new Map<string, { peer: (typeof peers)[number]; score: number; order: number }>();
+    let placeholderTaken = false;
+
+    peers.forEach((p, idx) => {
+      const rawName = (p.nickname || '').trim();
+      const isPlaceholder = !rawName || rawName === 'Conectando...';
+
+      if (isPlaceholder) {
+        if (
+          p.connectionState === 'disconnected' ||
+          p.connectionState === 'failed' ||
+          p.connectionState === 'closed' ||
+          placeholderTaken
+        ) {
+          return;
+        }
+        placeholderTaken = true;
+        byKey.set(`__connecting_${p.id}`, {
+          peer: p,
+          score: scorePeer(p, idx),
+          order: idx,
+        });
+        return;
+      }
+
+      const key = rawName.toLowerCase();
+      const candidateScore = scorePeer(p, idx);
+      const existing = byKey.get(key);
+
+      if (!existing) {
+        byKey.set(key, { peer: p, score: candidateScore, order: idx });
+      } else if (candidateScore >= existing.score) {
+        byKey.set(key, { peer: p, score: candidateScore, order: existing.order });
+      }
+    });
+
+    return Array.from(byKey.values())
+      .sort((a, b) => a.order - b.order)
+      .map((entry) => entry.peer);
+  }, [peers]);
+
+  // Monitora alterações na lista visual deduplicada de participantes para disparar toasts quando amigos entram ou saem
   useEffect(() => {
     if (!isConnected) {
       knownPeersRef.current.clear();
       return;
     }
 
-    const currentIds = new Set<string>();
-    const totalNow = peers.length + 1;
+    const currentKeys = new Set<string>();
+    const totalNow = visiblePeers.length + 1;
 
-    for (const p of peers) {
-      currentIds.add(p.id);
-      const isPlaceholderName = !p.nickname || p.nickname === 'Conectando...';
+    for (const p of visiblePeers) {
+      const rawName = (p.nickname || '').trim();
+      const isPlaceholderName = !rawName || rawName === 'Conectando...';
+      if (isPlaceholderName) {
+        // Aguarda o apelido definitivo do amigo chegar antes de notificar
+        continue;
+      }
 
-      if (!knownPeersRef.current.has(p.id)) {
-        if (isPlaceholderName) {
-          // Aguarda o apelido definitivo do amigo chegar antes de notificar
-          continue;
-        }
-        knownPeersRef.current.set(p.id, { nickname: p.nickname, isHost: p.isHost });
+      const peerKey = rawName.toLowerCase();
+      currentKeys.add(peerKey);
+
+      if (!knownPeersRef.current.has(peerKey)) {
+        knownPeersRef.current.set(peerKey, { nickname: p.nickname, isHost: p.isHost });
         pushPresenceToast('join', p.nickname, p.isHost, totalNow);
-      } else if (!isPlaceholderName) {
-        knownPeersRef.current.set(p.id, { nickname: p.nickname, isHost: p.isHost });
+      } else {
+        knownPeersRef.current.set(peerKey, { nickname: p.nickname, isHost: p.isHost });
       }
     }
 
-    for (const [oldId, oldMeta] of Array.from(knownPeersRef.current.entries())) {
-      if (!currentIds.has(oldId)) {
-        knownPeersRef.current.delete(oldId);
+    for (const [oldKey, oldMeta] of Array.from(knownPeersRef.current.entries())) {
+      if (!currentKeys.has(oldKey)) {
+        knownPeersRef.current.delete(oldKey);
         pushPresenceToast('leave', oldMeta.nickname, oldMeta.isHost, totalNow);
       }
     }
-  }, [peers, isConnected, pushPresenceToast]);
+  }, [visiblePeers, isConnected, pushPresenceToast]);
 
   // Limpa timers pendentes ao desmontar
   useEffect(() => {
@@ -343,9 +403,9 @@ function MainAppWorkspace() {
     }
   }, [isConnected, roomDetails]);
 
-  // Monta a lista de streams estritamente REAIS a partir dos peers conectados
+  // Monta a lista de streams estritamente REAIS a partir dos peers únicos visíveis
   const peerStreams: (StreamItem & { peerId: string; connectionState: RTCPeerConnectionState })[] = [];
-  for (const p of peers) {
+  for (const p of visiblePeers) {
     if (p.hasScreen) {
       const sId = `${p.id}-screen`;
       const savedVol = getStreamVolume(sId, p.nickname, 'screen');
@@ -688,9 +748,9 @@ function MainAppWorkspace() {
                 <div className="flex items-center gap-3 text-xs font-mono text-neutral-400">
                   <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800">
                     <Users className="w-3.5 h-3.5 text-cyan-400" />
-                    Na Sala: <strong className="text-white">{peers.length + 1}</strong>
+                    Na Sala: <strong className="text-white">{visiblePeers.length + 1}</strong>
                   </span>
-                  {isConnected && peers.length > 0 && (
+                  {isConnected && visiblePeers.length > 0 && (
                     <button
                       onClick={reconnectAllPeers}
                       className="inline-flex items-center gap-1 px-2.5 py-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-cyan-700 text-cyan-300 rounded-lg cursor-pointer transition-colors"
@@ -933,12 +993,12 @@ function MainAppWorkspace() {
                     activeAudioLabel={getEffectiveAudioLabel()}
                   />
 
-                  {/* Resumo dos Participantes Conectados na Sala */}
+                  {/* Resumo dos Participantes Conectados na Sala (Deduplicado por Apelido) */}
                   <div className="pt-2.5 border-t border-neutral-800/80 flex items-center justify-between flex-wrap gap-2 text-xs font-mono">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-[11px] text-neutral-400 flex items-center gap-1.5">
                         <Users className="w-3.5 h-3.5 text-cyan-400" />
-                        Participantes ({peers.length + 1}):
+                        Participantes ({visiblePeers.length + 1}):
                       </span>
 
                       {/* Próprio Usuário */}
@@ -947,12 +1007,12 @@ function MainAppWorkspace() {
                         <span>{nickname} (Você)</span>
                       </span>
 
-                      {/* Amigos Conectados */}
-                      {peers.map((p) => {
+                      {/* Amigos Conectados (Sem Duplicatas Visuais) */}
+                      {visiblePeers.map((p) => {
                         const isPeerOk = p.connectionState === 'connected';
                         return (
                           <span
-                            key={p.id}
+                            key={p.nickname ? p.nickname.toLowerCase() : p.id}
                             className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-neutral-950 border border-neutral-800 text-neutral-200 text-[11px]"
                             title={`Estado P2P: ${p.connectionState}`}
                           >
@@ -1010,7 +1070,7 @@ function MainAppWorkspace() {
                   messages={chatMessages}
                   onSendMessage={handleSendMessage}
                   isConnected={isConnected}
-                  peerCount={peers.length}
+                  peerCount={visiblePeers.length}
                   myNickname={nickname}
                 />
               </div>
@@ -1124,7 +1184,7 @@ function MainAppWorkspace() {
           <PerformanceDrawer
             logs={performanceLogs}
             telemetryHistory={telemetryHistory}
-            peers={peers}
+            peers={visiblePeers}
             onClearLogs={clearPerformanceLogs}
             myNickname={nickname}
             selectedWindow={selectedWindow}
