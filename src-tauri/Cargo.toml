@@ -1,6 +1,6 @@
 [package]
 name = "stream-companion"
-version = "1.1.5"
+version = "1.1.6"
 description = "DisCrab - Ultra-lightweight P2P screen & audio streaming with WASAPI process loopback and Android DSP"
 authors = ["DisCrab Team"]
 edition = "2021"

@@ -56,7 +56,7 @@ export const Header: React.FC<HeaderProps> = ({
   const [latestTag, setLatestTag] = useState<string>(
     startupCachedResult?.latest_version || ''
   );
-  const [currentVersion, setCurrentVersion] = useState<string>('1.1.5');
+  const [currentVersion, setCurrentVersion] = useState<string>('1.1.6');
   const [cachedUpdateResult, setCachedUpdateResult] = useState<UpdateCheckResult | null>(
     startupCachedResult
   );

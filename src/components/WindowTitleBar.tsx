@@ -40,7 +40,7 @@ interface WindowTitleBarProps {
 }
 
 export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
-  currentVersion = '1.1.5',
+  currentVersion = '1.1.6',
   isInRoom = false,
   activeProcessName,
   activePid,

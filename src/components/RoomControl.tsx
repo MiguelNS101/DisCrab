@@ -870,7 +870,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
                     border: '1px solid rgba(var(--sc-accent-rgb, 6, 182, 212), 0.28)',
                   }}
                 >
-                  v1.1.5
+                  v1.1.6
                 </span>
               </div>
             </div>
