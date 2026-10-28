@@ -350,6 +350,189 @@ fn close_app(state: State<'_, AppState>) {
     std::process::exit(0);
 }
 
+/// Aplica cantos arredondados nativos (Windows 11 DWM) e sombra escura em janelas sem barra padrão (decorations: false)
+#[cfg(windows)]
+fn apply_windows_frameless_dwm_style(win: &tauri::WebviewWindow) {
+    if let Ok(hwnd) = win.hwnd() {
+        unsafe {
+            use windows::Win32::Foundation::HWND;
+            use windows::Win32::Graphics::Dwm::{
+                DwmSetWindowAttribute, DWMWINDOWATTRIBUTE, DWM_WINDOW_CORNER_PREFERENCE,
+                DWMWCP_ROUND,
+            };
+            let raw_hwnd = HWND(hwnd.0 as *mut _);
+            let dark_mode: i32 = 1;
+            // DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+            let _ = DwmSetWindowAttribute(
+                raw_hwnd,
+                DWMWINDOWATTRIBUTE(20),
+                &dark_mode as *const _ as *const _,
+                std::mem::size_of::<i32>() as u32,
+            );
+            // DWMWA_WINDOW_CORNER_PREFERENCE = 33 (DWMWCP_ROUND = 2)
+            let corner_pref: DWM_WINDOW_CORNER_PREFERENCE = DWMWCP_ROUND;
+            let _ = DwmSetWindowAttribute(
+                raw_hwnd,
+                DWMWINDOWATTRIBUTE(33),
+                &corner_pref as *const _ as *const _,
+                std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+            );
+        }
+    }
+}
+
+/// Minimiza a janela atual (barra de título customizada)
+#[tauri::command]
+fn window_minimize(window: tauri::Window) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        window.minimize().map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = window;
+    }
+    Ok(())
+}
+
+/// Alterna entre Maximizar e Restaurar a janela atual e retorna o novo estado
+#[tauri::command]
+fn window_toggle_maximize(window: tauri::Window) -> Result<bool, String> {
+    #[cfg(desktop)]
+    {
+        let is_max = window.is_maximized().unwrap_or(false);
+        if is_max {
+            window.unmaximize().map_err(|e| e.to_string())?;
+            Ok(false)
+        } else {
+            window.maximize().map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = window;
+        Ok(false)
+    }
+}
+
+/// Consulta se a janela atual está maximizada
+#[tauri::command]
+fn window_is_maximized(window: tauri::Window) -> Result<bool, String> {
+    #[cfg(desktop)]
+    {
+        Ok(window.is_maximized().unwrap_or(false))
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = window;
+        Ok(false)
+    }
+}
+
+/// Inicia o arraste nativo da janela pela barra de título customizada
+#[tauri::command]
+fn window_start_dragging(window: tauri::Window) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        let _ = window.start_dragging();
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = window;
+    }
+    Ok(())
+}
+
+/// Fixa ou desafixa a janela atual Sempre no Topo (Always on Top)
+#[tauri::command]
+fn window_set_always_on_top(window: tauri::Window, always_on_top: bool) -> Result<bool, String> {
+    #[cfg(desktop)]
+    {
+        window
+            .set_always_on_top(always_on_top)
+            .map_err(|e| e.to_string())?;
+        Ok(always_on_top)
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (window, always_on_top);
+        Ok(false)
+    }
+}
+
+/// Fecha a janela atual: se for a janela principal ("main"), encerra o app e processos filhos; se for popup, fecha apenas o popup
+#[tauri::command]
+fn window_close_current(window: tauri::Window, state: State<'_, AppState>) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        if window.label() == "main" {
+            close_app(state);
+        } else {
+            let _ = window.close();
+        }
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (window, state);
+    }
+    Ok(())
+}
+
+/// Alterna o tamanho da janela nativa entre o Modo Cartão de Login ("lobby") e o Modo Sala Completa ("workspace")
+#[tauri::command]
+fn window_set_layout_mode(
+    window: tauri::Window,
+    mode: String,
+    card_width: Option<f64>,
+    card_height: Option<f64>,
+    recenter: Option<bool>,
+) -> Result<(), String> {
+    #[cfg(desktop)]
+    {
+        if window.label() != "main" {
+            return Ok(());
+        }
+        if mode == "lobby" {
+            if window.is_maximized().unwrap_or(false) {
+                let _ = window.unmaximize();
+            }
+            let target_w = card_width.unwrap_or(460.0).clamp(400.0, 560.0);
+            let target_h = card_height.unwrap_or(680.0).clamp(480.0, 920.0);
+            let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+                width: 420.0,
+                height: 480.0,
+            })));
+            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                width: target_w,
+                height: target_h,
+            }));
+            if recenter.unwrap_or(false) {
+                let _ = window.center();
+            }
+        } else {
+            let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+                width: 960.0,
+                height: 640.0,
+            })));
+            if !window.is_maximized().unwrap_or(false) {
+                let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                    width: 1280.0,
+                    height: 820.0,
+                }));
+                if recenter.unwrap_or(true) {
+                    let _ = window.center();
+                }
+            }
+        }
+    }
+    #[cfg(not(desktop))]
+    {
+        let _ = (window, mode, card_width, card_height, recenter);
+    }
+    Ok(())
+}
+
 /// Retorna informações da versão atual do executável e status do cloudflared
 #[tauri::command]
 fn get_app_system_info() -> AppSystemInfo {
@@ -456,7 +639,7 @@ async fn open_stream_popup_window(
         .inner_size(960.0, 580.0)
         .min_inner_size(420.0, 260.0)
         .resizable(true)
-        .decorations(true)
+        .decorations(false)
         .center()
         .build()
         .map_err(|e| format!("Falha ao abrir nova janela nativa do SO: {}", e))?;
@@ -466,6 +649,9 @@ async fn open_stream_popup_window(
             let app_icon = tauri::image::Image::new(raw_icon_rgba, 64, 64);
             let _ = win.set_icon(app_icon);
         }
+
+        #[cfg(windows)]
+        apply_windows_frameless_dwm_style(&win);
 
         let _ = win.show();
         let _ = win.set_focus();
@@ -807,19 +993,24 @@ fn find_window_pid(label: String) -> Option<u32> {
 }
 
 #[cfg(windows)]
+static JOB_HANDLE: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
+
+#[cfg(windows)]
 fn assign_to_job_object() {
     use windows::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
         SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_BREAKAWAY_OK, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
     };
     use windows::Win32::System::Threading::GetCurrentProcess;
 
     unsafe {
         if let Ok(job) = CreateJobObjectW(None, None) {
             let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-            info.BasicLimitInformation.LimitFlags =
-                JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+                | JOB_OBJECT_LIMIT_BREAKAWAY_OK
+                | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
             let res = SetInformationJobObject(
                 job,
                 JobObjectExtendedLimitInformation,
@@ -827,7 +1018,39 @@ fn assign_to_job_object() {
                 std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             );
             if res.is_ok() {
-                let _ = AssignProcessToJobObject(job, GetCurrentProcess());
+                if AssignProcessToJobObject(job, GetCurrentProcess()).is_ok() {
+                    JOB_HANDLE.store(job.0 as isize, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        }
+    }
+}
+
+/// Desativa a flag JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE antes de reiniciar pelo atualizador,
+/// garantindo que o novo processo do DisCrab nunca seja encerrado pelo kernel quando o antigo fechar.
+pub fn disable_job_kill_on_close() {
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::JobObjects::{
+            JobObjectExtendedLimitInformation, SetInformationJobObject,
+            JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
+            JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK,
+        };
+
+        let raw = JOB_HANDLE.load(std::sync::atomic::Ordering::SeqCst);
+        if raw != 0 {
+            unsafe {
+                let job = HANDLE(raw as *mut std::ffi::c_void);
+                let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+                info.BasicLimitInformation.LimitFlags =
+                    JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+                let _ = SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const std::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
             }
         }
     }
@@ -968,11 +1191,13 @@ pub fn run() {
             #[cfg(desktop)]
             {
                 let raw_icon_rgba = include_bytes!("../icons/icon_rgba_64.bin");
-                if raw_icon_rgba.len() == 64 * 64 * 4 {
-                    let app_icon = tauri::image::Image::new(raw_icon_rgba, 64, 64);
-                    if let Some(main_win) = app.get_webview_window("main") {
+                if let Some(main_win) = app.get_webview_window("main") {
+                    if raw_icon_rgba.len() == 64 * 64 * 4 {
+                        let app_icon = tauri::image::Image::new(raw_icon_rgba, 64, 64);
                         let _ = main_win.set_icon(app_icon);
                     }
+                    #[cfg(windows)]
+                    apply_windows_frameless_dwm_style(&main_win);
                 }
             }
 
@@ -1132,6 +1357,13 @@ pub fn run() {
             stop_screen_capture,
             get_local_ip,
             close_app,
+            window_minimize,
+            window_toggle_maximize,
+            window_is_maximized,
+            window_start_dragging,
+            window_set_always_on_top,
+            window_close_current,
+            window_set_layout_mode,
             find_window_pid,
             find_window_info,
             get_process_memory,

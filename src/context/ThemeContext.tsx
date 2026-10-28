@@ -426,8 +426,27 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       .border-cyan-500, .border-cyan-500\\/60, .border-cyan-800 {
         border-color: var(--sc-accent) !important;
       }
+      /* Barra de Título Customizada da Janela (Frameless Titlebar) */
+      .sc-titlebar {
+        background-color: var(--sc-bg-elevated) !important;
+        border-color: var(--sc-border-color) !important;
+      }
+      .sc-titlebar .sc-win-btn {
+        border-radius: 0px !important;
+      }
+      .sc-titlebar .sc-win-btn:hover {
+        background-color: rgba(var(--sc-accent-rgb), 0.16) !important;
+        color: var(--sc-accent) !important;
+      }
+      .sc-titlebar .sc-win-btn-close {
+        border-radius: 0px !important;
+      }
+      .sc-titlebar .sc-win-btn-close:hover {
+        background-color: #e11d48 !important;
+        color: #ffffff !important;
+      }
       /* Botões gerais */
-      button, .sc-btn {
+      button:not(.sc-win-btn):not(.sc-win-btn-close), .sc-btn {
         border-radius: var(--sc-btn-radius) !important;
       }
       .sc-btn-sized {

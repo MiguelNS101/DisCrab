@@ -269,7 +269,7 @@ export async function getAppSystemInfo(): Promise<AppSystemInfo> {
     return await invokeTauri<AppSystemInfo>('get_app_system_info');
   }
   return {
-    current_version: '1.1.3',
+    current_version: '1.1.4',
     exe_path: 'Modo Web (Navegador)',
     cloudflared: {
       installed: false,
@@ -325,7 +325,7 @@ export async function checkGithubUpdate(
     throw new Error(`GitHub API retornou status ${resp.status} para '${repo}'.`);
   }
   const json = await resp.json();
-  const currentVersion = '1.1.3';
+  const currentVersion = '1.1.4';
   const latestVersion = json.tag_name || currentVersion;
 
   let exeDownloadUrl: string | null = null;
@@ -575,5 +575,136 @@ export async function forwardInviteToLocalDesktopApp(inviteStr: string): Promise
   }
 }
 
+// ============================================================================
+// CONTROLES DA BARRA DE TÍTULO CUSTOMIZADA (FRAMELESS WINDOW CONTROLS)
+// ============================================================================
 
+export async function minimizeAppWindow(): Promise<void> {
+  if (isTauriEnvironment()) {
+    try {
+      await invokeTauri<void>('window_minimize');
+      return;
+    } catch {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        await getCurrentWindow().minimize();
+      } catch {}
+    }
+  }
+}
+
+export async function toggleMaximizeAppWindow(): Promise<boolean> {
+  if (isTauriEnvironment()) {
+    try {
+      return await invokeTauri<boolean>('window_toggle_maximize');
+    } catch {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        const win = getCurrentWindow();
+        const isMax = await win.isMaximized();
+        if (isMax) {
+          await win.unmaximize();
+          return false;
+        } else {
+          await win.maximize();
+          return true;
+        }
+      } catch {}
+    }
+  } else if (typeof document !== 'undefined') {
+    try {
+      if (!document.fullscreenElement) {
+        await document.documentElement.requestFullscreen();
+        return true;
+      } else {
+        await document.exitFullscreen();
+        return false;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+export async function isAppWindowMaximized(): Promise<boolean> {
+  if (isTauriEnvironment()) {
+    try {
+      return await invokeTauri<boolean>('window_is_maximized');
+    } catch {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        return await getCurrentWindow().isMaximized();
+      } catch {}
+    }
+  } else if (typeof document !== 'undefined') {
+    return Boolean(document.fullscreenElement);
+  }
+  return false;
+}
+
+export async function startDraggingAppWindow(): Promise<void> {
+  if (isTauriEnvironment()) {
+    try {
+      await invokeTauri<void>('window_start_dragging');
+      return;
+    } catch {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        await getCurrentWindow().startDragging();
+      } catch {}
+    }
+  }
+}
+
+export async function setAppWindowAlwaysOnTop(alwaysOnTop: boolean): Promise<boolean> {
+  if (isTauriEnvironment()) {
+    try {
+      return await invokeTauri<boolean>('window_set_always_on_top', { alwaysOnTop });
+    } catch {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        await getCurrentWindow().setAlwaysOnTop(alwaysOnTop);
+        return alwaysOnTop;
+      } catch {}
+    }
+  }
+  return alwaysOnTop;
+}
+
+export async function closeCurrentAppWindow(): Promise<void> {
+  if (isTauriEnvironment()) {
+    try {
+      await invokeTauri<void>('window_close_current');
+      return;
+    } catch {
+      try {
+        const { getCurrentWindow } = await import('@tauri-apps/api/window');
+        await getCurrentWindow().close();
+        return;
+      } catch {}
+    }
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      window.close();
+    } catch {}
+  }
+}
+
+export async function setAppWindowLayoutMode(
+  mode: 'lobby' | 'workspace',
+  cardWidth?: number,
+  cardHeight?: number,
+  recenter?: boolean
+): Promise<void> {
+  if (isTauriEnvironment() && !isAndroidEnvironment()) {
+    try {
+      await invokeTauri<void>('window_set_layout_mode', {
+        mode,
+        cardWidth: cardWidth ?? null,
+        cardHeight: cardHeight ?? null,
+        recenter: recenter ?? null,
+      });
+    } catch {}
+  }
+}
 

@@ -20,6 +20,10 @@ import {
   Trash2,
   ClipboardPaste,
   X,
+  Minus,
+  Pin,
+  Palette,
+  ArrowUpCircle,
 } from 'lucide-react';
 import { listen } from '@tauri-apps/api/event';
 import { RoomDetails, SavedMeshRoom } from '../types';
@@ -30,8 +34,15 @@ import {
   isAndroidEnvironment,
   consumeStartupInvite,
   forwardInviteToLocalDesktopApp,
+  minimizeAppWindow,
+  closeCurrentAppWindow,
+  startDraggingAppWindow,
+  setAppWindowAlwaysOnTop,
+  setAppWindowLayoutMode,
 } from '../services/tauriBridge';
 import { AppIcon } from './AppIcon';
+import { useTheme, THEME_PRESETS } from '../context/ThemeContext';
+import { getStartupUpdateState } from './Header';
 
 export type ParsedInvite =
   | { kind: 'mesh'; roomName: string; password: string }
@@ -115,6 +126,7 @@ interface RoomControlProps {
   setIsConnected: (val: boolean) => void;
   onOpenUpdater?: () => void;
   onEnterLocalStudio?: () => void;
+  isModalOpen?: boolean;
 }
 
 export const RoomControl: React.FC<RoomControlProps> = ({
@@ -126,10 +138,42 @@ export const RoomControl: React.FC<RoomControlProps> = ({
   setIsHost,
   isConnected,
   setIsConnected,
+  onOpenUpdater,
   onEnterLocalStudio,
+  isModalOpen = false,
 }) => {
   // Modo principal: 'mesh' (Sala Fixa com Nome e Senha) | 'create' (Criar Código) | 'join' (Entrar Código)
   const [tab, setTab] = useState<'mesh' | 'create' | 'join'>('mesh');
+  const { theme, applyPreset, isCustomizerOpen, setIsCustomizerOpen } = useTheme();
+  const lobbyCardRef = useRef<HTMLDivElement | null>(null);
+  const [isCardPinned, setIsCardPinned] = useState<boolean>(false);
+  const [hasUpdateAvailable, setHasUpdateAvailable] = useState<boolean>(
+    () => Boolean(getStartupUpdateState().result?.has_update)
+  );
+  const [latestTag, setLatestTag] = useState<string>(
+    () => getStartupUpdateState().result?.latest_version || ''
+  );
+
+  useEffect(() => {
+    const syncFromStartup = () => {
+      const st = getStartupUpdateState();
+      if (st.result) {
+        setHasUpdateAvailable(Boolean(st.result.has_update));
+        setLatestTag(st.result.latest_version || '');
+      }
+    };
+    syncFromStartup();
+
+    const onUpdateStatus = (ev: Event) => {
+      const custom = ev as CustomEvent<{ hasUpdate: boolean; latestTag: string }>;
+      if (custom.detail) {
+        setHasUpdateAvailable(Boolean(custom.detail.hasUpdate));
+        setLatestTag(custom.detail.latestTag || '');
+      }
+    };
+    window.addEventListener('sc-update-status', onUpdateStatus);
+    return () => window.removeEventListener('sc-update-status', onUpdateStatus);
+  }, []);
 
   // Estado da Sala Fixa (Mesh P2P com Nome + Senha)
   const [meshRoomName, setMeshRoomName] = useState<string>(() => {
@@ -157,6 +201,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
   });
 
   const isAndroid = isAndroidEnvironment();
+  const isDesktopTauri = isTauriEnvironment() && !isAndroid;
 
   // Estado do Modo Clássico (No Android nunca usa Cloudflare Tunnel)
   const [useCloudflare, setUseCloudflare] = useState<boolean>(() => !isAndroidEnvironment());
@@ -166,6 +211,33 @@ export const RoomControl: React.FC<RoomControlProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [lastSavedRoom, setLastSavedRoom] = useState<string>('');
   const [isCreating, setIsCreating] = useState<boolean>(false);
+
+  // Ajusta dinamicamente a janela nativa do SO para o exato tamanho do cartão de login (sc-lobby-card)
+  useEffect(() => {
+    if (roomDetails || !isTauriEnvironment() || isAndroidEnvironment()) return;
+
+    if (isCustomizerOpen || isModalOpen) {
+      setAppWindowLayoutMode('workspace', undefined, undefined, false);
+      return;
+    }
+
+    const el = lobbyCardRef.current;
+    if (!el) return;
+
+    const applyCardBounds = () => {
+      const rect = el.getBoundingClientRect();
+      const targetW = Math.ceil(rect.width || 452);
+      const targetH = Math.ceil(el.scrollHeight || rect.height || 660);
+      setAppWindowLayoutMode('lobby', targetW, targetH, false);
+    };
+
+    applyCardBounds();
+    const observer = new ResizeObserver(() => {
+      applyCardBounds();
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [roomDetails, tab, savedMeshRooms.length, errorMsg, isCustomizerOpen, isModalOpen]);
 
   const saveMeshRoomToFavorites = useCallback((roomName: string, password: string) => {
     try {
@@ -696,14 +768,129 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     );
   }
 
-  // MODO 2: Tela Inicial Limpa (Home / Lobby)
+  const activePreset =
+    THEME_PRESETS.find((p) => p.id === theme.presetId) || THEME_PRESETS[0];
+
+  const handleCardDragMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (isAndroid || e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (
+      target.closest(
+        'button, a, input, select, textarea, label, [data-no-drag="true"]'
+      )
+    ) {
+      return;
+    }
+    startDraggingAppWindow();
+  };
+
+  const handleToggleCardPin = async () => {
+    const next = !isCardPinned;
+    const applied = await setAppWindowAlwaysOnTop(next);
+    setIsCardPinned(applied);
+  };
+
+  const handleCyclePresetRightClick = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const currentIndex = THEME_PRESETS.findIndex((p) => p.id === theme.presetId);
+    const nextIndex = (currentIndex + 1) % THEME_PRESETS.length;
+    applyPreset(THEME_PRESETS[nextIndex].id);
+  };
+
+  // MODO 2: Tela Inicial Limpa (Cartão de Login Independente)
   return (
-    <div className="w-full max-w-md mx-auto my-auto py-6">
-      <div className="sc-card sc-lobby-card bg-neutral-900/95 border border-neutral-800 rounded-2xl p-6 sm:p-7 shadow-2xl space-y-5 relative overflow-hidden">
-        {/* Identidade Central com o Novo Ícone DisCrab */}
-        <div className="flex flex-col items-center text-center space-y-2.5">
-          <AppIcon size={68} showLiveDot={true} animated={true} />
-          <div>
+    <div
+      className={
+        isDesktopTauri
+          ? 'w-full h-full flex items-stretch justify-center'
+          : 'w-full max-w-md mx-auto my-auto py-4'
+      }
+    >
+      <div
+        ref={lobbyCardRef}
+        onMouseDown={handleCardDragMouseDown}
+        className={`sc-card sc-lobby-card w-full bg-neutral-900/95 border border-neutral-800 ${
+          isDesktopTauri ? 'rounded-xl' : 'rounded-2xl shadow-2xl'
+        } p-6 sm:p-7 space-y-5 relative overflow-hidden`}
+      >
+        {/* Filete luminoso no topo do cartão nas cores do tema */}
+        <div
+          className="absolute top-0 left-0 right-0 h-[2px] pointer-events-none opacity-95"
+          style={{
+            background:
+              'linear-gradient(90deg, var(--sc-accent, #06b6d4) 0%, var(--sc-accent-secondary, #6366f1) 50%, var(--sc-accent, #06b6d4) 100%)',
+          }}
+        />
+
+        {/* Controles da Janela no Canto Superior Direito do Cartão (Fixar, Minimizar, Fechar) */}
+        {!isAndroid && (
+          <div
+            data-no-drag="true"
+            className="absolute top-2.5 right-2.5 z-20 flex items-center gap-1"
+          >
+            <button
+              type="button"
+              onClick={handleToggleCardPin}
+              className="w-7 h-7 flex items-center justify-center rounded-lg border transition-colors cursor-pointer"
+              style={{
+                backgroundColor: isCardPinned
+                  ? 'rgba(var(--sc-accent-rgb, 6, 182, 212), 0.18)'
+                  : 'rgba(var(--sc-bg-elevated, 9, 9, 11), 0.75)',
+                borderColor: isCardPinned
+                  ? 'var(--sc-accent, #06b6d4)'
+                  : 'var(--sc-border-color, #27272a)',
+                color: isCardPinned
+                  ? 'var(--sc-accent, #06b6d4)'
+                  : 'var(--sc-text-muted, #a1a1aa)',
+              }}
+              title={
+                isCardPinned
+                  ? 'Janela fixada no topo (clique para desafixar)'
+                  : 'Fixar cartão sempre no topo'
+              }
+            >
+              <Pin
+                className={`w-3.5 h-3.5 ${isCardPinned ? 'rotate-45' : ''} transition-transform`}
+              />
+            </button>
+
+            <button
+              type="button"
+              onClick={minimizeAppWindow}
+              className="w-7 h-7 flex items-center justify-center rounded-lg border transition-colors cursor-pointer hover:brightness-125"
+              style={{
+                backgroundColor: 'rgba(var(--sc-bg-elevated, 9, 9, 11), 0.75)',
+                borderColor: 'var(--sc-border-color, #27272a)',
+                color: 'var(--sc-text-muted, #a1a1aa)',
+              }}
+              title="Minimizar janela"
+              aria-label="Minimizar janela"
+            >
+              <Minus className="w-3.5 h-3.5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={closeCurrentAppWindow}
+              className="w-7 h-7 flex items-center justify-center rounded-lg border border-neutral-800 bg-neutral-950/80 text-neutral-400 hover:bg-rose-600 hover:border-rose-500 hover:text-white transition-all cursor-pointer"
+              title="Fechar aplicativo"
+              aria-label="Fechar aplicativo"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* Identidade Central com o Novo Ícone DisCrab (Área Arrastável) */}
+        <div
+          data-tauri-drag-region
+          className="flex flex-col items-center text-center space-y-2.5 pt-1 cursor-grab active:cursor-grabbing"
+        >
+          <div className="pointer-events-none">
+            <AppIcon size={68} showLiveDot={true} animated={true} />
+          </div>
+          <div className="pointer-events-none">
             <h2 className="text-xl font-black tracking-wider text-white font-mono">
               Dis<span className="text-rose-400">Crab</span>
             </h2>
@@ -1052,19 +1239,53 @@ export const RoomControl: React.FC<RoomControlProps> = ({
           </p>
         )}
 
-        {/* Rodapé da Home: Modo Estúdio */}
-        {onEnterLocalStudio && (
-          <div className="pt-4 border-t border-neutral-800/80">
+        {/* Rodapé do Cartão: Abrir Estúdio Local + Tema & CSS e Atualizar App logo abaixo */}
+        <div className="pt-3.5 border-t border-neutral-800/80 space-y-2.5">
+          {onEnterLocalStudio && (
             <button
               type="button"
               onClick={onEnterLocalStudio}
-              className="w-full py-2 text-[11px] font-mono text-neutral-400 hover:text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
+              className="sc-btn w-full py-2 px-3 rounded-xl bg-neutral-950/90 hover:bg-neutral-800 border border-neutral-800 text-[11px] font-mono text-neutral-300 hover:text-white flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
             >
-              <Sliders className="w-3.5 h-3.5 text-neutral-500" />
-              <span>Abrir Estúdio Local (Testar Câmera, Tela e Áudio sem Sala)</span>
+              <Sliders className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span>Abrir Estúdio Local (Testar Câmera, Tela e Áudio)</span>
+            </button>
+          )}
+
+          {/* Linha de Botões: Tema & CSS + Atualizar App (embaixo do Estúdio Local) */}
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setIsCustomizerOpen(true)}
+              onContextMenu={handleCyclePresetRightClick}
+              className="sc-btn py-2 px-3 rounded-xl bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 font-mono text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+              title={`Tema atual: ${activePreset.name} — Clique para personalizar Tema & CSS | Botão direito alterna o preset`}
+            >
+              <Palette className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span className="truncate">Tema & CSS</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onOpenUpdater && onOpenUpdater()}
+              className={`sc-btn py-2 px-3 rounded-xl border font-mono text-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+                hasUpdateAvailable
+                  ? 'bg-emerald-950/90 hover:bg-emerald-900/90 border-emerald-500 text-emerald-200 shadow-lg shadow-emerald-950/50 animate-pulse'
+                  : 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-cyan-300'
+              }`}
+              title="Verificar atualizações do aplicativo e gerenciar o Cloudflared"
+            >
+              <ArrowUpCircle
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  hasUpdateAvailable ? 'text-emerald-400' : 'text-cyan-400'
+                }`}
+              />
+              <span className="font-semibold truncate">
+                {hasUpdateAvailable ? `Atualizar (${latestTag})` : 'Atualizar App'}
+              </span>
             </button>
           </div>
-        )}
+        </div>
       </div>
     </div>
   );

@@ -21,6 +21,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { isTauriEnvironment } from '../services/tauriBridge';
 import { PopupSizePreset, StreamQualityPreset } from '../types';
+import { WindowTitleBar } from './WindowTitleBar';
 
 const POPUP_CHANNEL_NAME = 'sc_popup_ipc_v2';
 const externalBrowserWindowsMap = new Map<string, Window>();
@@ -981,8 +982,15 @@ export const StandalonePopupWindowView: React.FC<{
   };
 
   return (
-    <div className="w-screen h-screen bg-neutral-950 text-neutral-100 flex flex-col font-mono select-none overflow-hidden">
-      {/* Barra Superior de Controles da Janela Nativa */}
+    <div className="sc-app w-screen h-screen bg-neutral-950 text-neutral-100 flex flex-col font-mono select-none overflow-hidden">
+      {/* Barra de Título Customizada com o Tema Ativo */}
+      <WindowTitleBar
+        isPopupWindow={true}
+        windowTitleOverride={`${meta.userName} — ${meta.title}`}
+        onCustomClose={handleReturnToGrid}
+      />
+
+      {/* Barra Superior de Controles da Transmissão */}
       <div className="px-3.5 py-2 bg-gradient-to-r from-neutral-900 via-neutral-900 to-cyan-950/50 border-b border-neutral-800 flex items-center justify-between gap-2 shrink-0">
         <div className="flex items-center gap-2 overflow-hidden">
           <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse shrink-0" />

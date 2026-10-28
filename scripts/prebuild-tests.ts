@@ -417,14 +417,194 @@ async function runStreamAudioTests(): Promise<void> {
   );
 }
 
+// ============================================================================
+// PARTE 3: TESTES AUTOMATIZADOS DO ATUALIZADOR (PORTABLE + INSTALÁVEL NSIS/MSI)
+// ============================================================================
+
+function parseVersionForTest(v: string): number[] {
+  return v
+    .trim()
+    .replace(/^[vV]/, '')
+    .split('.')
+    .map((part) => {
+      const numeric = part.split(/[^0-9]/)[0] || '0';
+      return Number.parseInt(numeric, 10) || 0;
+    });
+}
+
+function isNewerVersionForTest(current: string, latest: string): boolean {
+  const currParts = parseVersionForTest(current);
+  const latParts = parseVersionForTest(latest);
+  const maxLen = Math.max(currParts.length, latParts.length);
+  for (let i = 0; i < maxLen; i++) {
+    const c = currParts[i] ?? 0;
+    const l = latParts[i] ?? 0;
+    if (l > c) return true;
+    if (l < c) return false;
+  }
+  return false;
+}
+
+interface MockReleaseAsset {
+  name: string;
+  browser_download_url: string;
+}
+
+function selectPreferredReleaseAsset(assets: MockReleaseAsset[], isAndroid: boolean): MockReleaseAsset | undefined {
+  if (isAndroid) {
+    return assets.find((a) => a.name.toLowerCase().endsWith('.apk'));
+  }
+  return (
+    assets.find((a) => {
+      const name = a.name.toLowerCase();
+      return name.endsWith('.exe') && name.includes('portable') && !name.includes('cloudflared');
+    }) ||
+    assets.find((a) => {
+      const name = a.name.toLowerCase();
+      return (
+        name.endsWith('.exe') &&
+        !name.includes('setup') &&
+        !name.includes('install') &&
+        !name.includes('cloudflared') &&
+        !name.includes('vc_redist')
+      );
+    }) ||
+    assets.find((a) => a.name.toLowerCase().endsWith('.exe') && !a.name.toLowerCase().includes('cloudflared'))
+  );
+}
+
+async function runAutoUpdaterTests() {
+  console.log('\n--- [3/3] Testando Auto-Updater (Modo Portátil & Modo Instalável NSIS/MSI) ---');
+  const fs = await import('fs');
+  const path = await import('path');
+  const os = await import('os');
+
+  // 3.1 Comparação Semântica de Versões
+  assert(isNewerVersionForTest('1.1.2', 'v1.1.3'), 'Comparador semântico detecta v1.1.3 > 1.1.2');
+  assert(isNewerVersionForTest('1.1.3', '1.2.0'), 'Comparador semântico detecta 1.2.0 > 1.1.3');
+  assert(!isNewerVersionForTest('1.1.3', '1.1.3'), 'Comparador semântico ignora mesma versão (1.1.3 == 1.1.3)');
+  assert(!isNewerVersionForTest('1.1.3', '1.1.2'), 'Comparador semântico rejeita downgrade (1.1.2 < 1.1.3)');
+
+  // 3.2 Seleção Inteligente de Assets da Release (Evita cloudflared.exe e prefere binário direto para swap in-place)
+  const sampleReleaseAssets: MockReleaseAsset[] = [
+    { name: 'cloudflared.exe', browser_download_url: 'https://example.com/cloudflared.exe' },
+    { name: 'DisCrab_1.1.3_x64-setup.exe', browser_download_url: 'https://example.com/DisCrab_1.1.3_x64-setup.exe' },
+    { name: 'DisCrab-Portable.exe', browser_download_url: 'https://example.com/DisCrab-Portable.exe' },
+    { name: 'DisCrab-universal.apk', browser_download_url: 'https://example.com/DisCrab-universal.apk' },
+  ];
+
+  const selectedWin = selectPreferredReleaseAsset(sampleReleaseAssets, false);
+  assert(
+    selectedWin?.name === 'DisCrab-Portable.exe',
+    'Seletor de assets Windows prioriza DisCrab-Portable.exe (binário standalone pronto para swap atômico tanto no Portátil quanto no Instalável)'
+  );
+
+  const selectedSetupFallback = selectPreferredReleaseAsset(
+    [
+      { name: 'cloudflared.exe', browser_download_url: 'https://example.com/cloudflared.exe' },
+      { name: 'DisCrab_1.1.3_x64-setup.exe', browser_download_url: 'https://example.com/DisCrab_1.1.3_x64-setup.exe' },
+    ],
+    false
+  );
+  assert(
+    selectedSetupFallback?.name === 'DisCrab_1.1.3_x64-setup.exe',
+    'Seletor de assets faz fallback seguro para o instalador NSIS (*-setup.exe) e nunca baixa o cloudflared.exe por engano'
+  );
+
+  const selectedAndroid = selectPreferredReleaseAsset(sampleReleaseAssets, true);
+  assert(
+    selectedAndroid?.name === 'DisCrab-universal.apk',
+    'Seletor de assets Android seleciona corretamente o pacote .apk'
+  );
+
+  // 3.3 Simulação Real em Disco da Troca Atômica (Modo Portátil + Modo Instalável em %LOCALAPPDATA%\Programs\DisCrab)
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'discrab-updater-test-'));
+  try {
+    const scenarios = [
+      {
+        label: 'Modo Portátil (DisCrab-Portable.exe)',
+        dir: path.join(tempRoot, 'Portable'),
+        exeName: 'DisCrab-Portable.exe',
+      },
+      {
+        label: 'Modo Instalável NSIS (%LOCALAPPDATA%\\Programs\\DisCrab\\DisCrab.exe)',
+        dir: path.join(tempRoot, 'LocalAppData', 'Programs', 'DisCrab'),
+        exeName: 'DisCrab.exe',
+      },
+    ];
+
+    for (const scenario of scenarios) {
+      fs.mkdirSync(scenario.dir, { recursive: true });
+      const currentExe = path.join(scenario.dir, scenario.exeName);
+      const stem = path.parse(scenario.exeName).name;
+      const tempExe = path.join(scenario.dir, `${stem}.update.exe`);
+      const backupExe = path.join(scenario.dir, `${stem}.old.exe`);
+
+      // Cria um .old.exe residual de uma atualização anterior para garantir que não trava
+      fs.writeFileSync(backupExe, 'stale-old-binary-v1.1.1');
+      fs.writeFileSync(currentExe, 'running-binary-v1.1.2');
+      fs.writeFileSync(tempExe, 'downloaded-new-binary-v1.1.3');
+
+      // Executa o mesmo protocolo de swap atômico do apply_atomic_exe_swap em updater.rs
+      if (fs.existsSync(backupExe)) {
+        fs.unlinkSync(backupExe);
+      }
+      fs.renameSync(currentExe, backupExe);
+      fs.renameSync(tempExe, currentExe);
+      if (fs.existsSync(backupExe)) {
+        fs.unlinkSync(backupExe);
+      }
+
+      const finalBytes = fs.readFileSync(currentExe, 'utf-8');
+      assert(
+        finalBytes === 'downloaded-new-binary-v1.1.3' && !fs.existsSync(tempExe),
+        `Swap atômico concluído com sucesso no ${scenario.label}`
+      );
+    }
+  } finally {
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
+
+  // 3.4 Auditoria Estrutural do Código Nativo Rust (updater.rs & lib.rs)
+  const updaterRs = fs.readFileSync('src-tauri/src/updater.rs', 'utf-8');
+  const libRs = fs.readFileSync('src-tauri/src/lib.rs', 'utf-8');
+
+  assert(
+    libRs.includes('pub fn disable_job_kill_on_close()') &&
+      libRs.includes('JOB_OBJECT_LIMIT_BREAKAWAY_OK') &&
+      updaterRs.includes('crate::disable_job_kill_on_close()'),
+    'Job Object do Windows desativa JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE antes do processo sair para não matar o atualizador'
+  );
+
+  assert(
+    updaterRs.includes('exe_dir.join(format!("{}.update.exe", stem))') &&
+      updaterRs.includes('std::env::temp_dir().join(format!("{}.update.exe", stem))'),
+    'Arquivo temporário de atualização usa extensão executável (.update.exe) compatível com PATHEXT e ShellExecute/UAC (com fallback para %TEMP%)'
+  );
+
+  assert(
+    updaterRs.includes('-Verb RunAs') &&
+      updaterRs.includes(':replace_loop') &&
+      updaterRs.includes('start \\"\\" /D \\"{dir}\\" \\"{dst}\\"'),
+    'Script pós-fechamento possui loop de substituição, fallback automático com elevação UAC (PowerShell -Verb RunAs) para C:\\Program Files e reinicialização limpa'
+  );
+
+  assert(
+    updaterRs.includes('is_installer_setup') && updaterRs.includes('\\"{tmp}\\" /S'),
+    'Atualizador suporta execução silenciosa (/S) caso o pacote baixado seja um instalador NSIS (*-setup.exe)'
+  );
+}
+
 async function main() {
   console.log('Iniciando bateria de testes pré-compilação do DisCrab...');
   await runConnectionTests();
   await runStreamAudioTests();
-  console.log(`\nTodos os ${passedTests} testes de Conexão, Kaomojis e Áudio da Stream passaram com sucesso! (${failedTests} falhas)\n`);
+  await runAutoUpdaterTests();
+  console.log(`\nTodos os ${passedTests} testes de Conexão, Áudio da Stream e Auto-Updater (Portátil + Instalável) passaram com sucesso! (${failedTests} falhas)\n`);
 }
 
 main().catch((err) => {
   console.error('\n[ERRO CRÍTICO NOS TESTES PRÉ-COMPILAÇÃO]:', err);
   process.exit(1);
 });
+

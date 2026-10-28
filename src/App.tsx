@@ -27,7 +27,12 @@ import {
 import { WindowItem, RoomDetails, StreamItem, ChatAttachment, AudioSourceMode } from './types';
 import { useWebRtc } from './hooks/useWebRtc';
 import { WebcamPreviewPip } from './components/WebcamPreviewPip';
-import { startNativeMultiProcessAudio, isTauriEnvironment } from './services/tauriBridge';
+import {
+  startNativeMultiProcessAudio,
+  isTauriEnvironment,
+  isAndroidEnvironment,
+  setAppWindowLayoutMode,
+} from './services/tauriBridge';
 import { ThemeProvider } from './context/ThemeContext';
 import { ThemeCustomizerModal } from './components/ThemeCustomizerModal';
 import { AppIcon } from './components/AppIcon';
@@ -438,15 +443,29 @@ function MainAppWorkspace() {
   const isShowingRoomTransition = Boolean(
     roomDetails && (isEnteringRoomTransition || (!isConnected && !hasEstablishedRoomSession))
   );
+  const isDesktopTauri = isTauriEnvironment() && !isAndroidEnvironment();
+  const prevInWorkspaceRef = useRef<boolean>(false);
+
+  // Alterna o tamanho da janela nativa entre o Cartão de Login (compacto) e a Sala (tamanho normal 1280x820)
+  useEffect(() => {
+    if (isInRoomWorkspace) {
+      prevInWorkspaceRef.current = true;
+      setAppWindowLayoutMode('workspace', undefined, undefined, true);
+    } else if (prevInWorkspaceRef.current) {
+      prevInWorkspaceRef.current = false;
+      setAppWindowLayoutMode('lobby', 460, 680, true);
+    }
+  }, [isInRoomWorkspace]);
 
   return (
     <ThemeProvider>
       <div className="sc-app min-h-screen bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black">
-        {/* Top Header */}
+        {/* Barra de Moldura Superior (Oculta na tela de Login/Cartão, visível após entrar na Sala/Estúdio) */}
         <Header
           activePid={isScreenSharing && isolateAudio ? getEffectiveAudioPid() : null}
           activeProcessName={getEffectiveAudioLabel()}
           isInRoom={isInRoomWorkspace && !isShowingRoomTransition}
+          hideTitleBar={!isInRoomWorkspace}
           externalUpdaterOpen={externalUpdaterOpen}
           onExternalUpdaterClose={() => setExternalUpdaterOpen(false)}
         />
@@ -454,9 +473,15 @@ function MainAppWorkspace() {
         {/* Notificações Toast de Presença (Entrada / Saída de Amigos na Sala) */}
         <PresenceToastContainer toasts={presenceToasts} onDismiss={dismissPresenceToast} />
 
-        {/* MODO 1: TELA INICIAL LIMPA (HOME / LOBBY) */}
+        {/* MODO 1: TELA INICIAL LIMPA (CARTÃO DE LOGIN COMPACTO) */}
         {!isInRoomWorkspace ? (
-          <main className="flex-1 flex flex-col items-center justify-center p-4 sm:p-6">
+          <main
+            className={
+              isDesktopTauri
+                ? 'flex-1 flex flex-col items-stretch justify-center p-0 overflow-hidden'
+                : 'flex-1 flex flex-col items-center justify-center p-4 sm:p-6'
+            }
+          >
             {rtcError && (
               <div className="w-full max-w-md mb-4 bg-red-950/80 border border-red-800 rounded-xl p-3.5 flex items-start justify-between gap-3 text-xs font-mono">
                 <div className="flex items-start gap-2">
@@ -488,6 +513,7 @@ function MainAppWorkspace() {
               }}
               onOpenUpdater={() => setExternalUpdaterOpen(true)}
               onEnterLocalStudio={() => setIsLocalStudio(true)}
+              isModalOpen={externalUpdaterOpen}
             />
           </main>
         ) : isShowingRoomTransition && roomDetails ? (

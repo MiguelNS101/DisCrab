@@ -43,7 +43,7 @@ pub struct UpdateProgressPayload {
     pub message: String,
 }
 
-/// Ao iniciar o app no Desktop, remove silenciosamente qualquer arquivo `.old.exe` ou `.update.tmp`
+/// Ao iniciar o app no Desktop, remove silenciosamente qualquer arquivo `.old.exe` ou `.update.exe`/`.update.tmp`
 /// deixado pela atualização anterior.
 pub fn cleanup_old_executable() {
     std::thread::spawn(|| {
@@ -58,11 +58,19 @@ pub fn cleanup_old_executable() {
 
             let old_exe = parent.join(format!("{}.old.exe", stem));
             let tmp_exe = parent.join(format!("{}.update.tmp", stem));
+            let upd_exe = parent.join(format!("{}.update.exe", stem));
             let generic_old = parent.join("StreamCompanion.old.exe");
             let discrab_old = parent.join("DisCrab.old.exe");
             let temp_script = std::env::temp_dir().join("discrab_apply_update.cmd");
 
-            for file in [old_exe, tmp_exe, generic_old, discrab_old, temp_script] {
+            for file in [
+                old_exe,
+                tmp_exe,
+                upd_exe,
+                generic_old,
+                discrab_old,
+                temp_script,
+            ] {
                 if file.exists() {
                     if std::fs::remove_file(&file).is_ok() {
                         println!("[Updater] Arquivo residual removido com sucesso: {:?}", file);
@@ -95,7 +103,7 @@ pub fn get_system_info() -> AppSystemInfo {
 pub const FIXED_GITHUB_REPO: &str = "MiguelNS101/StreamCompanion";
 
 /// Normaliza "https://github.com/usuario/repo" ou "usuario/repo" para "usuario/repo"
-fn normalize_github_repo(input: &str) -> Result<String, String> {
+pub fn normalize_github_repo(input: &str) -> Result<String, String> {
     let trimmed = input
         .trim()
         .trim_end_matches('/')
@@ -120,7 +128,7 @@ fn normalize_github_repo(input: &str) -> Result<String, String> {
 }
 
 /// Compara duas versões semânticas (ex: "1.0.0" vs "v1.1.0")
-fn is_newer_version(current: &str, latest: &str) -> bool {
+pub fn is_newer_version(current: &str, latest: &str) -> bool {
     let clean_cur = current.trim().trim_start_matches(['v', 'V']);
     let clean_lat = latest.trim().trim_start_matches(['v', 'V']);
 
@@ -150,6 +158,116 @@ fn is_newer_version(current: &str, latest: &str) -> bool {
     }
 
     clean_lat != clean_cur
+}
+
+/// Realiza a troca atômica do executável atual (funciona tanto para modo Portable quanto modo Instalado em %LOCALAPPDATA%).
+/// Caso o diretório exija elevação UAC (ex: C:\Program Files) ou o arquivo esteja com lock, retorna `false`
+/// mantendo o executável original intacto para que o script pós-encerramento faça a substituição.
+pub fn apply_atomic_exe_swap(
+    current_exe: &Path,
+    temp_update_path: &Path,
+    backup_old_path: &Path,
+) -> bool {
+    let _ = std::fs::remove_file(backup_old_path);
+    if std::fs::rename(current_exe, backup_old_path).is_ok() {
+        if std::fs::rename(temp_update_path, current_exe).is_ok() {
+            return true;
+        }
+        if std::fs::copy(temp_update_path, current_exe).is_ok() {
+            let _ = std::fs::remove_file(temp_update_path);
+            return true;
+        }
+        // Rollback seguro para nunca deixar o usuário sem executável
+        let _ = std::fs::rename(backup_old_path, current_exe);
+    }
+    false
+}
+
+/// Gera o script .cmd de atualização pós-encerramento do Windows compatível com:
+/// 1. Modo Portable (DisCrab-Portable.exe em qualquer pasta do usuário)
+/// 2. Modo Instalável por Usuário (NSIS em %LOCALAPPDATA%\Programs\DisCrab\DisCrab.exe)
+/// 3. Modo Instalável Global (MSI / NSIS em C:\Program Files\DisCrab\DisCrab.exe com fallback UAC RunAs)
+/// 4. Pacotes Instaladores NSIS diretos (*-setup.exe com flag silenciosa /S + reinicialização)
+pub fn build_windows_update_script(
+    old_pid: u32,
+    temp_update_str: &str,
+    current_exe_str: &str,
+    backup_old_str: &str,
+    exe_dir_str: &str,
+    is_installer_setup: bool,
+) -> String {
+    if is_installer_setup {
+        format!(
+            "@echo off\r\n\
+             chcp 65001 >nul 2>&1\r\n\
+             set /a WAIT_COUNT=0\r\n\
+             :wait_pid\r\n\
+             tasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul\r\n\
+             if \"%ERRORLEVEL%\"==\"0\" (\r\n\
+               set /a WAIT_COUNT+=1\r\n\
+               if %WAIT_COUNT% LSS 15 (\r\n\
+                 ping 127.0.0.1 -n 2 >nul\r\n\
+                 goto wait_pid\r\n\
+               ) else (\r\n\
+                 taskkill /F /PID {pid} >nul 2>&1\r\n\
+                 ping 127.0.0.1 -n 2 >nul\r\n\
+               )\r\n\
+             )\r\n\
+             \"{tmp}\" /S\r\n\
+             if exist \"{tmp}\" del /F /Q \"{tmp}\" >nul 2>&1\r\n\
+             if exist \"{dst}\" start \"\" /D \"{dir}\" \"{dst}\"\r\n\
+             del /F /Q \"%~f0\" >nul 2>&1\r\n",
+            pid = old_pid,
+            tmp = temp_update_str,
+            dst = current_exe_str,
+            dir = exe_dir_str
+        )
+    } else {
+        format!(
+            "@echo off\r\n\
+             chcp 65001 >nul 2>&1\r\n\
+             set /a WAIT_COUNT=0\r\n\
+             :wait_pid\r\n\
+             tasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul\r\n\
+             if \"%ERRORLEVEL%\"==\"0\" (\r\n\
+               set /a WAIT_COUNT+=1\r\n\
+               if %WAIT_COUNT% LSS 15 (\r\n\
+                 ping 127.0.0.1 -n 2 >nul\r\n\
+                 goto wait_pid\r\n\
+               ) else (\r\n\
+                 taskkill /F /PID {pid} >nul 2>&1\r\n\
+                 ping 127.0.0.1 -n 2 >nul\r\n\
+               )\r\n\
+             )\r\n\
+             set /a TRY_COUNT=0\r\n\
+             :replace_loop\r\n\
+             if not exist \"{tmp}\" goto replace_done\r\n\
+             move /Y \"{tmp}\" \"{dst}\" >nul 2>&1\r\n\
+             if not exist \"{tmp}\" goto replace_done\r\n\
+             copy /Y /B \"{tmp}\" \"{dst}\" >nul 2>&1\r\n\
+             if \"%ERRORLEVEL%\"==\"0\" (\r\n\
+               del /F /Q \"{tmp}\" >nul 2>&1\r\n\
+               goto replace_done\r\n\
+             )\r\n\
+             set /a TRY_COUNT+=1\r\n\
+             if %TRY_COUNT% LSS 6 (\r\n\
+               ping 127.0.0.1 -n 2 >nul\r\n\
+               goto replace_loop\r\n\
+             )\r\n\
+             if exist \"{tmp}\" (\r\n\
+               powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"Start-Process cmd.exe -ArgumentList '/c move /Y \\\"{tmp}\\\" \\\"{dst}\\\" || (copy /Y /B \\\"{tmp}\\\" \\\"{dst}\\\" && del /F /Q \\\"{tmp}\\\")' -Verb RunAs -WindowStyle Hidden -Wait\" >nul 2>&1\r\n\
+             )\r\n\
+             :replace_done\r\n\
+             if exist \"{old}\" del /F /Q \"{old}\" >nul 2>&1\r\n\
+             start \"\" /D \"{dir}\" \"{dst}\"\r\n\
+             del /F /Q \"%~f0\" >nul 2>&1\r\n",
+            pid = old_pid,
+            tmp = temp_update_str,
+            dst = current_exe_str,
+            old = backup_old_str,
+            dir = exe_dir_str
+        )
+    }
 }
 
 /// Consulta a última Release publicada no GitHub Releases (extraindo tanto o .exe quanto o .apk)
@@ -412,7 +530,7 @@ pub async fn download_and_apply_update(
 }
 
 /// No Desktop (Windows): baixa o novo .exe, substitui o executável atual em execução
-/// e reinicia o aplicativo automaticamente em um processo desvinculado do Job Object!
+/// (compatível tanto com modo Portable quanto modo Instalado NSIS/MSI) e reinicia o aplicativo!
 #[cfg(not(target_os = "android"))]
 pub async fn download_and_apply_update(
     app: AppHandle,
@@ -433,7 +551,8 @@ pub async fn download_and_apply_update(
         .and_then(|s| s.to_str())
         .unwrap_or("DisCrab");
 
-    let mut temp_update_path = exe_dir.join(format!("{}.update.tmp", stem));
+    // Usa extensão .update.exe para que o Windows sempre o reconheça como executável válido em PATHEXT/UAC
+    let mut temp_update_path = exe_dir.join(format!("{}.update.exe", stem));
     let backup_old_path = exe_dir.join(format!("{}.old.exe", stem));
 
     let _ = app.emit(
@@ -472,8 +591,8 @@ pub async fn download_and_apply_update(
     let mut file = match std::fs::File::create(&temp_update_path) {
         Ok(f) => f,
         Err(_) => {
-            // Fallback para %TEMP% caso o diretório atual exija elevação
-            temp_update_path = std::env::temp_dir().join(format!("{}.update.tmp", stem));
+            // Fallback para %TEMP% caso o diretório atual exija elevação (ex: C:\Program Files\DisCrab)
+            temp_update_path = std::env::temp_dir().join(format!("{}.update.exe", stem));
             let _ = std::fs::remove_file(&temp_update_path);
             std::fs::File::create(&temp_update_path).map_err(|e| {
                 format!(
@@ -552,6 +671,8 @@ pub async fn download_and_apply_update(
     );
 
     tunnel_manager.stop();
+    // Desativa JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE antes de lançar o script e encerrar
+    crate::disable_job_kill_on_close();
 
     let lower_url = download_url.to_lowercase();
     let is_installer_setup =
@@ -560,18 +681,7 @@ pub async fn download_and_apply_update(
     // Se o executável não for um instalador NSIS, tentamos também a troca atômica imediata
     // (renomeando o atual para .old.exe) ANTES do script auxiliar entrar em ação.
     if !is_installer_setup {
-        let _ = std::fs::remove_file(&backup_old_path);
-        if std::fs::rename(&current_exe, &backup_old_path).is_ok() {
-            if std::fs::rename(&temp_update_path, &current_exe).is_err() {
-                // Caso o move direto falhe (ex: volumes diferentes ou lock de antivírus), tenta copiar
-                if std::fs::copy(&temp_update_path, &current_exe).is_ok() {
-                    let _ = std::fs::remove_file(&temp_update_path);
-                } else {
-                    // Restaura o original para que o script .cmd faça a substituição após o encerramento
-                    let _ = std::fs::rename(&backup_old_path, &current_exe);
-                }
-            }
-        }
+        let _ = apply_atomic_exe_swap(&current_exe, &temp_update_path, &backup_old_path);
     }
 
     // Cria e executa um script .cmd independente fora do Job Object para aguardar o encerramento
@@ -587,39 +697,16 @@ pub async fn download_and_apply_update(
         let exe_dir_str = exe_dir.to_string_lossy().to_string();
         let temp_update_str = temp_update_path.to_string_lossy().to_string();
         let backup_old_str = backup_old_path.to_string_lossy().to_string();
+        let old_pid = std::process::id();
 
-        let script_content = if is_installer_setup {
-            format!(
-                "@echo off\r\n\
-                 chcp 65001 >nul 2>&1\r\n\
-                 ping 127.0.0.1 -n 3 >nul\r\n\
-                 \"{}\"\r\n\
-                 del /F /Q \"%~f0\" >nul 2>&1\r\n",
-                temp_update_str
-            )
-        } else {
-            format!(
-                "@echo off\r\n\
-                 chcp 65001 >nul 2>&1\r\n\
-                 ping 127.0.0.1 -n 3 >nul\r\n\
-                 for /L %%i in (1,1,10) do (\r\n\
-                   if exist \"{tmp}\" (\r\n\
-                     move /Y \"{tmp}\" \"{dst}\" >nul 2>&1\r\n\
-                     if exist \"{tmp}\" (\r\n\
-                       copy /Y /B \"{tmp}\" \"{dst}\" >nul 2>&1 && del /F /Q \"{tmp}\" >nul 2>&1\r\n\
-                     )\r\n\
-                     if exist \"{tmp}\" ping 127.0.0.1 -n 2 >nul\r\n\
-                   )\r\n\
-                 )\r\n\
-                 if exist \"{old}\" del /F /Q \"{old}\" >nul 2>&1\r\n\
-                 start \"\" /D \"{dir}\" \"{dst}\"\r\n\
-                 del /F /Q \"%~f0\" >nul 2>&1\r\n",
-                tmp = temp_update_str,
-                dst = current_exe_str,
-                old = backup_old_str,
-                dir = exe_dir_str
-            )
-        };
+        let script_content = build_windows_update_script(
+            old_pid,
+            &temp_update_str,
+            &current_exe_str,
+            &backup_old_str,
+            &exe_dir_str,
+            is_installer_setup,
+        );
 
         let _ = std::fs::write(&script_path, script_content);
 
@@ -649,4 +736,68 @@ pub async fn download_and_apply_update(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_newer_version_semantics() {
+        assert!(is_newer_version("1.1.2", "v1.1.3"));
+        assert!(is_newer_version("1.0.0", "1.1.0"));
+        assert!(!is_newer_version("1.1.3", "v1.1.3"));
+        assert!(!is_newer_version("1.2.0", "v1.1.9"));
+    }
+
+    #[test]
+    fn test_atomic_exe_swap_portable_and_installed() {
+        let temp_dir = std::env::temp_dir().join(format!("discrab_upd_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+
+        let current_exe = temp_dir.join("DisCrab.exe");
+        let temp_update = temp_dir.join("DisCrab.update.exe");
+        let backup_old = temp_dir.join("DisCrab.old.exe");
+
+        std::fs::write(&current_exe, b"MZ_OLD_VERSION_1_1_2").unwrap();
+        std::fs::write(&temp_update, b"MZ_NEW_VERSION_1_1_3").unwrap();
+
+        let swapped = apply_atomic_exe_swap(&current_exe, &temp_update, &backup_old);
+        assert!(swapped, "A troca atômica de executável deve ter sucesso");
+        assert!(current_exe.exists(), "O novo DisCrab.exe deve existir no caminho original");
+        assert!(!temp_update.exists(), "O arquivo temporário .update.exe deve ter sido movido");
+        assert!(backup_old.exists(), "O backup .old.exe deve existir até a limpeza");
+
+        let updated_bytes = std::fs::read(&current_exe).unwrap();
+        assert_eq!(updated_bytes, b"MZ_NEW_VERSION_1_1_3");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_windows_update_script_supports_portable_and_installed_modes() {
+        let portable_script = build_windows_update_script(
+            4242,
+            "C:\\Users\\User\\AppData\\Local\\Temp\\DisCrab.update.exe",
+            "C:\\Program Files\\DisCrab\\DisCrab.exe",
+            "C:\\Program Files\\DisCrab\\DisCrab.old.exe",
+            "C:\\Program Files\\DisCrab",
+            false,
+        );
+        assert!(portable_script.contains("PID eq 4242"));
+        assert!(portable_script.contains(":replace_loop"));
+        assert!(portable_script.contains("-Verb RunAs"));
+        assert!(portable_script.contains("start \"\" /D \"C:\\Program Files\\DisCrab\" \"C:\\Program Files\\DisCrab\\DisCrab.exe\""));
+
+        let installer_script = build_windows_update_script(
+            4242,
+            "C:\\Users\\User\\AppData\\Local\\Temp\\DisCrab_1.1.3_x64-setup.update.exe",
+            "C:\\Users\\User\\AppData\\Local\\Programs\\DisCrab\\DisCrab.exe",
+            "C:\\Users\\User\\AppData\\Local\\Programs\\DisCrab\\DisCrab.old.exe",
+            "C:\\Users\\User\\AppData\\Local\\Programs\\DisCrab",
+            true,
+        );
+        assert!(installer_script.contains("/S"));
+        assert!(installer_script.contains("start \"\" /D"));
+    }
 }
