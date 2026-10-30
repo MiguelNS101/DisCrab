@@ -15,6 +15,8 @@ import {
   stopNativeProcessAudio,
   findWindowPid,
   findWindowInfo,
+  getAntiBlackScreenPreference,
+  setNativeAntiBlackScreen,
 } from '../tauriBridge';
 
 import {
@@ -1968,7 +1970,8 @@ export class WebRtcEngine {
         width: { ideal: profile.width, max: profile.width },
         height: { ideal: profile.height, max: profile.height },
         frameRate: { ideal: fps, max: fps },
-      },
+        cursor: 'always',
+      } as any,
       audio: {
         echoCancellation: false,
         noiseSuppression: false,
@@ -2040,6 +2043,13 @@ export class WebRtcEngine {
     }
 
     this.callbacks.onDetectedWindowChange?.(this.detectedWindowInfo);
+
+    if (isTauriEnvironment() && !isAndroidEnvironment()) {
+      const antiBlackEnabled = getAntiBlackScreenPreference();
+      if (antiBlackEnabled) {
+        setNativeAntiBlackScreen(true, this.detectedWindowInfo?.hwnd || 0).catch(() => {});
+      }
+    }
 
     if (isAndroidEnvironment()) {
       // No Android (APK ou WebView Mobile), usa o Motor de Áudio DSP Android (High-Pass 25Hz + Soft Limiter + Mixagem)
@@ -2144,6 +2154,9 @@ export class WebRtcEngine {
     androidAudioEngine.stop();
     if (isTauriEnvironment()) {
       stopNativeProcessAudio().catch(() => {});
+      if (!isAndroidEnvironment()) {
+        setNativeAntiBlackScreen(false, 0).catch(() => {});
+      }
     }
     this.isBroadcastingScreen = false;
 

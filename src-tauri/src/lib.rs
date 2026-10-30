@@ -17,7 +17,10 @@ use updater::{
     AppSystemInfo, UpdateCheckResult,
 };
 use wasapi_loopback::ProcessAudioCapturer;
-use window_manager::{enumerate_windows, WindowInfo};
+use window_manager::{
+    ensure_win32_restorable_styles, enumerate_windows, force_restore_and_check_offscreen_win32,
+    is_window_iconic_win32, AntiBlackScreenKeeper, WindowInfo,
+};
 
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -60,14 +63,26 @@ pub struct NativeDiagnosticsReport {
     pub details: Vec<String>,
 }
 
+/// Layout pendente caso o frontend peça redimensionamento enquanto a janela estiver minimizada
+#[derive(Debug, Clone)]
+pub struct PendingWindowLayout {
+    pub mode: String,
+    pub card_width: Option<f64>,
+    pub card_height: Option<f64>,
+    pub recenter: Option<bool>,
+}
+
 /// Estado Global compartilhado no Tauri
 pub struct AppState {
     pub audio_capturer: Arc<ProcessAudioCapturer>,
     pub screen_capturer: Arc<ScreenCapturerService>,
     pub tunnel_manager: Arc<TunnelManager>,
+    pub anti_black_screen: Arc<AntiBlackScreenKeeper>,
     pub signaling_state: Arc<Mutex<Option<Arc<SignalingServerState>>>>,
     pub startup_invite: Arc<Mutex<Option<String>>>,
     pub popup_windows: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    pub pending_layout: Arc<Mutex<Option<PendingWindowLayout>>>,
+    pub current_layout_mode: Arc<Mutex<String>>,
 }
 
 /// Retorna e limpa qualquer convite recebido via link streamcompanion:// na abertura do app
@@ -207,7 +222,21 @@ fn feed_android_audio_samples(samples: Vec<f32>) -> Result<(), String> {
 fn stop_process_audio(state: State<'_, AppState>) -> Result<(), String> {
     println!("[Audio] Parando captura de áudio");
     state.audio_capturer.stop();
+    state.anti_black_screen.set_mode(false, 0);
     Ok(())
+}
+
+/// Ativa ou desativa o Modo Anti-Tela Preta nativo (evita tela preta em sites como Disney+/Netflix quando o mouse para)
+#[tauri::command]
+fn set_anti_black_screen_mode(
+    enabled: bool,
+    target_hwnd: Option<isize>,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    state
+        .anti_black_screen
+        .set_mode(enabled, target_hwnd.unwrap_or(0));
+    Ok(state.anti_black_screen.is_enabled())
 }
 
 /// Consulta o estado atual da captura de áudio
@@ -336,6 +365,7 @@ fn save_file_dialog(
 /// Encerra totalmente o aplicativo e seus processos filhos
 #[tauri::command]
 fn close_app(state: State<'_, AppState>) {
+    state.anti_black_screen.set_mode(false, 0);
     state.tunnel_manager.stop();
     state.audio_capturer.stop();
     state.screen_capturer.stop();
@@ -350,10 +380,13 @@ fn close_app(state: State<'_, AppState>) {
     std::process::exit(0);
 }
 
-/// Aplica cantos arredondados nativos (Windows 11 DWM) e sombra escura em janelas sem barra padrão (decorations: false)
+/// Aplica cantos arredondados nativos (Windows 11 DWM), sombra escura e garante estilos Win32 de restauração
+/// (`WS_MINIMIZEBOX | WS_SYSMENU`) em janelas sem barra padrão (`decorations: false`)
 #[cfg(windows)]
-fn apply_windows_frameless_dwm_style(win: &tauri::WebviewWindow) {
+fn apply_windows_frameless_dwm_style(win: &tauri::WebviewWindow, allow_resize: bool) {
     if let Ok(hwnd) = win.hwnd() {
+        let raw_isize = hwnd.0 as isize;
+        ensure_win32_restorable_styles(raw_isize, allow_resize);
         unsafe {
             use windows::Win32::Foundation::HWND;
             use windows::Win32::Graphics::Dwm::{
@@ -381,16 +414,24 @@ fn apply_windows_frameless_dwm_style(win: &tauri::WebviewWindow) {
     }
 }
 
-/// Minimiza a janela atual (barra de título customizada)
+/// Minimiza a janela atual garantindo que os estilos Win32 de restauração (Alt+Tab / Barra de Tarefas) estejam ativos
 #[tauri::command]
-fn window_minimize(window: tauri::Window) -> Result<(), String> {
+fn window_minimize(window: tauri::Window, state: State<'_, AppState>) -> Result<(), String> {
     #[cfg(desktop)]
     {
+        if let Ok(hwnd) = window.hwnd() {
+            let is_workspace = state
+                .current_layout_mode
+                .lock()
+                .map(|m| *m == "workspace")
+                .unwrap_or(false);
+            ensure_win32_restorable_styles(hwnd.0 as isize, is_workspace);
+        }
         window.minimize().map_err(|e| e.to_string())?;
     }
     #[cfg(not(desktop))]
     {
-        let _ = window;
+        let _ = (window, state);
     }
     Ok(())
 }
@@ -400,6 +441,9 @@ fn window_minimize(window: tauri::Window) -> Result<(), String> {
 fn window_toggle_maximize(window: tauri::Window) -> Result<bool, String> {
     #[cfg(desktop)]
     {
+        if window.is_minimized().unwrap_or(false) {
+            let _ = window.unminimize();
+        }
         let is_max = window.is_maximized().unwrap_or(false);
         if is_max {
             window.unmaximize().map_err(|e| e.to_string())?;
@@ -479,10 +523,58 @@ fn window_close_current(window: tauri::Window, state: State<'_, AppState>) -> Re
     Ok(())
 }
 
-/// Alterna o tamanho da janela nativa entre o Modo Cartão de Login ("lobby", fixo e sem redimensionamento) e o Modo Sala Completa ("workspace", redimensionável)
+#[cfg(desktop)]
+fn apply_layout_to_window_now(
+    window: &tauri::Window,
+    mode: &str,
+    card_width: Option<f64>,
+    card_height: Option<f64>,
+    recenter: Option<bool>,
+) {
+    let raw_hwnd = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+    if mode == "lobby" {
+        if window.is_maximized().unwrap_or(false) {
+            let _ = window.unmaximize();
+        }
+        let target_w = card_width.unwrap_or(460.0).clamp(400.0, 560.0);
+        let target_h = card_height.unwrap_or(680.0).clamp(460.0, 920.0);
+        let _ = window.set_min_size(None::<tauri::Size>);
+        let _ = window.set_max_size(None::<tauri::Size>);
+        let _ = window.set_resizable(false);
+        ensure_win32_restorable_styles(raw_hwnd, false);
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+            width: target_w,
+            height: target_h,
+        }));
+        if recenter.unwrap_or(false) {
+            let _ = window.center();
+        }
+    } else {
+        let _ = window.set_max_size(None::<tauri::Size>);
+        let _ = window.set_resizable(true);
+        ensure_win32_restorable_styles(raw_hwnd, true);
+        let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+            width: 960.0,
+            height: 640.0,
+        })));
+        if !window.is_maximized().unwrap_or(false) {
+            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                width: 1280.0,
+                height: 820.0,
+            }));
+            if recenter.unwrap_or(true) {
+                let _ = window.center();
+            }
+        }
+    }
+}
+
+/// Alterna o tamanho da janela nativa entre o Modo Cartão de Login ("lobby", fixo e sem redimensionamento) e o Modo Sala Completa ("workspace", redimensionável).
+/// NUNCA altera tamanho/estilos enquanto a janela estiver minimizada (evita corromper rcNormalPosition para -32000,-32000 no Windows).
 #[tauri::command]
 fn window_set_layout_mode(
     window: tauri::Window,
+    state: State<'_, AppState>,
     mode: String,
     card_width: Option<f64>,
     card_height: Option<f64>,
@@ -493,43 +585,30 @@ fn window_set_layout_mode(
         if window.label() != "main" {
             return Ok(());
         }
-        if mode == "lobby" {
-            if window.is_maximized().unwrap_or(false) {
-                let _ = window.unmaximize();
-            }
-            let target_w = card_width.unwrap_or(460.0).clamp(400.0, 560.0);
-            let target_h = card_height.unwrap_or(680.0).clamp(460.0, 920.0);
-            let _ = window.set_min_size(None::<tauri::Size>);
-            let _ = window.set_max_size(None::<tauri::Size>);
-            let _ = window.set_resizable(false);
-            let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-                width: target_w,
-                height: target_h,
-            }));
-            if recenter.unwrap_or(false) {
-                let _ = window.center();
-            }
-        } else {
-            let _ = window.set_max_size(None::<tauri::Size>);
-            let _ = window.set_resizable(true);
-            let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
-                width: 960.0,
-                height: 640.0,
-            })));
-            if !window.is_maximized().unwrap_or(false) {
-                let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize {
-                    width: 1280.0,
-                    height: 820.0,
-                }));
-                if recenter.unwrap_or(true) {
-                    let _ = window.center();
-                }
-            }
+        if let Ok(mut m) = state.current_layout_mode.lock() {
+            *m = mode.clone();
         }
+
+        let raw_hwnd = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+        let is_min = window.is_minimized().unwrap_or(false) || is_window_iconic_win32(raw_hwnd);
+
+        if is_min {
+            if let Ok(mut pending) = state.pending_layout.lock() {
+                *pending = Some(PendingWindowLayout {
+                    mode,
+                    card_width,
+                    card_height,
+                    recenter,
+                });
+            }
+            return Ok(());
+        }
+
+        apply_layout_to_window_now(&window, &mode, card_width, card_height, recenter);
     }
     #[cfg(not(desktop))]
     {
-        let _ = (window, mode, card_width, card_height, recenter);
+        let _ = (window, state, mode, card_width, card_height, recenter);
     }
     Ok(())
 }
@@ -652,7 +731,7 @@ async fn open_stream_popup_window(
         }
 
         #[cfg(windows)]
-        apply_windows_frameless_dwm_style(&win);
+        apply_windows_frameless_dwm_style(&win, true);
 
         let _ = win.show();
         let _ = win.set_focus();
@@ -1106,8 +1185,9 @@ fn register_url_protocol_windows() {
     }
 }
 
-/// Se outra instância do StreamCompanion já estiver aberta na porta local 45789, encaminha o convite para ela e retorna true
-fn try_forward_invite_to_running_instance(invite_arg: &str) -> bool {
+/// Se outra instância do DisCrab já estiver aberta na porta local 45789, acorda/restaura a janela dela
+/// (e encaminha o convite se houver), retornando true para evitar abrir uma segunda instância duplicada.
+fn try_wake_or_forward_to_running_instance(invite_arg: Option<&str>) -> bool {
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
@@ -1118,14 +1198,18 @@ fn try_forward_invite_to_running_instance(invite_arg: &str) -> bool {
     };
 
     if let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(350)) {
-        let encoded = base64::Engine::encode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            invite_arg.as_bytes(),
-        );
-        let req = format!(
-            "GET /invite?b64={} HTTP/1.1\r\nHost: 127.0.0.1:45789\r\nConnection: close\r\n\r\n",
-            encoded
-        );
+        let req = if let Some(inv) = invite_arg {
+            let encoded = base64::Engine::encode(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+                inv.as_bytes(),
+            );
+            format!(
+                "GET /invite?b64={} HTTP/1.1\r\nHost: 127.0.0.1:45789\r\nConnection: close\r\n\r\n",
+                encoded
+            )
+        } else {
+            "GET /wake HTTP/1.1\r\nHost: 127.0.0.1:45789\r\nConnection: close\r\n\r\n".to_string()
+        };
         let _ = stream.write_all(req.as_bytes());
         let mut resp = [0u8; 128];
         let _ = stream.read(&mut resp);
@@ -1139,6 +1223,13 @@ fn try_forward_invite_to_running_instance(invite_arg: &str) -> bool {
 pub fn run() {
     #[cfg(windows)]
     {
+        // Desativa promoção de vídeo para Hardware Overlay / MPO recortado no WebView2 e habilita captura WGC estável
+        if std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_err() {
+            std::env::set_var(
+                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                "--disable-features=DirectCompositionVideoOverlays,UseMultiPlaneFormatForHardwareVideo --autoplay-policy=no-user-gesture-required",
+            );
+        }
         assign_to_job_object();
         register_url_protocol_windows();
     }
@@ -1151,10 +1242,9 @@ pub fn run() {
             || lower.contains("sala:")
     });
 
-    if let Some(ref invite_str) = cli_invite {
-        if try_forward_invite_to_running_instance(invite_str) {
-            std::process::exit(0);
-        }
+    #[cfg(not(target_os = "android"))]
+    if try_wake_or_forward_to_running_instance(cli_invite.as_deref()) {
+        std::process::exit(0);
     }
 
     #[cfg(not(target_os = "android"))]
@@ -1167,15 +1257,19 @@ pub fn run() {
     let audio_capturer_arc = Arc::new(audio_capturer);
     let screen_capturer_arc = Arc::new(ScreenCapturerService::new());
     let tunnel_manager_arc = Arc::new(TunnelManager::new());
+    let anti_black_screen_arc = Arc::new(AntiBlackScreenKeeper::new());
     let startup_invite_arc = Arc::new(Mutex::new(cli_invite));
 
     let app_state = AppState {
         audio_capturer: audio_capturer_arc.clone(),
         screen_capturer: screen_capturer_arc,
         tunnel_manager: tunnel_manager_arc,
+        anti_black_screen: anti_black_screen_arc,
         signaling_state: Arc::new(Mutex::new(None)),
         startup_invite: startup_invite_arc.clone(),
         popup_windows: Arc::new(Mutex::new(std::collections::HashMap::new())),
+        pending_layout: Arc::new(Mutex::new(None)),
+        current_layout_mode: Arc::new(Mutex::new("lobby".to_string())),
     };
 
     let builder = tauri::Builder::default().plugin(tauri_plugin_shell::init());
@@ -1199,11 +1293,11 @@ pub fn run() {
                     }
                     let _ = main_win.set_resizable(false);
                     #[cfg(windows)]
-                    apply_windows_frameless_dwm_style(&main_win);
+                    apply_windows_frameless_dwm_style(&main_win, false);
                 }
             }
 
-            // Servidor local leve em 127.0.0.1:45789 para receber deep-links streamcompanion://
+            // Servidor local leve em 127.0.0.1:45789 para receber deep-links streamcompanion:// e acordar janela minimizada (/wake)
             std::thread::spawn(move || {
                 use std::io::{Read, Write};
                 use std::net::TcpListener;
@@ -1215,6 +1309,7 @@ pub fn run() {
                         if let Ok(n) = stream.read(&mut buf) {
                             let req_str = String::from_utf8_lossy(&buf[..n]);
                             let first_line = req_str.lines().next().unwrap_or("");
+                            let is_wake = first_line.contains("/wake");
                             let mut extracted: Option<String> = None;
                             if let Some(q_idx) = first_line.find("/invite?") {
                                 let after = &first_line[q_idx + 8..];
@@ -1236,19 +1331,29 @@ pub fn run() {
                             let resp = "HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}";
                             let _ = stream.write_all(resp.as_bytes());
 
-                            if let Some(invite_payload) = extracted {
-                                if let Ok(mut lock) = invite_store.lock() {
-                                    *lock = Some(invite_payload.clone());
-                                }
+                            if is_wake || extracted.is_some() {
                                 #[cfg(desktop)]
                                 {
                                     if let Some(main_win) =
                                         invite_bridge_handle.get_webview_window("main")
                                     {
+                                        let raw_hwnd =
+                                            main_win.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+                                        let offscreen =
+                                            force_restore_and_check_offscreen_win32(raw_hwnd, true);
                                         let _ = main_win.unminimize();
                                         let _ = main_win.show();
+                                        if offscreen {
+                                            let _ = main_win.center();
+                                        }
                                         let _ = main_win.set_focus();
                                     }
+                                }
+                            }
+
+                            if let Some(invite_payload) = extracted {
+                                if let Ok(mut lock) = invite_store.lock() {
+                                    *lock = Some(invite_payload.clone());
                                 }
                                 let _ = invite_bridge_handle
                                     .emit("deep-link-invite", invite_payload);
@@ -1324,10 +1429,78 @@ pub fn run() {
                 }
                 return;
             }
+
+            #[cfg(desktop)]
+            match event {
+                WindowEvent::Focused(true) => {
+                    let raw_hwnd = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+                    let needs_rescue = force_restore_and_check_offscreen_win32(raw_hwnd, true);
+                    let app = window.app_handle();
+                    let mut applied_pending = false;
+
+                    if let Some(state) = app.try_state::<AppState>() {
+                        let pending = state.pending_layout.lock().ok().and_then(|mut p| p.take());
+                        if let Some(layout) = pending {
+                            apply_layout_to_window_now(
+                                window,
+                                &layout.mode,
+                                layout.card_width,
+                                layout.card_height,
+                                layout.recenter,
+                            );
+                            applied_pending = true;
+                        }
+                    }
+
+                    if needs_rescue && !applied_pending {
+                        let is_workspace = app
+                            .try_state::<AppState>()
+                            .and_then(|st| {
+                                st.current_layout_mode.lock().ok().map(|m| *m == "workspace")
+                            })
+                            .unwrap_or(false);
+                        apply_layout_to_window_now(
+                            window,
+                            if is_workspace { "workspace" } else { "lobby" },
+                            None,
+                            None,
+                            Some(true),
+                        );
+                    }
+                }
+                WindowEvent::Resized(_) => {
+                    let raw_hwnd = window.hwnd().map(|h| h.0 as isize).unwrap_or(0);
+                    if !window.is_minimized().unwrap_or(false) && !is_window_iconic_win32(raw_hwnd)
+                    {
+                        let app = window.app_handle();
+                        let mut applied_pending = false;
+                        if let Some(state) = app.try_state::<AppState>() {
+                            let pending =
+                                state.pending_layout.lock().ok().and_then(|mut p| p.take());
+                            if let Some(layout) = pending {
+                                apply_layout_to_window_now(
+                                    window,
+                                    &layout.mode,
+                                    layout.card_width,
+                                    layout.card_height,
+                                    layout.recenter,
+                                );
+                                applied_pending = true;
+                            }
+                        }
+                        if !applied_pending && force_restore_and_check_offscreen_win32(raw_hwnd, false) {
+                            let _ = window.center();
+                        }
+                    }
+                }
+                _ => {}
+            }
+
             if let WindowEvent::CloseRequested { .. } | WindowEvent::Destroyed = event {
                 println!("[Shutdown] Encerrando StreamCompanion e liberando processos...");
                 let app = window.app_handle();
                 if let Some(state) = app.try_state::<AppState>() {
+                    state.anti_black_screen.set_mode(false, 0);
                     state.tunnel_manager.stop();
                     state.audio_capturer.stop();
                     state.screen_capturer.stop();
@@ -1353,6 +1526,7 @@ pub fn run() {
             start_multi_process_audio,
             feed_android_audio_samples,
             stop_process_audio,
+            set_anti_black_screen_mode,
             get_current_audio_status,
             list_displays,
             start_screen_capture,

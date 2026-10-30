@@ -8,9 +8,14 @@ import {
   ChevronUp,
   PowerOff,
   AppWindow,
+  ShieldCheck,
 } from 'lucide-react';
 import { WindowItem, AudioSourceMode, LocalMediaSource } from '../types';
-import { isAndroidEnvironment } from '../services/tauriBridge';
+import {
+  isAndroidEnvironment,
+  getAntiBlackScreenPreference,
+  setNativeAntiBlackScreen,
+} from '../services/tauriBridge';
 import {
   androidAudioEngine,
   AndroidAudioCaptureMode,
@@ -61,6 +66,21 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
   const [androidAudioMode, setAndroidAudioMode] = useState<AndroidAudioCaptureMode>(() =>
     androidAudioEngine.getMode()
   );
+  const [antiBlackScreen, setAntiBlackScreen] = useState<boolean>(() =>
+    getAntiBlackScreenPreference()
+  );
+
+  const handleToggleAntiBlackScreen = async () => {
+    const nextVal = !antiBlackScreen;
+    setAntiBlackScreen(nextVal);
+    if (isScreenSharing) {
+      await setNativeAntiBlackScreen(nextVal, selectedWindow?.hwnd || 0);
+    } else {
+      try {
+        localStorage.setItem('sc_anti_black_screen', String(nextVal));
+      } catch {}
+    }
+  };
 
   const handleCycleAndroidAudioMode = () => {
     const order: AndroidAudioCaptureMode[] = ['internal_system', 'mixed_live', 'voice_crystal'];
@@ -79,7 +99,7 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
 
   return (
     <div className="flex flex-wrap items-center justify-between gap-2">
-      {/* Controles Compactos de Captura: Tela, Áudio e Câmera */}
+      {/* Controles Compactos de Captura: Tela, Áudio, Câmera e Anti-Tela Preta */}
       <div className="flex items-center gap-1.5 flex-wrap">
         {/* 1. Transmitir Tela */}
         <button
@@ -172,6 +192,31 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
             </button>
           )}
         </div>
+
+        {/* 4. Botão Anti-Tela Preta (Disney+ / Netflix / Navegadores quando o mouse fica parado) */}
+        {!isAndroid && (
+          <button
+            type="button"
+            onClick={handleToggleAntiBlackScreen}
+            className={`sc-btn h-8 flex items-center gap-1.5 px-2.5 rounded-lg font-mono text-xs whitespace-nowrap transition-all cursor-pointer border ${
+              antiBlackScreen
+                ? 'bg-emerald-950/70 border-emerald-500/60 text-emerald-300 hover:border-emerald-400'
+                : 'bg-neutral-950 border-neutral-800 text-neutral-500 hover:text-neutral-300'
+            }`}
+            title={
+              antiBlackScreen
+                ? 'Modo Anti-Tela Preta ATIVO: impede que sites como Disney+ e navegadores deixem o vídeo preto quando você para de mexer o mouse (força composição DWM + keep-alive de vídeo)'
+                : 'Modo Anti-Tela Preta DESATIVADO (clique para ativar proteção contra vídeo preto no Disney+ / Navegador)'
+            }
+          >
+            <ShieldCheck
+              className={`w-3.5 h-3.5 shrink-0 ${
+                antiBlackScreen ? 'text-emerald-400' : 'text-neutral-600'
+              }`}
+            />
+            <span className="hidden sm:inline">Anti-Tela Preta</span>
+          </button>
+        )}
       </div>
 
       {/* Seletores Alinhados de Resolução e FPS */}

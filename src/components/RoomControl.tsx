@@ -156,7 +156,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     const res = getStartupUpdateState().result;
     return Boolean(
       res?.has_update &&
-        isStrictlyNewerVersion(res.current_version || '1.1.6', res.latest_version)
+        isStrictlyNewerVersion(res.current_version || '1.1.7', res.latest_version)
     );
   });
   const [latestTag, setLatestTag] = useState<string>(
@@ -170,7 +170,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
         const verified = Boolean(
           st.result.has_update &&
             isStrictlyNewerVersion(
-              st.result.current_version || '1.1.6',
+              st.result.current_version || '1.1.7',
               st.result.latest_version
             )
         );
@@ -185,7 +185,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
       if (custom.detail) {
         const tag = custom.detail.latestTag || '';
         const verified = Boolean(
-          custom.detail.hasUpdate && tag && isStrictlyNewerVersion('1.1.6', tag)
+          custom.detail.hasUpdate && tag && isStrictlyNewerVersion('1.1.7', tag)
         );
         setHasUpdateAvailable(verified);
         setLatestTag(tag);
@@ -244,11 +244,23 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     const el = lobbyCardRef.current;
     if (!el) return;
 
+    let lastAppliedH = 0;
+
     const applyCardBounds = () => {
-      const contentH = Math.ceil(el.offsetHeight || el.scrollHeight || 620);
+      if (
+        typeof document !== 'undefined' &&
+        (document.hidden || window.innerWidth < 100 || window.innerHeight < 100)
+      ) {
+        return;
+      }
+      const rawH = Math.ceil(el.offsetHeight || el.scrollHeight || 0);
+      if (rawH < 200) return;
+
       // 36px da barra superior do cartão + altura exata do conteúdo interno + 2px de borda
       const targetW = 460;
-      const targetH = Math.max(500, contentH + 38);
+      const targetH = Math.max(500, rawH + 38);
+      if (Math.abs(targetH - lastAppliedH) < 2) return;
+      lastAppliedH = targetH;
       setAppWindowLayoutMode('lobby', targetW, targetH, false);
     };
 

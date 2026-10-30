@@ -270,7 +270,7 @@ export async function getAppSystemInfo(): Promise<AppSystemInfo> {
     return await invokeTauri<AppSystemInfo>('get_app_system_info');
   }
   return {
-    current_version: '1.1.6',
+    current_version: '1.1.7',
     exe_path: 'Modo Web (Navegador)',
     cloudflared: {
       installed: false,
@@ -330,7 +330,7 @@ export async function checkGithubUpdate(
       repo: effectiveRepo,
     });
     // Garante validação semântica estrita também no lado TypeScript (latest > current)
-    res.has_update = isStrictlyNewerVersion(res.current_version || '1.1.6', res.latest_version);
+    res.has_update = isStrictlyNewerVersion(res.current_version || '1.1.7', res.latest_version);
     if (preferApk && res.apk_download_url) {
       res.download_url = res.apk_download_url;
       res.asset_name = res.apk_asset_name || res.asset_name;
@@ -358,7 +358,7 @@ export async function checkGithubUpdate(
     throw new Error(`GitHub API retornou status ${resp.status} para '${repo}'.`);
   }
   const json = await resp.json();
-  const currentVersion = '1.1.6';
+  const currentVersion = '1.1.7';
   const latestVersion = json.tag_name || currentVersion;
 
   let exeDownloadUrl: string | null = null;
@@ -612,11 +612,11 @@ export async function forwardInviteToLocalDesktopApp(inviteStr: string): Promise
 export async function minimizeAppWindow(): Promise<void> {
   if (isTauriEnvironment()) {
     try {
-      await getCurrentWindow().minimize();
+      await invokeTauri<void>('window_minimize');
       return;
     } catch {
       try {
-        await invokeTauri<void>('window_minimize');
+        await getCurrentWindow().minimize();
       } catch {}
     }
   }
@@ -721,6 +721,14 @@ export async function setAppWindowLayoutMode(
   recenter?: boolean
 ): Promise<void> {
   if (isTauriEnvironment() && !isAndroidEnvironment()) {
+    // Evita redimensionar a janela enquanto ela estiver minimizada/oculta no Windows
+    if (
+      typeof document !== 'undefined' &&
+      document.hidden &&
+      !recenter
+    ) {
+      return;
+    }
     try {
       await invokeTauri<void>('window_set_layout_mode', {
         mode,
@@ -731,4 +739,34 @@ export async function setAppWindowLayoutMode(
     } catch {}
   }
 }
+
+// Obtém a preferência salva do Modo Anti-Tela Preta para Streaming (Disney+, Netflix, etc.) - Ativo por padrão
+export function getAntiBlackScreenPreference(): boolean {
+  try {
+    const val = localStorage.getItem('sc_anti_black_screen');
+    return val === null ? true : val === 'true';
+  } catch {
+    return true;
+  }
+}
+
+// Ativa/desativa o motor nativo Win32 Anti-Tela Preta (composição DWM WS_EX_LAYERED + micro-pulso de compositor)
+export async function setNativeAntiBlackScreen(
+  enabled: boolean,
+  targetHwnd?: number
+): Promise<boolean> {
+  try {
+    localStorage.setItem('sc_anti_black_screen', String(enabled));
+  } catch {}
+  if (isTauriEnvironment() && !isAndroidEnvironment()) {
+    try {
+      return await invokeTauri<boolean>('set_anti_black_screen_mode', {
+        enabled,
+        targetHwnd: targetHwnd ?? null,
+      });
+    } catch {}
+  }
+  return enabled;
+}
+
 

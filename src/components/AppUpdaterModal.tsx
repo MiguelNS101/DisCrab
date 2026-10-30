@@ -89,7 +89,7 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
     try {
       const res = await checkGithubUpdate(FIXED_GITHUB_REPO);
       const effectiveCur =
-        systemInfo?.current_version || res.current_version || '1.1.6';
+        systemInfo?.current_version || res.current_version || '1.1.7';
       res.has_update = Boolean(
         res.has_update && isStrictlyNewerVersion(effectiveCur, res.latest_version)
       );
@@ -262,7 +262,7 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
               </div>
 
               <span className="text-[10px] px-2 py-0.5 rounded bg-neutral-900 border border-neutral-700 text-neutral-300">
-                Versão Atual: <strong className="text-white">v{systemInfo?.current_version || '1.1.6'}</strong>
+                Versão Atual: <strong className="text-white">v{systemInfo?.current_version || '1.1.7'}</strong>
               </span>
             </div>
 
@@ -315,7 +315,7 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
 
                   {updateResult.has_update &&
                   isStrictlyNewerVersion(
-                    systemInfo?.current_version || updateResult.current_version || '1.1.6',
+                    systemInfo?.current_version || updateResult.current_version || '1.1.7',
                     updateResult.latest_version
                   ) ? (
                     <span className="text-[10px] px-2.5 py-1 rounded-full bg-emerald-500/20 border border-emerald-500 text-emerald-300 font-bold animate-pulse">
@@ -323,7 +323,7 @@ export const AppUpdaterModal: React.FC<AppUpdaterModalProps> = ({
                     </span>
                   ) : (
                     <span className="text-[10px] px-2.5 py-1 rounded-full bg-neutral-800 border border-neutral-700 text-neutral-300">
-                      Você já está na versão mais recente (v{systemInfo?.current_version || updateResult.current_version || '1.1.6'})
+                      Você já está na versão mais recente (v{systemInfo?.current_version || updateResult.current_version || '1.1.7'})
                     </span>
                   )}
                 </div>

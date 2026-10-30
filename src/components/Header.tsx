@@ -51,12 +51,12 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [memoryMb, setMemoryMb] = useState<number>(38.4);
   const [internalUpdaterOpen, setInternalUpdaterOpen] = useState<boolean>(false);
-  const [currentVersion, setCurrentVersion] = useState<string>('1.1.6');
+  const [currentVersion, setCurrentVersion] = useState<string>('1.1.7');
   const [hasUpdateAvailable, setHasUpdateAvailable] = useState<boolean>(() =>
     Boolean(
       startupCachedResult?.has_update &&
         isStrictlyNewerVersion(
-          startupCachedResult.current_version || '1.1.6',
+          startupCachedResult.current_version || '1.1.7',
           startupCachedResult.latest_version
         )
     )
@@ -79,7 +79,7 @@ export const Header: React.FC<HeaderProps> = ({
 
   const handleUpdateDetected = useCallback(
     (hasUpdate: boolean, tag?: string, result?: UpdateCheckResult) => {
-      const effectiveCur = result?.current_version || currentVersion || '1.1.6';
+      const effectiveCur = result?.current_version || currentVersion || '1.1.7';
       const effectiveLat = tag || result?.latest_version || '';
       const verifiedNewer = Boolean(
         hasUpdate && effectiveLat && isStrictlyNewerVersion(effectiveCur, effectiveLat)
@@ -144,7 +144,7 @@ export const Header: React.FC<HeaderProps> = ({
         .then((res) => {
           const verifiedNewer = Boolean(
             res.has_update &&
-              isStrictlyNewerVersion(res.current_version || '1.1.6', res.latest_version)
+              isStrictlyNewerVersion(res.current_version || '1.1.7', res.latest_version)
           );
           res.has_update = verifiedNewer;
           startupCachedResult = res;
@@ -188,7 +188,7 @@ export const Header: React.FC<HeaderProps> = ({
       const verifiedNewer = Boolean(
         startupCachedResult.has_update &&
           isStrictlyNewerVersion(
-            startupCachedResult.current_version || '1.1.6',
+            startupCachedResult.current_version || '1.1.7',
             startupCachedResult.latest_version
           )
       );
