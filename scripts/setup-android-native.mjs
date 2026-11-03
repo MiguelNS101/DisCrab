@@ -568,7 +568,6 @@ import android.view.View
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebView
-import androidx.activity.enableEdgeToEdge
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import java.lang.ref.WeakReference
@@ -622,7 +621,6 @@ class MainActivity : TauriActivity() {
     private var reloadChecked = false
 ${onWebViewCreateOverride}
     override fun onCreate(savedInstanceState: Bundle?) {
-        enableEdgeToEdge()
         super.onCreate(savedInstanceState)
         scheduleWebViewBridgeAttach()
     }
@@ -634,48 +632,50 @@ ${onWebViewCreateOverride}
 
     private fun attachBridgeToWebView(wv: WebView, checkReloadIfNeeded: Boolean) {
         activeWebViewRef = WeakReference(wv)
+        val bridge = DisCrabAndroidBridge(this)
+        val isQuest = bridge.isQuestDevice()
+
         if (!bridgeAttached) {
             bridgeAttached = true
             try {
                 wv.settings.javaScriptEnabled = true
                 wv.settings.mediaPlaybackRequiresUserGesture = false
                 wv.settings.domStorageEnabled = true
-                wv.settings.databaseEnabled = true
-                
-                // Concede automaticamente permissões de câmera e microfone solicitadas por WebRTC / getUserMedia na WebView
                 wv.webChromeClient = object : android.webkit.WebChromeClient() {
                     override fun onPermissionRequest(request: android.webkit.PermissionRequest) {
-                        runOnUiThread {
+                        mainHandler.post {
                             try {
                                 request.grant(request.resources)
                             } catch (_: Throwable) {}
                         }
                     }
                 }
-
-                val bridge = DisCrabAndroidBridge(this)
                 wv.addJavascriptInterface(bridge, "DisCrabAndroidBridge")
-
-                val isQuest = bridge.isQuestDevice()
-                val injectScript = "window.__DISCRAB_ANDROID_BRIDGE_READY__ = true; window.__IS_META_QUEST__ = $isQuest; window.dispatchEvent(new CustomEvent('discrab-android-bridge-ready', { detail: { isQuest: $isQuest } }));"
-                wv.evaluateJavascript(injectScript, null)
             } catch (_: Throwable) {}
         }
+
+        val injectScript = "window.__DISCRAB_ANDROID_BRIDGE_READY__ = true; window.__IS_META_QUEST__ = $isQuest; window.dispatchEvent(new CustomEvent('discrab-android-bridge-ready', { detail: { isQuest: $isQuest } }));"
+        try {
+            wv.evaluateJavascript(injectScript, null)
+        } catch (_: Throwable) {}
+
         if (checkReloadIfNeeded && !reloadChecked && wv.url != null) {
             reloadChecked = true
             mainHandler.postDelayed({
                 try {
-                    val bridge = DisCrabAndroidBridge(this)
-                    val isQuest = bridge.isQuestDevice()
-                    val injectScript = "window.__DISCRAB_ANDROID_BRIDGE_READY__ = true; window.__IS_META_QUEST__ = $isQuest; window.dispatchEvent(new CustomEvent('discrab-android-bridge-ready', { detail: { isQuest: $isQuest } }));"
                     wv.evaluateJavascript(injectScript, null)
                     wv.evaluateJavascript("typeof window.DisCrabAndroidBridge === 'undefined'") { res ->
                         if (res == "true") {
                             wv.reload()
+                            mainHandler.postDelayed({
+                                try {
+                                    wv.evaluateJavascript(injectScript, null)
+                                } catch (_: Throwable) {}
+                            }, 600L)
                         }
                     }
                 } catch (_: Throwable) {}
-            }, 250L)
+            }, 300L)
         }
     }
 
@@ -684,10 +684,13 @@ ${onWebViewCreateOverride}
             val wv = findWebView(window?.decorView)
             if (wv != null) {
                 attachBridgeToWebView(wv, true)
+                if (attempt < 12) {
+                    scheduleWebViewBridgeAttach(attempt + 1)
+                }
             } else if (attempt < 40) {
                 scheduleWebViewBridgeAttach(attempt + 1)
             }
-        }, if (attempt == 0) 50L else 150L)
+        }, if (attempt == 0) 50L else 300L)
     }
 
     private fun findWebView(view: View?): WebView? {
