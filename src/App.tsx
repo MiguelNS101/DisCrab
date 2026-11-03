@@ -33,6 +33,13 @@ import {
   isAndroidEnvironment,
   setAppWindowLayoutMode,
 } from './services/tauriBridge';
+import {
+  isMetaQuestDevice,
+  detectQuestOrVrEnvironment,
+  getDeviceBroadcastCapabilities,
+  getManualQuestMode,
+} from './services/webrtc/AndroidScreenCaptureBridge';
+import { PeerHealthInspector } from './components/PeerHealthInspector';
 import { ThemeProvider } from './context/ThemeContext';
 import { ThemeCustomizerModal } from './components/ThemeCustomizerModal';
 import { AppIcon } from './components/AppIcon';
@@ -52,6 +59,8 @@ import {
   Globe,
   Wifi,
   Loader2,
+  Glasses,
+  Activity,
 } from 'lucide-react';
 
 export default function App() {
@@ -87,6 +96,62 @@ function MainAppWorkspace() {
 
   const [roomDetails, setRoomDetails] = useState<RoomDetails | null>(null);
   const [isHost, setIsHost] = useState<boolean>(true);
+  const [isQuestOrVr, setIsQuestOrVr] = useState<boolean>(
+    () => isMetaQuestDevice() || getManualQuestMode()
+  );
+  const [showPeerHealthModal, setShowPeerHealthModal] = useState<boolean>(false);
+
+  useEffect(() => {
+    let mounted = true;
+
+    const checkQuest = () => {
+      if (!mounted) return;
+      if (isMetaQuestDevice() || getManualQuestMode()) {
+        setIsQuestOrVr(true);
+      }
+    };
+
+    checkQuest();
+    detectQuestOrVrEnvironment().then((detected) => {
+      if (mounted && detected) {
+        setIsQuestOrVr(true);
+      }
+    });
+
+    const interval = setInterval(checkQuest, 300);
+    const stopTimer = setTimeout(() => clearInterval(interval), 4000);
+
+    const onBridgeReady = (e: any) => {
+      if (mounted) {
+        const isQuest = e?.detail?.isQuest || isMetaQuestDevice();
+        if (isQuest) {
+          setIsQuestOrVr(true);
+        }
+      }
+    };
+
+    const onQuestModeChange = (e: any) => {
+      if (mounted) {
+        setIsQuestOrVr(Boolean(e?.detail?.enabled));
+      }
+    };
+
+    window.addEventListener('discrab-android-bridge-ready', onBridgeReady);
+    window.addEventListener('discrab-quest-mode-change', onQuestModeChange);
+
+    return () => {
+      mounted = false;
+      clearInterval(interval);
+      clearTimeout(stopTimer);
+      window.removeEventListener('discrab-android-bridge-ready', onBridgeReady);
+      window.removeEventListener('discrab-quest-mode-change', onQuestModeChange);
+    };
+  }, []);
+
+  const isAndroidEnv = isAndroidEnvironment();
+  const isTauriDesktopEnv = isTauriEnvironment() && !isAndroidEnv;
+  const deviceCapabilities = getDeviceBroadcastCapabilities(isAndroidEnv, isTauriDesktopEnv);
+  const effectiveIsQuestOrVr = isQuestOrVr || deviceCapabilities.isQuestOrVr;
   const [isLocalStudio, setIsLocalStudio] = useState<boolean>(false);
   const [externalUpdaterOpen, setExternalUpdaterOpen] = useState<boolean>(false);
   const [isEnteringRoomTransition, setIsEnteringRoomTransition] = useState<boolean>(false);
@@ -146,6 +211,7 @@ function MainAppWorkspace() {
     reconnectAllPeers,
     resetPeerConnection,
     startScreenShare,
+    startQuestPovShare,
     updateStreamQuality,
     getDetectedWindowPid,
     detectedWindow,
@@ -371,9 +437,9 @@ function MainAppWorkspace() {
     return autoPid > 0 ? `Janela da Live (PID ${autoPid})` : 'Tela da Live (Sem Discord)';
   };
 
-  // Alternância dinâmica de áudio WASAPI em tempo real quando o usuário muda a fonte durante a live
+  // Alternância dinâmica de áudio WASAPI em tempo real quando o usuário muda a fonte durante a live (apenas Desktop Windows)
   useEffect(() => {
-    if (isScreenSharing && isolateAudio && isTauriEnvironment()) {
+    if (isScreenSharing && isolateAudio && isTauriEnvironment() && !isAndroidEnvironment()) {
       const pids = getEffectiveAudioPids();
       startNativeMultiProcessAudio(pids).catch((err) =>
         console.warn('[App] Erro ao alternar fontes de áudio nativas:', err)
@@ -778,20 +844,38 @@ function MainAppWorkspace() {
                     Palco de Transmissões Ao Vivo ({totalActiveStreams})
                   </h2>
                 </div>
-                <div className="flex items-center gap-3 text-xs font-mono text-neutral-400">
+                <div className="flex items-center gap-2 text-xs font-mono text-neutral-400 flex-wrap">
                   <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-neutral-900 border border-neutral-800">
                     <Users className="w-3.5 h-3.5 text-cyan-400" />
                     Na Sala: <strong className="text-white">{visiblePeers.length + 1}</strong>
                   </span>
                   {isConnected && visiblePeers.length > 0 && (
-                    <button
-                      onClick={reconnectAllPeers}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-cyan-700 text-cyan-300 rounded-lg cursor-pointer transition-colors"
-                      title="Forçar ressincronização P2P com todos os participantes"
-                    >
-                      <RefreshCw className="w-3 h-3" />
-                      <span>Resetar P2P</span>
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setShowPeerHealthModal(true)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-purple-950/70 hover:bg-purple-900 border border-purple-600/60 text-purple-200 rounded-lg cursor-pointer transition-colors"
+                        title="Ver Ping e perda de pacotes de cada participante para descobrir quem está com problemas de conexão"
+                      >
+                        <Activity className="w-3.5 h-3.5 text-purple-400" />
+                        <span>Ping da Sala</span>
+                        {visiblePeers.some(
+                          (p) =>
+                            p.networkStats &&
+                            (p.networkStats.packetLossPct >= 4 || p.networkStats.rttMs >= 220)
+                        ) && (
+                          <span className="w-2 h-2 rounded-full bg-red-400 animate-ping inline-block" />
+                        )}
+                      </button>
+                      <button
+                        onClick={reconnectAllPeers}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-800 hover:border-cyan-700 text-cyan-300 rounded-lg cursor-pointer transition-colors"
+                        title="Forçar ressincronização P2P com todos os participantes"
+                      >
+                        <RefreshCw className="w-3 h-3" />
+                        <span>Resetar P2P</span>
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
@@ -813,26 +897,122 @@ function MainAppWorkspace() {
                   <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
                     <button
                       type="button"
-                      onClick={handleToggleScreenShare}
-                      className="sc-btn sc-btn-primary sc-btn-sized flex items-center gap-2 px-4 py-2 bg-cyan-500 text-black font-mono font-bold text-xs rounded-xl cursor-pointer"
+                      disabled={!deviceCapabilities.canShareScreen}
+                      onClick={() => {
+                        if (deviceCapabilities.canShareScreen) handleToggleScreenShare();
+                      }}
+                      className={`sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 font-mono font-bold text-xs rounded-xl transition-all ${
+                        !deviceCapabilities.canShareScreen
+                          ? 'bg-neutral-900 border border-neutral-800 text-neutral-600 opacity-45 cursor-not-allowed'
+                          : 'sc-btn-primary bg-cyan-500 text-black cursor-pointer'
+                      }`}
+                      title={
+                        effectiveIsQuestOrVr
+                          ? 'No Meta Quest / VR, use os botões de Visão Quest 3 (POV) ao lado'
+                          : !deviceCapabilities.canShareScreen
+                          ? 'Captura de tela não compatível neste navegador'
+                          : 'Transmitir sua tela agora'
+                      }
                     >
                       <Monitor className="w-4 h-4" />
-                      <span>Transmitir Tela Agora</span>
+                      <span>
+                        {isAndroidEnv
+                          ? 'Transmitir Tela + Áudio Agora'
+                          : 'Transmitir Tela Agora'}
+                      </span>
                     </button>
+                    {(effectiveIsQuestOrVr || isAndroidEnv) && (
+                      <>
+                        <button
+                          type="button"
+                          disabled={!deviceCapabilities.canUseQuestVrScreen}
+                          onClick={() => {
+                            if (deviceCapabilities.canUseQuestVrScreen) {
+                              startQuestPovShare('vr_screen', fps, resolution);
+                            }
+                          }}
+                          className={`sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 font-mono font-bold text-xs rounded-xl border transition-all ${
+                            !deviceCapabilities.canUseQuestVrScreen
+                              ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
+                              : 'bg-purple-950/80 hover:bg-purple-900 border-purple-500/60 text-purple-200 cursor-pointer'
+                          }`}
+                          title="Transmitir a Visão VR Completa + Áudio Interno do Meta Quest 3"
+                        >
+                          <Glasses className="w-4 h-4 text-purple-400" />
+                          <span>Gravar Visão Quest 3 (VR + Áudio)</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!deviceCapabilities.canUseQuestPassthrough}
+                          onClick={() => {
+                            if (deviceCapabilities.canUseQuestPassthrough) {
+                              startQuestPovShare('passthrough_camera', fps, resolution);
+                            }
+                          }}
+                          className={`sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 font-mono font-bold text-xs rounded-xl border transition-all ${
+                            !deviceCapabilities.canUseQuestPassthrough
+                              ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
+                              : 'bg-cyan-950/80 hover:bg-cyan-900 border-cyan-500/60 text-cyan-200 cursor-pointer'
+                          }`}
+                          title="Transmitir a Câmera Passthrough POV (Mundo Real + Voz) do Meta Quest 3"
+                        >
+                          <Glasses className="w-4 h-4 text-cyan-400" />
+                          <span>Câmera Passthrough POV (Quest 3)</span>
+                        </button>
+                      </>
+                    )}
                     <button
                       type="button"
-                      onClick={() => setShowSourceManager(true)}
-                      className="sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-200 font-mono text-xs rounded-xl cursor-pointer"
+                      disabled={!deviceCapabilities.canUseStandardCamera}
+                      onClick={() => {
+                        if (deviceCapabilities.canUseStandardCamera) setShowSourceManager(true);
+                      }}
+                      className={`sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 border font-mono text-xs rounded-xl transition-all ${
+                        !deviceCapabilities.canUseStandardCamera
+                          ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
+                          : 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-neutral-200 cursor-pointer'
+                      }`}
+                      title={
+                        effectiveIsQuestOrVr
+                          ? 'No Meta Quest / VR, use o botão Câmera Passthrough POV (Quest 3)'
+                          : 'Ligar Webcam ou Placa de Captura USB'
+                      }
                     >
-                      <Video className="w-4 h-4 text-indigo-400" />
+                      <Video
+                        className={`w-4 h-4 ${
+                          !deviceCapabilities.canUseStandardCamera
+                            ? 'text-neutral-600'
+                            : 'text-indigo-400'
+                        }`}
+                      />
                       <span>Ligar Câmera / Placa de Captura</span>
                     </button>
                     <button
                       type="button"
-                      onClick={() => setShowWindowSelector(true)}
-                      className="sc-btn sc-btn-sized flex items-center gap-2 px-3.5 py-2 bg-neutral-950 hover:bg-neutral-800 border border-neutral-800 text-neutral-300 font-mono text-xs rounded-xl cursor-pointer"
+                      disabled={!deviceCapabilities.canUseWindowAudioSelector}
+                      onClick={() => {
+                        if (deviceCapabilities.canUseWindowAudioSelector) {
+                          setShowWindowSelector(true);
+                        }
+                      }}
+                      className={`sc-btn sc-btn-sized flex items-center gap-2 px-3.5 py-2 border font-mono text-xs rounded-xl transition-all ${
+                        !deviceCapabilities.canUseWindowAudioSelector
+                          ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
+                          : 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-neutral-300 cursor-pointer'
+                      }`}
+                      title={
+                        !deviceCapabilities.canUseWindowAudioSelector
+                          ? 'Separação de áudio por janela disponível apenas no aplicativo Desktop Windows'
+                          : 'Configurar Janela de Áudio WASAPI'
+                      }
                     >
-                      <AppWindow className="w-4 h-4 text-cyan-400" />
+                      <AppWindow
+                        className={`w-4 h-4 ${
+                          !deviceCapabilities.canUseWindowAudioSelector
+                            ? 'text-neutral-600'
+                            : 'text-cyan-400'
+                        }`}
+                      />
                       <span>Configurar Janela de Áudio</span>
                     </button>
                   </div>
@@ -1019,6 +1199,7 @@ function MainAppWorkspace() {
                     fps={fps}
                     resolution={resolution}
                     onToggleScreenShare={handleToggleScreenShare}
+                    onStartQuestPov={(mode) => startQuestPovShare(mode, fps, resolution)}
                     onToggleWebcam={toggleWebcam}
                     onToggleIsolateAudio={setIsolateAudio}
                     onChangeFps={setFps}
@@ -1040,24 +1221,68 @@ function MainAppWorkspace() {
                         <span>{nickname} (Você)</span>
                       </span>
 
-                      {/* Amigos Conectados (Sem Duplicatas Visuais) */}
+                      {/* Amigos Conectados (Sem Duplicatas Visuais) com Ping e Perda em Tempo Real */}
                       {visiblePeers.map((p) => {
                         const isPeerOk = p.connectionState === 'connected';
+                        const stats = p.networkStats;
+                        const hasHighLoss = isPeerOk && stats && stats.packetLossPct >= 4;
+                        const hasHighPing = isPeerOk && stats && stats.rttMs >= 160;
+
                         return (
                           <span
                             key={p.nickname ? p.nickname.toLowerCase() : p.id}
-                            className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md bg-neutral-950 border border-neutral-800 text-neutral-200 text-[11px]"
-                            title={`Estado P2P: ${p.connectionState}`}
+                            className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] transition-colors ${
+                              hasHighLoss
+                                ? 'bg-red-950/70 border-red-700/80 text-red-200 shadow-sm shadow-red-950'
+                                : hasHighPing
+                                ? 'bg-amber-950/60 border-amber-700/60 text-amber-200'
+                                : 'bg-neutral-950 border-neutral-800 text-neutral-200'
+                            }`}
+                            title={`Estado P2P: ${p.connectionState}${
+                              stats ? ` · Ping: ${stats.rttMs}ms · Perda: ${stats.packetLossPct}%` : ''
+                            }`}
                           >
                             <span
                               className={`w-1.5 h-1.5 rounded-full ${
-                                isPeerOk ? 'bg-emerald-400' : 'bg-amber-400 animate-pulse'
+                                !isPeerOk
+                                  ? 'bg-amber-400 animate-pulse'
+                                  : hasHighLoss
+                                  ? 'bg-red-400 animate-ping'
+                                  : hasHighPing
+                                  ? 'bg-amber-400'
+                                  : 'bg-emerald-400'
                               }`}
                             />
                             <span>{p.nickname}</span>
+                            {isPeerOk && stats && stats.rttMs > 0 && (
+                              <span
+                                className={`text-[10px] font-mono px-1 rounded ${
+                                  hasHighLoss
+                                    ? 'bg-red-900 text-red-100 font-bold'
+                                    : hasHighPing
+                                    ? 'bg-amber-900/60 text-amber-300'
+                                    : 'text-neutral-400'
+                                }`}
+                              >
+                                {stats.rttMs}ms{stats.packetLossPct > 0 ? ` · ${stats.packetLossPct}%` : ''}
+                              </span>
+                            )}
                           </span>
                         );
                       })}
+
+                      {/* Botão Rápido de Diagnóstico da Sala */}
+                      {visiblePeers.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setShowPeerHealthModal(true)}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-purple-950/60 hover:bg-purple-900/80 border border-purple-700/60 text-purple-200 hover:text-white text-[11px] cursor-pointer transition-colors"
+                          title="Abrir ferramenta de diagnóstico de Ping e Perda de Conexão para descobrir quem está oscilando"
+                        >
+                          <Activity className="w-3 h-3 text-purple-400" />
+                          <span>Diagnóstico</span>
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1225,7 +1450,51 @@ function MainAppWorkspace() {
             onToggleIsolateAudio={setIsolateAudio}
             isBroadcasting={isScreenSharing || localMediaSources.length > 0}
             activeAudioLabel={getEffectiveAudioLabel()}
+            onResetPeer={resetPeerConnection}
           />
+        )}
+
+        {/* Modal de Diagnóstico de Rede e Ping Individual por Usuário na Sala */}
+        {showPeerHealthModal && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-in fade-in duration-150">
+            <div className="relative w-full max-w-xl bg-neutral-950 border border-neutral-800 rounded-2xl p-5 shadow-2xl space-y-4 font-mono">
+              <div className="flex items-center justify-between pb-3 border-b border-neutral-800">
+                <div className="flex items-center gap-2 text-white font-bold text-sm">
+                  <Activity className="w-4 h-4 text-purple-400" />
+                  <span>Diagnóstico de Ping & Perda de Conexão na Sala</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowPeerHealthModal(false)}
+                  className="p-1 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white transition-colors cursor-pointer"
+                  title="Fechar diagnóstico"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <p className="text-xs text-neutral-300 leading-relaxed">
+                Monitore em tempo real o ping e a perda de pacotes de cada participante conectado para identificar exatamente quem está sofrendo com instabilidade na rede:
+              </p>
+
+              <PeerHealthInspector
+                peers={visiblePeers}
+                myNickname={nickname}
+                onResetPeer={resetPeerConnection}
+              />
+
+              <div className="pt-2 border-t border-neutral-800 flex items-center justify-between text-xs text-neutral-400">
+                <span>Dica: Se apenas um usuário tiver perda elevada, a instabilidade é da rota/conexão dele.</span>
+                <button
+                  type="button"
+                  onClick={() => setShowPeerHealthModal(false)}
+                  className="px-3 py-1 bg-neutral-900 hover:bg-neutral-800 border border-neutral-700 text-white rounded-lg cursor-pointer"
+                >
+                  Fechar
+                </button>
+              </div>
+            </div>
+          </div>
         )}
 
         {/* Modal do Estúdio de Temas & Customização CSS */}

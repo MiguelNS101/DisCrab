@@ -14,10 +14,10 @@ on:
         type: boolean
         default: true
       release_tag:
-        description: 'Nome da Tag da Release (ex: v1.1.6)'
+        description: 'Nome da Tag da Release (ex: v1.1.8)'
         required: false
         type: string
-        default: 'v1.1.6'
+        default: 'v1.1.8'
 
 # Permissão obrigatória para que o GitHub Actions consiga criar Releases e fazer upload de binários
 permissions:
@@ -81,9 +81,18 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             src-tauri/target/
+            !src-tauri/target/release/bundle/
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      - name: 🧹 Limpar Bundles de Versões Anteriores do Cache
+        shell: pwsh
+        run: |
+          if (Test-Path "src-tauri/target/release/bundle") {
+            Write-Host "Removendo instaladores antigos acumulados no cache..."
+            Remove-Item -Path "src-tauri/target/release/bundle" -Recurse -Force -ErrorAction SilentlyContinue
+          }
 
       - name: 📦 Instalar Dependências do Frontend e Gerar Ícones DisCrab
         shell: pwsh
@@ -101,12 +110,19 @@ jobs:
       - name: 🚀 Compilar Executável Nativo Windows via Tauri v2 CLI
         run: npx @tauri-apps/cli build
 
-      - name: 📂 Preparar Binários Windows (.exe / .msi) para Release
+      - name: 📂 Preparar Binários Windows (.exe / .msi) Somente da Última Versão
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force -Path release_assets_windows
+          if (Test-Path "release_assets_windows") {
+            Remove-Item -Path "release_assets_windows" -Recurse -Force
+          }
+          New-Item -ItemType Directory -Force -Path release_assets_windows | Out-Null
+
+          $tauriConf = Get-Content -Path "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          $currentVersion = $tauriConf.version
+          Write-Host "Versão atual detectada para empacotamento: $currentVersion"
           
-          # Copia executável standalone direto
+          # Copia executável standalone direto (sempre recém-compilado)
           $exeFiles = Get-ChildItem -Path src-tauri/target/release -Filter "*.exe" -File
           foreach ($file in $exeFiles) {
             if ($file.Name -notlike "*build*" -and $file.Name -notlike "*tauri*") {
@@ -115,12 +131,23 @@ jobs:
             }
           }
           
-          # Copia instaladores NSIS e MSI se gerados
+          # Copia SOMENTE instaladores NSIS e MSI que correspondem à versão atual ($currentVersion)
           if (Test-Path "src-tauri/target/release/bundle/nsis") {
-            Copy-Item -Path "src-tauri/target/release/bundle/nsis/*.exe" -Destination "release_assets_windows/" -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -Path "src-tauri/target/release/bundle/nsis" -Filter "*$currentVersion*.exe" -File | ForEach-Object {
+              Write-Host "Copiando instalador NSIS da versão atual: $($_.Name)"
+              Copy-Item -Path $_.FullName -Destination "release_assets_windows/" -Force
+            }
           }
           if (Test-Path "src-tauri/target/release/bundle/msi") {
-            Copy-Item -Path "src-tauri/target/release/bundle/msi/*.msi" -Destination "release_assets_windows/" -Force -ErrorAction SilentlyContinue
+            Get-ChildItem -Path "src-tauri/target/release/bundle/msi" -Filter "*$currentVersion*.msi" -File | ForEach-Object {
+              Write-Host "Copiando instalador MSI da versão atual: $($_.Name)"
+              Copy-Item -Path $_.FullName -Destination "release_assets_windows/" -Force
+            }
+          }
+
+          # Remove a pasta bundle após copiar para evitar que o cache salve instaladores antigos
+          if (Test-Path "src-tauri/target/release/bundle") {
+            Remove-Item -Path "src-tauri/target/release/bundle" -Recurse -Force -ErrorAction SilentlyContinue
           }
           
           Write-Host "Arquivos Windows prontos em release_assets_windows:"
@@ -220,18 +247,15 @@ jobs:
           fi
           npx @tauri-apps/cli icon src-tauri/icons/icon.png || true
           
-          # Habilita tráfego WebSocket LAN substituindo o placeholder existente (sem duplicar atributo XML)
-          MANIFEST_PATH="src-tauri/gen/android/app/src/main/AndroidManifest.xml"
-          if [ -f "$MANIFEST_PATH" ]; then
-            sed -i 's/android:usesCleartextTraffic="${usesCleartextTraffic}"/android:usesCleartextTraffic="true"/g' "$MANIFEST_PATH" || true
-          fi
-          
+          # Configura permissões Android, ForegroundService de MediaProjection, Áudio Interno e suporte ao Meta Quest 3
+          node scripts/setup-android-native.mjs
+
           GRADLE_PROPS="src-tauri/gen/android/gradle.properties"
           if [ -f "$GRADLE_PROPS" ]; then
             echo "" >> "$GRADLE_PROPS"
             echo "android.suppressUnsupportedCompileSdk=36" >> "$GRADLE_PROPS"
           fi
-          
+
           npx @tauri-apps/cli android build --apk --target aarch64 --ci
 
       - name: 🔏 Assinar e Preparar APK Instalável para Release
@@ -286,11 +310,25 @@ jobs:
       - name: 📋 Listar Arquivos da Release
         run: ls -lh release_assets/
 
+      - name: 🧹 Limpar Arquivos de Versões Antigas na Release (se já existir)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGET_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.8') }}
+        run: |
+          if gh release view "$TARGET_TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $TARGET_TAG já existe. Removendo assets antigos para manter apenas os da versão atual..."
+            ASSETS=$(gh release view "$TARGET_TAG" --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
+            for asset in $ASSETS; do
+              echo "Removendo asset antigo: $asset"
+              gh release delete-asset "$TARGET_TAG" "$asset" --repo "${{ github.repository }}" -y || true
+            done
+          fi
+
       - name: 🚀 Criar ou Atualizar Release no GitHub (.exe + .apk)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.4') }}
-          name: DisCrab ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.4') }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.8') }}
+          name: DisCrab ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || (github.event.inputs.release_tag || 'v1.1.8') }}
           files: release_assets/*
           draft: false
           prerelease: false

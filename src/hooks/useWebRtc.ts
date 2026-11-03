@@ -119,6 +119,11 @@ export interface UseWebRtcReturn {
     useWasapi?: boolean,
     explicitAudioPids?: number[]
   ) => Promise<void>;
+  startQuestPovShare: (
+    mode?: 'vr_screen' | 'passthrough_camera',
+    fps?: 30 | 60,
+    resolution?: '720p' | '1080p' | '1440p'
+  ) => Promise<void>;
   updateStreamQuality: (resolution: '720p' | '1080p' | '1440p', fps: 30 | 60) => Promise<void>;
   getDetectedWindowPid: () => number;
   detectedWindow: WindowItem | null;
@@ -399,6 +404,31 @@ export function useWebRtc(): UseWebRtcReturn {
     [initEngine]
   );
 
+  const startQuestPovShare = useCallback(
+    async (
+      mode: 'vr_screen' | 'passthrough_camera' = 'vr_screen',
+      fps: 30 | 60 = 60,
+      resolution: '720p' | '1080p' | '1440p' = '1080p'
+    ) => {
+      const engine = initEngine();
+      try {
+        const stream = await engine.startQuestPovShare(mode, fps, resolution);
+        setLocalStream(stream);
+        setActiveScreenTitle(
+          engine.getScreenTitle() ||
+            (mode === 'passthrough_camera'
+              ? 'Visão POV Quest 3 (Passthrough + Áudio)'
+              : 'Visão do Quest 3 (VR + Áudio)')
+        );
+        setDetectedWindow(null);
+        setIsScreenSharing(true);
+      } catch (err: any) {
+        setError(`Falha ao transmitir visão do Quest 3: ${err.message}`);
+      }
+    },
+    [initEngine]
+  );
+
   const updateStreamQuality = useCallback(
     async (resolution: '720p' | '1080p' | '1440p', fps: 30 | 60) => {
       if (engineRef.current) {
@@ -623,6 +653,7 @@ export function useWebRtc(): UseWebRtcReturn {
     reconnectAllPeers,
     resetPeerConnection,
     startScreenShare,
+    startQuestPovShare,
     updateStreamQuality,
     getDetectedWindowPid,
     detectedWindow,

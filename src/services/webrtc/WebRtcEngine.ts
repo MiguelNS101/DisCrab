@@ -18,6 +18,14 @@ import {
   getAntiBlackScreenPreference,
   setNativeAntiBlackScreen,
 } from '../tauriBridge';
+import {
+  hasNativeAndroidScreenBridge,
+  startNativeAndroidScreenCapture,
+  stopNativeAndroidScreenCapture,
+  ensureAndroidStreamHasAudio,
+  captureQuestPassthroughPovStream,
+  isMetaQuestDevice,
+} from './AndroidScreenCaptureBridge';
 
 import {
   ChatMessage,
@@ -133,6 +141,18 @@ export function enhanceSdpForHighQualityStream(
   return outLines.join('\r\n');
 }
 
+export interface PeerNetworkStats {
+  rttMs: number; // Ping P2P direto (Round Trip Time) em milissegundos
+  packetLossPct: number; // Perda de pacotes em porcentagem (0% a 100%)
+  bitrateKbps: number; // Taxa combinada (Download + Upload)
+  inboundKbps: number; // Taxa de recebimento deste peer
+  outboundKbps: number; // Taxa de envio para este peer
+  fps: number; // Taxa de quadros de vídeo
+  framesDropped: number; // Quadros descartados
+  lastUpdated: number; // Timestamp da última medição
+  health: 'excellent' | 'good' | 'warning' | 'poor' | 'offline'; // Diagnóstico de saúde P2P
+}
+
 export interface RemotePeer {
   id: string;
   nickname: string;
@@ -148,6 +168,7 @@ export interface RemotePeer {
   webcamStream?: MediaStream;
   mediaSources?: RemoteMediaSourceMeta[];
   mediaStreams?: Record<string, MediaStream>;
+  networkStats?: PeerNetworkStats;
 }
 
 export interface PerformanceLogEntry {
@@ -307,6 +328,12 @@ export class WebRtcEngine {
       'game capture',
       ' FHD ',
       'streaming',
+      'passthrough',
+      'headset',
+      'quest',
+      'oculus',
+      'camera2 0',
+      'camera2 1',
     ];
 
     const videoDevices: VideoInputDeviceInfo[] = [];
@@ -1944,7 +1971,8 @@ export class WebRtcEngine {
   }
 
   /**
-   * Inicia o compartilhamento de tela com injeção do áudio isolado WASAPI e codificação High-Bitrate
+   * Inicia o compartilhamento de tela com injeção do áudio isolado WASAPI (no PC)
+   * ou gravação direta de Tela + Áudio (no Android APK / Meta Quest 3).
    */
   public async startScreenShare(
     screenTitle: string,
@@ -1960,26 +1988,83 @@ export class WebRtcEngine {
     this.currentFps = fps;
 
     const profile = getVideoQualityProfile(resolution, fps);
+    const isAndroidOrQuest = isAndroidEnvironment() || isMetaQuestDevice();
 
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
-      throw new Error('API navigator.mediaDevices.getDisplayMedia não suportada pelo navegador.');
+    let stream: MediaStream;
+
+    if (isAndroidOrQuest && hasNativeAndroidScreenBridge()) {
+      // 1. No APK Android / Meta Quest 3: usa a ponte nativa Kotlin MediaProjection + AudioPlaybackCapture (Tela + Áudio em 1 toque)
+      stream = await startNativeAndroidScreenCapture(
+        profile.width,
+        profile.height,
+        fps,
+        () => this.stopScreenShare()
+      );
+      this.screenTitle = isMetaQuestDevice()
+        ? 'Visão do Quest 3 (Com Áudio)'
+        : 'Tela do Android (Com Áudio)';
+    } else if (isAndroidOrQuest) {
+      // 2. Em navegadores no Android ou Meta Quest Browser ("Compartilhar sua visão")
+      if (navigator.mediaDevices && typeof navigator.mediaDevices.getDisplayMedia === 'function') {
+        try {
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: {
+              width: { ideal: profile.width },
+              height: { ideal: profile.height },
+              frameRate: { ideal: fps },
+            } as any,
+            audio: true,
+          });
+        } catch (firstErr: any) {
+          if (firstErr?.name === 'NotAllowedError' || firstErr?.name === 'PermissionDeniedError') {
+            throw firstErr;
+          }
+          try {
+            stream = await navigator.mediaDevices.getDisplayMedia({
+              video: true,
+              audio: true,
+            });
+          } catch (secondErr: any) {
+            if (secondErr?.name === 'NotAllowedError' || secondErr?.name === 'PermissionDeniedError') {
+              throw secondErr;
+            }
+            stream = await navigator.mediaDevices.getDisplayMedia({
+              video: true,
+            });
+          }
+        }
+        await ensureAndroidStreamHasAudio(stream);
+        this.screenTitle = isMetaQuestDevice()
+          ? 'Visão do Quest 3 (Com Áudio)'
+          : 'Tela do Android (Com Áudio)';
+      } else {
+        // Fallback automático para câmera POV / Passthrough com áudio caso o navegador mobile não possua getDisplayMedia
+        const pov = await captureQuestPassthroughPovStream(profile.width, profile.height, fps);
+        stream = pov.stream;
+        this.screenTitle = pov.label;
+      }
+    } else {
+      // 3. Desktop (Windows / PC Browser)
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+        throw new Error('API navigator.mediaDevices.getDisplayMedia não suportada pelo navegador.');
+      }
+
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: {
+          width: { ideal: profile.width, max: profile.width },
+          height: { ideal: profile.height, max: profile.height },
+          frameRate: { ideal: fps, max: fps },
+          cursor: 'always',
+        } as any,
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 2,
+          sampleRate: 48000,
+        } as any,
+      });
     }
-
-    const stream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        width: { ideal: profile.width, max: profile.width },
-        height: { ideal: profile.height, max: profile.height },
-        frameRate: { ideal: fps, max: fps },
-        cursor: 'always',
-      } as any,
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        channelCount: 2,
-        sampleRate: 48000,
-      } as any,
-    });
 
     const videoTrack = stream.getVideoTracks()[0];
     if (videoTrack) {
@@ -2011,7 +2096,7 @@ export class WebRtcEngine {
     this.detectedWindowPid = 0;
     this.detectedWindowInfo = null;
 
-    if (isTauriEnvironment()) {
+    if (isTauriEnvironment() && !isAndroidOrQuest) {
       if (isWindowCandidate) {
         try {
           const matchedWin = await findWindowInfo(label);
@@ -2038,34 +2123,24 @@ export class WebRtcEngine {
       } else if (isMonitorSurface) {
         this.screenTitle = 'Tela Inteira (PC)';
       }
-    } else if (!lowerLabel.startsWith('window:') && !lowerLabel.startsWith('screen:') && label) {
+    } else if (!isAndroidOrQuest && !lowerLabel.startsWith('window:') && !lowerLabel.startsWith('screen:') && label) {
       this.screenTitle = label;
     }
 
     this.callbacks.onDetectedWindowChange?.(this.detectedWindowInfo);
 
-    if (isTauriEnvironment() && !isAndroidEnvironment()) {
+    if (isTauriEnvironment() && !isAndroidOrQuest) {
       const antiBlackEnabled = getAntiBlackScreenPreference();
       if (antiBlackEnabled) {
         setNativeAntiBlackScreen(true, this.detectedWindowInfo?.hwnd || 0).catch(() => {});
       }
     }
 
-    if (isAndroidEnvironment()) {
-      // No Android (APK ou WebView Mobile), usa o Motor de Áudio DSP Android (High-Pass 25Hz + Soft Limiter + Mixagem)
-      this.screenTitle = 'Tela do Android';
-      try {
-        const androidDspTrack = await androidAudioEngine.attachAndroidStreams(stream);
-        if (androidDspTrack) {
-          stream.getAudioTracks().forEach((track) => {
-            if (track.id !== androidDspTrack.id) {
-              stream.removeTrack(track);
-            }
-          });
-          stream.addTrack(androidDspTrack);
-        }
-      } catch (err) {
-        console.warn('[AndroidAudioEngine] Fallback para áudio nativo da tela Android:', err);
+    if (isAndroidOrQuest) {
+      // No Android / Meta Quest 3: se não for a projeção nativa (que já está ligada no wasapiAudioBridge),
+      // garante que o áudio da gravação da tela esteja ativo e processado
+      if (!(stream as any).__isNativeAndroidProjection) {
+        await ensureAndroidStreamHasAudio(stream);
       }
     } else if (isTauriEnvironment() && useWasapiAudio) {
       if (explicitAudioPids && explicitAudioPids.length > 0) {
@@ -2124,9 +2199,11 @@ export class WebRtcEngine {
       track.enabled = true;
     });
 
-    videoTrack.onended = () => {
-      this.stopScreenShare();
-    };
+    if (videoTrack) {
+      videoTrack.onended = () => {
+        this.stopScreenShare();
+      };
+    }
 
     this.localScreenStream = stream;
     this.isBroadcastingScreen = true;
@@ -2141,7 +2218,62 @@ export class WebRtcEngine {
     return stream;
   }
 
+  /**
+   * Inicia a gravação/transmissão da Visão em 1ª Pessoa (POV) para o Meta Quest 3 / 3S / Pro:
+   * - 'vr_screen': Captura a visão VR/MR completa do headset + áudio interno (jogos VR + interface)
+   * - 'passthrough_camera': Captura a Câmera Passthrough Frontal RGB (`horizonos.permission.HEADSET_CAMERA`) + microfone estéreo
+   */
+  public async startQuestPovShare(
+    mode: 'vr_screen' | 'passthrough_camera' = 'vr_screen',
+    fps: 30 | 60 = 60,
+    resolution: '720p' | '1080p' | '1440p' = '1080p'
+  ): Promise<MediaStream> {
+    if (mode === 'vr_screen') {
+      return await this.startScreenShare('Visão do Quest 3 (VR + Áudio)', fps, resolution, false);
+    }
+
+    this.stopScreenShare();
+    wasapiAudioBridge.resetClock();
+    this.currentResolution = resolution;
+    this.currentFps = fps;
+    const profile = getVideoQualityProfile(resolution, fps);
+
+    const { stream, label } = await captureQuestPassthroughPovStream(
+      profile.width,
+      profile.height,
+      fps
+    );
+
+    this.screenTitle = label || 'Visão POV Quest 3 (Passthrough + Áudio)';
+    const videoTrack = stream.getVideoTracks()[0];
+    if (videoTrack) {
+      try {
+        if ('contentHint' in videoTrack) {
+          videoTrack.contentHint = 'motion';
+        }
+      } catch {}
+      videoTrack.onended = () => {
+        this.stopScreenShare();
+      };
+    }
+
+    stream.getAudioTracks().forEach((t) => {
+      t.enabled = true;
+    });
+
+    this.localScreenStream = stream;
+    this.isBroadcastingScreen = true;
+    this.broadcastStreamStatus();
+
+    for (const [peerId] of this.peers.entries()) {
+      this.attachTracksForPeer(peerId, 'screen');
+    }
+
+    return stream;
+  }
+
   public stopScreenShare(): void {
+    stopNativeAndroidScreenCapture();
     if (this.localScreenStream) {
       this.localScreenStream.getTracks().forEach((t) => t.stop());
       this.localScreenStream = null;
@@ -2652,13 +2784,40 @@ export class WebRtcEngine {
             framesDropped,
           });
 
+          // Classifica a qualidade e saúde da conexão com este peer específico
+          let health: 'excellent' | 'good' | 'warning' | 'poor' | 'offline' = 'good';
+          if (peerEntry.pc.connectionState !== 'connected') {
+            health = 'offline';
+          } else if (packetLossPct >= 7 || rttMs >= 220) {
+            health = 'poor';
+          } else if (packetLossPct >= 3 || rttMs >= 140) {
+            health = 'warning';
+          } else if (rttMs < 65 && packetLossPct < 0.8) {
+            health = 'excellent';
+          } else {
+            health = 'good';
+          }
+
+          const peerBitrateKbps = peerInboundKbps + peerOutboundKbps;
+
+          // Atualiza as estatísticas individuais no registro do peer
+          peerEntry.info.networkStats = {
+            rttMs,
+            packetLossPct,
+            bitrateKbps: peerBitrateKbps,
+            inboundKbps: peerInboundKbps,
+            outboundKbps: peerOutboundKbps,
+            fps,
+            framesDropped: framesDroppedDelta,
+            lastUpdated: now,
+            health,
+          };
+
           totalInboundKbps += peerInboundKbps;
           totalOutboundKbps += peerOutboundKbps;
           maxPacketLossPct = Math.max(maxPacketLossPct, packetLossPct);
           maxRttMs = Math.max(maxRttMs, rttMs);
           maxFps = Math.max(maxFps, fps);
-
-          const peerBitrateKbps = peerInboundKbps + peerOutboundKbps;
 
           if (packetLossPct > 5) {
             this.callbacks.onPerformanceLog?.({
@@ -2694,6 +2853,11 @@ export class WebRtcEngine {
         } catch {
           // ignore
         }
+      }
+
+      // Notifica a UI com a lista atualizada de peers contendo suas estatísticas individuais
+      if (connectedPeersCount > 0) {
+        this.emitPeersChange();
       }
 
       const d = new Date(now);

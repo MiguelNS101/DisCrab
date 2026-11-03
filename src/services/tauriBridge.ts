@@ -270,7 +270,7 @@ export async function getAppSystemInfo(): Promise<AppSystemInfo> {
     return await invokeTauri<AppSystemInfo>('get_app_system_info');
   }
   return {
-    current_version: '1.1.7',
+    current_version: '1.1.8',
     exe_path: 'Modo Web (Navegador)',
     cloudflared: {
       installed: false,
@@ -330,7 +330,7 @@ export async function checkGithubUpdate(
       repo: effectiveRepo,
     });
     // Garante validação semântica estrita também no lado TypeScript (latest > current)
-    res.has_update = isStrictlyNewerVersion(res.current_version || '1.1.7', res.latest_version);
+    res.has_update = isStrictlyNewerVersion(res.current_version || '1.1.8', res.latest_version);
     if (preferApk && res.apk_download_url) {
       res.download_url = res.apk_download_url;
       res.asset_name = res.apk_asset_name || res.asset_name;
@@ -358,7 +358,7 @@ export async function checkGithubUpdate(
     throw new Error(`GitHub API retornou status ${resp.status} para '${repo}'.`);
   }
   const json = await resp.json();
-  const currentVersion = '1.1.7';
+  const currentVersion = '1.1.8';
   const latestVersion = json.tag_name || currentVersion;
 
   let exeDownloadUrl: string | null = null;
@@ -422,10 +422,14 @@ export async function checkGithubUpdate(
   };
 }
 
-// Detecta se está rodando em um dispositivo Android (APK Tauri v2 ou WebView Mobile)
+// Detecta se está rodando em um dispositivo Android ou Meta Quest (APK Tauri v2, Horizon OS ou WebView Mobile)
 export function isAndroidEnvironment(): boolean {
+  if (typeof window !== 'undefined' && typeof (window as any).DisCrabAndroidBridge !== 'undefined') {
+    return true;
+  }
   if (typeof navigator === 'undefined') return false;
-  return /android/i.test(navigator.userAgent || '');
+  const ua = navigator.userAgent || '';
+  return /android|Quest|OculusBrowser|Oculus|Eureka|Panther|HorizonOS/i.test(ua);
 }
 
 export interface NativeDiagnosticsReport {

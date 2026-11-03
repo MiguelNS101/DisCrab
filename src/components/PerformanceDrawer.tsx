@@ -31,6 +31,7 @@ import {
 } from '../services/webrtc/WebRtcEngine';
 import { WindowItem } from '../types';
 import { getProcessMemory, isTauriEnvironment } from '../services/tauriBridge';
+import { PeerHealthInspector } from './PeerHealthInspector';
 
 interface PerformanceDrawerProps {
   logs: PerformanceLogEntry[];
@@ -43,6 +44,7 @@ interface PerformanceDrawerProps {
   onToggleIsolateAudio?: (val: boolean) => void;
   isBroadcasting?: boolean;
   activeAudioLabel?: string;
+  onResetPeer?: (peerId: string) => void;
 }
 
 function formatBitrate(kbps: number): string {
@@ -63,9 +65,10 @@ export const PerformanceDrawer: React.FC<PerformanceDrawerProps> = ({
   onToggleIsolateAudio,
   isBroadcasting = false,
   activeAudioLabel,
+  onResetPeer,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'network' | 'wasapi' | 'engine'>('network');
+  const [activeTab, setActiveTab] = useState<'peers' | 'network' | 'wasapi' | 'engine'>('peers');
   const [filterUser, setFilterUser] = useState<string>('all');
   const [liveMemoryMb, setLiveMemoryMb] = useState<number>(38.5);
   const [memoryHistory, setMemoryHistory] = useState<number[]>([
@@ -261,6 +264,18 @@ export const PerformanceDrawer: React.FC<PerformanceDrawerProps> = ({
             {/* Alternador de Abas */}
             <div className="flex bg-neutral-900 border border-neutral-800 rounded p-0.5 text-[10px]">
               <button
+                type="button"
+                onClick={() => setActiveTab('peers')}
+                className={`px-2 py-0.5 rounded cursor-pointer transition-colors ${
+                  activeTab === 'peers'
+                    ? 'bg-cyan-500 text-black font-bold'
+                    : 'text-neutral-400 hover:text-white'
+                }`}
+              >
+                Ping Usuários
+              </button>
+              <button
+                type="button"
                 onClick={() => setActiveTab('network')}
                 className={`px-2 py-0.5 rounded cursor-pointer transition-colors ${
                   activeTab === 'network'
@@ -271,6 +286,7 @@ export const PerformanceDrawer: React.FC<PerformanceDrawerProps> = ({
                 Rede P2P
               </button>
               <button
+                type="button"
                 onClick={() => setActiveTab('wasapi')}
                 className={`px-2 py-0.5 rounded cursor-pointer transition-colors ${
                   activeTab === 'wasapi'
@@ -278,9 +294,10 @@ export const PerformanceDrawer: React.FC<PerformanceDrawerProps> = ({
                     : 'text-neutral-400 hover:text-white'
                 }`}
               >
-                Áudio WASAPI
+                WASAPI
               </button>
               <button
+                type="button"
                 onClick={() => setActiveTab('engine')}
                 className={`px-2 py-0.5 rounded cursor-pointer transition-colors ${
                   activeTab === 'engine'
@@ -288,12 +305,28 @@ export const PerformanceDrawer: React.FC<PerformanceDrawerProps> = ({
                     : 'text-neutral-400 hover:text-white'
                 }`}
               >
-                Memória / Motor
+                Motor
               </button>
             </div>
           </div>
 
-          {activeTab === 'network' ? (
+          {activeTab === 'peers' ? (
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] font-bold text-neutral-200">
+                  Saúde P2P Individual (Quem está com oscilação?)
+                </span>
+                <span className="text-[10px] text-neutral-400">
+                  {peers.length} participantes remotos
+                </span>
+              </div>
+              <PeerHealthInspector
+                peers={peers}
+                myNickname={myNickname}
+                onResetPeer={onResetPeer || (() => {})}
+              />
+            </div>
+          ) : activeTab === 'network' ? (
             <>
               {/* Indicadores Rápidos de Bitrate, Perda de Pacotes e Ping */}
               <div className="grid grid-cols-3 gap-2">
