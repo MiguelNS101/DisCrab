@@ -220,9 +220,9 @@ export function getDeviceBroadcastCapabilities(
     typeof navigator !== 'undefined' &&
     typeof navigator.mediaDevices?.getUserMedia === 'function';
 
-  // No Quest/VR ou APK Android, os modos do Quest 3 estão plenamente disponíveis
-  const canUseQuestVrScreen = (isQuestOrVr || isAndroidEnv) && (hasNativeBridge || hasDisplayMedia || true);
-  const canUseQuestPassthrough = (isQuestOrVr || isAndroidEnv) && (hasUserMedia || true);
+  // Apenas quando for um Meta Quest / VR os modos dedicados do Quest 3 ficam ativos
+  const canUseQuestVrScreen = isQuestOrVr && (hasNativeBridge || hasDisplayMedia || true);
+  const canUseQuestPassthrough = isQuestOrVr && (hasUserMedia || true);
 
   // No Android e PC, a captura de tela pode ser acionada via ponte nativa MediaProjection ou getDisplayMedia
   const canShareScreen = hasNativeBridge || hasDisplayMedia || isAndroidEnv;

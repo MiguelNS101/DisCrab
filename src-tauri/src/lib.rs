@@ -19,7 +19,8 @@ use updater::{
 use wasapi_loopback::ProcessAudioCapturer;
 use window_manager::{
     ensure_win32_restorable_styles, enumerate_windows, force_restore_and_check_offscreen_win32,
-    is_window_iconic_win32, AntiBlackScreenKeeper, WindowInfo,
+    heal_layered_browser_windows, is_window_iconic_win32, launch_browser_with_streaming_flags,
+    optimize_process_for_fullscreen_streaming, AntiBlackScreenKeeper, WindowInfo,
 };
 
 use serde::{Deserialize, Serialize};
@@ -226,7 +227,7 @@ fn stop_process_audio(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Ativa ou desativa o Modo Anti-Tela Preta nativo (evita tela preta em sites como Disney+/Netflix quando o mouse para)
+/// Ativa ou desativa o Modo Anti-Tela Preta nativo (sem mexer no mouse e sem WS_EX_LAYERED nos navegadores)
 #[tauri::command]
 fn set_anti_black_screen_mode(
     enabled: bool,
@@ -237,6 +238,12 @@ fn set_anti_black_screen_mode(
         .anti_black_screen
         .set_mode(enabled, target_hwnd.unwrap_or(0));
     Ok(state.anti_black_screen.is_enabled())
+}
+
+/// Abre o navegador instalado (Chrome, Edge, Brave, Opera) com flags Anti-Tela Preta para Crunchyroll, Disney+, Netflix e Prime Video
+#[tauri::command]
+fn launch_streaming_browser(url: Option<String>) -> Result<String, String> {
+    launch_browser_with_streaming_flags(url)
 }
 
 /// Consulta o estado atual da captura de áudio
@@ -1223,13 +1230,14 @@ fn try_wake_or_forward_to_running_instance(invite_arg: Option<&str>) -> bool {
 pub fn run() {
     #[cfg(windows)]
     {
-        // Desativa promoção de vídeo para Hardware Overlay / MPO recortado no WebView2 e habilita captura WGC estável
-        if std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").is_err() {
-            std::env::set_var(
-                "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-                "--disable-features=DirectCompositionVideoOverlays,UseMultiPlaneFormatForHardwareVideo --autoplay-policy=no-user-gesture-required",
-            );
-        }
+        // Desativa NativeWinOcclusion, EcoQoS e DirectComposition Video Overlays no WebView2
+        // para que Jogos em Tela Cheia e Vídeos em Tela Cheia mantenham 60 FPS cravados na transmissão
+        std::env::set_var(
+            "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+            "--disable-features=DirectCompositionVideoOverlays,UseMultiPlaneFormatForHardwareVideo,CalculateNativeWinOcclusion,IntensiveWakeUpThrottling,ThrottleDisplayNoneAndVisibilityHiddenCrossOriginIframes,UseEcoQoSForBackgroundProcess,WebRtcHideLocalIpsWithMdns --disable-direct-composition-video-overlays --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-frame-rate-limit --autoplay-policy=no-user-gesture-required",
+        );
+        optimize_process_for_fullscreen_streaming();
+        heal_layered_browser_windows();
         assign_to_job_object();
         register_url_protocol_windows();
     }
@@ -1527,6 +1535,7 @@ pub fn run() {
             feed_android_audio_samples,
             stop_process_audio,
             set_anti_black_screen_mode,
+            launch_streaming_browser,
             get_current_audio_status,
             list_displays,
             start_screen_capture,

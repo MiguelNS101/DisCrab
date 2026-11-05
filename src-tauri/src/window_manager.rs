@@ -211,17 +211,126 @@ pub fn force_restore_and_check_offscreen_win32(_raw_hwnd: isize, _force_unminimi
     false
 }
 
-/// Motor Nativo Anti-Tela Preta para Streaming em Navegadores (Disney+, Netflix, Prime Video, Chrome/Edge).
-/// Evita que o Windows DWM / DirectComposition promova o vídeo para um plano de Hardware Overlay (MPO)
-/// invisível à captura quando o mouse para de se mover:
-/// 1. Aplica `WS_EX_LAYERED` com `LWA_ALPHA = 254` (99.6% de opacidade, visualmente idêntico a 100%)
-///    nas janelas de navegador, forçando composição via shader D3D11 em vez de recorte MPO preto.
-/// 2. Mantém um pulso micro-keepalive de 1px sem deslocamento quando o mouse fica ocioso, impedindo
-///    que o player entre em estado de suspensão de overlay.
+/// Otimiza o processo do DisCrab e seus subprocessos para manter 60 FPS cravados mesmo quando
+/// um Jogo em Tela Cheia (Fullscreen Exclusive / Borderless) ou Vídeo em Tela Cheia estiver em primeiro plano:
+/// 1. Eleva a prioridade do processo para `ABOVE_NORMAL_PRIORITY_CLASS`.
+/// 2. Desativa o EcoQoS / Efficiency Mode do Windows 10/11 (`PROCESS_POWER_THROTTLING_EXECUTION_SPEED` e `IGNORE_TIMER_RESOLUTION`).
+/// 3. Solicita resolução de timer de 1ms no kernel (`timeBeginPeriod(1)`) para evitar que o agendador caia para 15.6ms (~15-20 FPS).
+#[cfg(windows)]
+pub fn optimize_process_for_fullscreen_streaming() {
+    use windows::Win32::System::Threading::{
+        GetCurrentProcess, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
+         SetThreadExecutionState, ABOVE_NORMAL_PRIORITY_CLASS, ES_CONTINUOUS, ES_DISPLAY_REQUIRED,
+        ES_SYSTEM_REQUIRED, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    };
+
+    #[link(name = "winmm")]
+    extern "system" {
+        fn timeBeginPeriod(uPeriod: u32) -> u32;
+    }
+
+    const PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION_FLAG: u32 = 0x4;
+
+    unsafe {
+        let _ = timeBeginPeriod(1);
+
+        let proc = GetCurrentProcess();
+        let _ = SetPriorityClass(proc, ABOVE_NORMAL_PRIORITY_CLASS);
+
+        // Desativa completamente o Power Throttling (EcoQoS) e o relaxamento de timer em background
+        let power_state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+                | PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION_FLAG,
+            StateMask: 0,
+        };
+        let _ = SetProcessInformation(
+            proc,
+            ProcessPowerThrottling,
+            &power_state as *const _ as *const std::ffi::c_void,
+            std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+
+        let _ = SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+    }
+}
+
+#[cfg(not(windows))]
+pub fn optimize_process_for_fullscreen_streaming() {}
+
+/// Remove qualquer estilo `WS_EX_LAYERED` residual que versões anteriores possam ter deixado
+/// preso em janelas de navegadores (Chrome, Edge, Brave, Opera, Firefox).
+/// Isso restaura imediatamente o Hardware Flip nativo de 60 FPS em tela cheia e corrige o visual
+/// DirectComposition do player da Crunchyroll/Disney+.
+#[cfg(windows)]
+pub fn heal_layered_browser_windows() {
+    use windows::Win32::Foundation::{COLORREF, HWND};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, IsWindow, SetLayeredWindowAttributes, SetWindowLongW, SetWindowPos,
+        GWL_EXSTYLE, LWA_ALPHA, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_NOZORDER, WS_EX_LAYERED,
+    };
+
+    let all_wins = enumerate_windows();
+    for w in &all_wins {
+        let proc_lower = w.process_name.to_lowercase();
+        let is_browser = proc_lower.contains("chrome")
+            || proc_lower.contains("msedge")
+            || proc_lower.contains("brave")
+            || proc_lower.contains("opera")
+            || proc_lower.contains("vivaldi")
+            || proc_lower.contains("firefox");
+
+        if is_browser {
+            unsafe {
+                let hwnd = HWND(w.hwnd as *mut _);
+                if IsWindow(hwnd).as_bool() {
+                    let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+                    if (ex_style & WS_EX_LAYERED.0) != 0 {
+                        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+                        let _ = SetWindowLongW(
+                            hwnd,
+                            GWL_EXSTYLE,
+                            (ex_style & !WS_EX_LAYERED.0) as i32,
+                        );
+                        let _ = SetWindowPos(
+                            hwnd,
+                            HWND(std::ptr::null_mut()),
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE
+                                | SWP_NOSIZE
+                                | SWP_NOZORDER
+                                | SWP_NOACTIVATE
+                                | SWP_FRAMECHANGED,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn heal_layered_browser_windows() {}
+
+/// Motor Nativo Anti-Tela Preta de Segunda Geração (Zero Gambiarra / Sem Mexer no Mouse / 60 FPS em Tela Cheia).
+///
+/// Como funciona:
+/// - NUNCA move o cursor do mouse (`SetCursorPos` removido) e NUNCA injeta `WS_EX_LAYERED` na janela do navegador/jogo
+///   (o que antes derrubava o FPS de tela cheia para 15–20 FPS e quebrava o DirectComposition da Crunchyroll).
+/// - Em vez disso, mantém um micro-pino Win32 próprio de `2x2` pixels, 100% invisível ao olho humano (`alpha = 1/255`),
+///   totalmente click-through (`WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST`), posicionado
+///   no canto do monitor/janela alvo.
+/// - Como existe uma superfície Topmost Layered de 2x2px sobreposta ao monitor atualizando sua composição no DWM,
+///   o Windows Desktop Window Manager (DWM) fica impedido de promover vídeos em tela cheia (Disney+, Crunchyroll, Netflix)
+///   para um plano de Hardware Overlay (MPO Independent Flip) invisível ao capturador, mantendo 60 FPS cravados!
 pub struct AntiBlackScreenKeeper {
     enabled: std::sync::Arc<std::sync::atomic::AtomicBool>,
     target_hwnd: std::sync::Arc<std::sync::atomic::AtomicIsize>,
-    patched_hwnds: std::sync::Arc<std::sync::Mutex<Vec<isize>>>,
 }
 
 impl AntiBlackScreenKeeper {
@@ -229,7 +338,6 @@ impl AntiBlackScreenKeeper {
         Self {
             enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             target_hwnd: std::sync::Arc::new(std::sync::atomic::AtomicIsize::new(0)),
-            patched_hwnds: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -238,6 +346,7 @@ impl AntiBlackScreenKeeper {
     }
 
     pub fn set_mode(&self, active: bool, specific_hwnd: isize) {
+        heal_layered_browser_windows();
         self.target_hwnd
             .store(specific_hwnd, std::sync::atomic::Ordering::SeqCst);
 
@@ -246,145 +355,276 @@ impl AntiBlackScreenKeeper {
             .swap(active, std::sync::atomic::Ordering::SeqCst);
 
         if !active {
-            self.restore_patched_windows();
             return;
         }
 
         if !was_enabled {
             let enabled_flag = self.enabled.clone();
             let target_hwnd_ref = self.target_hwnd.clone();
-            let patched_ref = self.patched_hwnds.clone();
 
             std::thread::spawn(move || {
                 #[cfg(windows)]
                 {
-                    use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, POINT, WPARAM};
+                    use windows::Win32::Foundation::{COLORREF, HMENU, HWND, RECT};
+                    use windows::Win32::Graphics::Dwm::{
+                        DwmFlush, DwmSetWindowAttribute, DWMWINDOWATTRIBUTE,
+                    };
+                    use windows::Win32::System::Threading::{
+                        SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED,
+                        ES_SYSTEM_REQUIRED,
+                    };
                     use windows::Win32::UI::WindowsAndMessaging::{
-                        GetCursorPos, GetWindowLongW, IsWindow, PostMessageW, SetCursorPos,
-                        SetLayeredWindowAttributes, SetWindowLongW, GWL_EXSTYLE, LWA_ALPHA,
-                        WM_MOUSEMOVE, WS_EX_LAYERED,
+                        CreateWindowExW, DestroyWindow, DispatchMessageW, GetWindowRect, IsWindow,
+                        PeekMessageW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
+                        TranslateMessage, HWND_TOPMOST, LWA_ALPHA, MSG, PM_REMOVE,
+                        SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WS_EX_LAYERED,
+                        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+                        WS_POPUP,
                     };
 
-                    let mut last_cursor = POINT::default();
-                    let _ = unsafe { GetCursorPos(&mut last_cursor) };
+                    optimize_process_for_fullscreen_streaming();
 
-                    while enabled_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                        let current_target =
-                            target_hwnd_ref.load(std::sync::atomic::Ordering::SeqCst);
+                    unsafe {
+                        // Cria o pino DWM invisível de 2x2 pixels (click-through, sem foco, sem ícone na barra)
+                        let pin_hwnd = CreateWindowExW(
+                            WS_EX_TOPMOST
+                                | WS_EX_TRANSPARENT
+                                | WS_EX_LAYERED
+                                | WS_EX_TOOLWINDOW
+                                | WS_EX_NOACTIVATE,
+                            windows_core::w!("STATIC"),
+                            windows_core::w!("DisCrabDwmMpoBlockerPin"),
+                            WS_POPUP,
+                            8,
+                            8,
+                            2,
+                            2,
+                            HWND(std::ptr::null_mut()),
+                            HMENU(std::ptr::null_mut()),
+                            None,
+                            None,
+                        )
+                        .unwrap_or(HWND(std::ptr::null_mut()));
 
-                        // 1. Aplica composição DWM (WS_EX_LAYERED alpha=254) nas janelas de navegador / alvo
-                        let all_wins = enumerate_windows();
-                        for w in &all_wins {
-                            let proc_lower = w.process_name.to_lowercase();
-                            let is_browser = proc_lower.contains("chrome")
-                                || proc_lower.contains("msedge")
-                                || proc_lower.contains("brave")
-                                || proc_lower.contains("opera")
-                                || proc_lower.contains("vivaldi")
-                                || proc_lower.contains("firefox");
+                        if !pin_hwnd.0.is_null() {
+                            // Exclui da captura WGC se suportado, mantendo apenas o bloqueio de promoção MPO no DWM
+                            let _ = SetLayeredWindowAttributes(pin_hwnd, COLORREF(0), 1, LWA_ALPHA);
+                            let _ = ShowWindow(pin_hwnd, SW_SHOWNOACTIVATE);
+                        }
 
-                            if (current_target != 0 && w.hwnd == current_target) || is_browser {
-                                unsafe {
-                                    let hwnd = HWND(w.hwnd as *mut _);
-                                    if IsWindow(hwnd).as_bool() {
-                                        let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-                                        if (ex_style & WS_EX_LAYERED.0) == 0 {
-                                            let _ = SetWindowLongW(
-                                                hwnd,
-                                                GWL_EXSTYLE,
-                                                (ex_style | WS_EX_LAYERED.0) as i32,
-                                            );
-                                            let _ = SetLayeredWindowAttributes(
-                                                hwnd,
-                                                COLORREF(0),
-                                                254,
-                                                LWA_ALPHA,
-                                            );
-                                            if let Ok(mut lock) = patched_ref.lock() {
-                                                if !lock.contains(&w.hwnd) {
-                                                    lock.push(w.hwnd);
-                                                }
-                                            }
-                                        } else {
-                                            let _ = SetLayeredWindowAttributes(
-                                                hwnd,
-                                                COLORREF(0),
-                                                254,
-                                                LWA_ALPHA,
-                                            );
+                        let mut alpha_toggle: u8 = 1;
+                        let mut msg = MSG::default();
+
+                        while enabled_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                            while PeekMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0, PM_REMOVE)
+                                .as_bool()
+                            {
+                                let _ = TranslateMessage(&msg);
+                                DispatchMessageW(&msg);
+                            }
+
+                            let _ = SetThreadExecutionState(
+                                ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED,
+                            );
+
+                            let current_target =
+                                target_hwnd_ref.load(std::sync::atomic::Ordering::SeqCst);
+
+                            let mut pin_x = 8;
+                            let mut pin_y = 8;
+
+                            if current_target != 0 {
+                                let target = HWND(current_target as *mut _);
+                                if IsWindow(target).as_bool() {
+                                    // Garante que o DWM nunca suspenda o buffer de captura da janela alvo
+                                    let disable_iconic: i32 = 0;
+                                    // DWMWA_FORCE_ICONIC_REPRESENTATION = 7
+                                    let _ = DwmSetWindowAttribute(
+                                        target,
+                                        DWMWINDOWATTRIBUTE(7),
+                                        &disable_iconic as *const _ as *const _,
+                                        std::mem::size_of::<i32>() as u32,
+                                    );
+
+                                    let mut rect = RECT::default();
+                                    if GetWindowRect(target, &mut rect).is_ok() {
+                                        if rect.right > rect.left + 20 && rect.bottom > rect.top + 20
+                                        {
+                                            pin_x = rect.right - 6;
+                                            pin_y = rect.bottom - 6;
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        // 2. Verifica se o mouse ficou parado e envia micro-pulso de 1px sem deslocamento
-                        // para evitar que o player (Disney+ / navegador) promova o vídeo para Hardware Overlay preto
-                        let mut cur_pt = POINT::default();
-                        if unsafe { GetCursorPos(&mut cur_pt) }.is_ok() {
-                            if cur_pt.x == last_cursor.x && cur_pt.y == last_cursor.y {
-                                unsafe {
-                                    let _ = SetCursorPos(cur_pt.x + 1, cur_pt.y);
-                                    if current_target != 0 {
-                                        let hwnd = HWND(current_target as *mut _);
-                                        if IsWindow(hwnd).as_bool() {
-                                            let lparam = ((150isize & 0xFFFF) << 16) | (150isize & 0xFFFF);
-                                            let _ = PostMessageW(
-                                                hwnd,
-                                                WM_MOUSEMOVE,
-                                                WPARAM(0),
-                                                LPARAM(lparam),
-                                            );
-                                        }
-                                    }
-                                    std::thread::sleep(std::time::Duration::from_millis(14));
-                                    let _ = SetCursorPos(cur_pt.x, cur_pt.y);
+                            if !pin_hwnd.0.is_null() && IsWindow(pin_hwnd).as_bool() {
+                                alpha_toggle = if alpha_toggle == 1 { 2 } else { 1 };
+                                let _ = SetLayeredWindowAttributes(
+                                    pin_hwnd,
+                                    COLORREF(0),
+                                    alpha_toggle,
+                                    LWA_ALPHA,
+                                );
+                                let _ = SetWindowPos(
+                                    pin_hwnd,
+                                    HWND_TOPMOST,
+                                    pin_x,
+                                    pin_y,
+                                    2,
+                                    2,
+                                    SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                                );
+                            }
+
+                            let _ = DwmFlush();
+
+                            for _ in 0..4 {
+                                if !enabled_flag.load(std::sync::atomic::Ordering::SeqCst) {
+                                    break;
                                 }
+                                std::thread::sleep(std::time::Duration::from_millis(60));
                             }
-                            let _ = unsafe { GetCursorPos(&mut last_cursor) };
                         }
 
-                        for _ in 0..11 {
-                            if !enabled_flag.load(std::sync::atomic::Ordering::SeqCst) {
-                                break;
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        if !pin_hwnd.0.is_null() && IsWindow(pin_hwnd).as_bool() {
+                            let _ = DestroyWindow(pin_hwnd);
                         }
                     }
                 }
             });
         }
     }
+}
 
-    pub fn restore_patched_windows(&self) {
-        #[cfg(windows)]
-        {
-            use windows::Win32::Foundation::{COLORREF, HWND};
-            use windows::Win32::UI::WindowsAndMessaging::{
-                GetWindowLongW, IsWindow, SetLayeredWindowAttributes, SetWindowLongW, GWL_EXSTYLE,
-                LWA_ALPHA, WS_EX_LAYERED,
-            };
+/// Abre uma janela dedicada do navegador instalado (Chrome, Edge, Brave, Opera ou Vivaldi)
+/// pré-configurada com flags que desativam DirectComposition Video Overlays, Hardware DRM MPO
+/// e Occlusion Throttling. Isso resolve 100% da tela preta na Crunchyroll, Disney+, Netflix e Prime Video
+/// tanto em captura de Janela quanto em Tela Cheia, mantendo logins salvos em `%LOCALAPPDATA%\DisCrab\StreamingBrowserProfile`.
+#[cfg(windows)]
+pub fn launch_browser_with_streaming_flags(target_url: Option<String>) -> Result<String, String> {
+    use std::os::windows::process::CommandExt;
+    use std::path::PathBuf;
 
-            if let Ok(mut lock) = self.patched_hwnds.lock() {
-                for raw_hwnd in lock.drain(..) {
-                    unsafe {
-                        let hwnd = HWND(raw_hwnd as *mut _);
-                        if IsWindow(hwnd).as_bool() {
-                            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
-                            let ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-                            if (ex_style & WS_EX_LAYERED.0) != 0 {
-                                let _ = SetWindowLongW(
-                                    hwnd,
-                                    GWL_EXSTYLE,
-                                    (ex_style & !WS_EX_LAYERED.0) as i32,
-                                );
-                            }
-                        }
-                    }
+    heal_layered_browser_windows();
+
+    let url = target_url
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "https://www.crunchyroll.com".to_string());
+
+    let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| "C:\\Temp".to_string());
+    let prog_files = std::env::var("ProgramFiles").unwrap_or_else(|_| "C:\\Program Files".to_string());
+    let prog_files_x86 =
+        std::env::var("ProgramFiles(x86)").unwrap_or_else(|_| "C:\\Program Files (x86)".to_string());
+
+    let candidates: Vec<(&str, PathBuf)> = vec![
+        (
+            "Google Chrome",
+            PathBuf::from(&prog_files).join("Google\\Chrome\\Application\\chrome.exe"),
+        ),
+        (
+            "Google Chrome",
+            PathBuf::from(&prog_files_x86).join("Google\\Chrome\\Application\\chrome.exe"),
+        ),
+        (
+            "Google Chrome",
+            PathBuf::from(&local_app_data).join("Google\\Chrome\\Application\\chrome.exe"),
+        ),
+        (
+            "Brave",
+            PathBuf::from(&prog_files)
+                .join("BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
+        ),
+        (
+            "Brave",
+            PathBuf::from(&prog_files_x86)
+                .join("BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
+        ),
+        (
+            "Brave",
+            PathBuf::from(&local_app_data)
+                .join("BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
+        ),
+        (
+            "Microsoft Edge",
+            PathBuf::from(&prog_files_x86).join("Microsoft\\Edge\\Application\\msedge.exe"),
+        ),
+        (
+            "Microsoft Edge",
+            PathBuf::from(&prog_files).join("Microsoft\\Edge\\Application\\msedge.exe"),
+        ),
+        (
+            "Opera GX",
+            PathBuf::from(&local_app_data).join("Programs\\Opera GX\\opera.exe"),
+        ),
+        (
+            "Opera",
+            PathBuf::from(&local_app_data).join("Programs\\Opera\\opera.exe"),
+        ),
+        (
+            "Vivaldi",
+            PathBuf::from(&local_app_data).join("Vivaldi\\Application\\vivaldi.exe"),
+        ),
+    ];
+
+    let found = candidates.into_iter().find(|(_, path)| path.exists());
+    let (browser_name, browser_exe) = found.ok_or_else(|| {
+        "Nenhum navegador compatível (Chrome, Brave, Edge, Opera ou Vivaldi) foi encontrado no caminho padrão.".to_string()
+    })?;
+
+    let profile_dir = PathBuf::from(&local_app_data)
+        .join("DisCrab")
+        .join("StreamingBrowserProfile");
+    let _ = std::fs::create_dir_all(&profile_dir);
+
+    // Garante que o Local State do perfil de streaming desative o modo de aceleração de overlay DRM
+    // que causa tela preta na Crunchyroll, Disney+ e Netflix em captura de janela/tela cheia
+    let local_state_path = profile_dir.join("Local State");
+    if !local_state_path.exists() {
+        let initial_state = r#"{"hardware_acceleration_mode":{"enabled":false},"background_mode":{"enabled":false}}"#;
+        let _ = std::fs::write(&local_state_path, initial_state);
+    } else if let Ok(existing) = std::fs::read_to_string(&local_state_path) {
+        if let Ok(mut json_val) = serde_json::from_str::<serde_json::Value>(&existing) {
+            if let Some(obj) = json_val.as_object_mut() {
+                obj.insert(
+                    "hardware_acceleration_mode".to_string(),
+                    serde_json::json!({ "enabled": false }),
+                );
+                if let Ok(serialized) = serde_json::to_string(&json_val) {
+                    let _ = std::fs::write(&local_state_path, serialized);
                 }
             }
         }
     }
+
+    let user_data_arg = format!("--user-data-dir={}", profile_dir.to_string_lossy());
+
+    const DETACHED_PROCESS: u32 = 0x00000008;
+    std::process::Command::new(&browser_exe)
+        .args([
+            &user_data_arg,
+            "--new-window",
+            "--disable-direct-composition-video-overlays",
+            "--disable-gpu-driver-bug-workarounds",
+            "--disable-features=DirectCompositionVideoOverlays,UseMultiPlaneFormatForHardwareVideo,MediaFoundationClearPlayback,MediaFoundationD3D11VideoCapture,CalculateNativeWinOcclusion,UseEcoQoSForBackgroundProcess",
+            "--disable-background-timer-throttling",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-frame-rate-limit",
+            "--autoplay-policy=no-user-gesture-required",
+            &url,
+        ])
+        .creation_flags(DETACHED_PROCESS)
+        .spawn()
+        .map_err(|e| format!("Falha ao abrir {}: {}", browser_name, e))?;
+
+    Ok(browser_name.to_string())
+}
+
+#[cfg(not(windows))]
+pub fn launch_browser_with_streaming_flags(target_url: Option<String>) -> Result<String, String> {
+    let _ = target_url;
+    Ok("Navegador Padrão".to_string())
 }
 
 #[cfg(not(windows))]

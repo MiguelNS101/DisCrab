@@ -300,10 +300,16 @@ export class WebRtcEngine {
 
     let devices = await navigator.mediaDevices.enumerateDevices();
 
-    if (requestPermissionIfNeeded) {
+    if (requestPermissionIfNeeded && !isAndroidEnvironment()) {
       try {
-        const probe = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+        const probe = await Promise.race([
+          navigator.mediaDevices.getUserMedia({ video: true, audio: false }),
+          new Promise<never>((_, rej) =>
+            setTimeout(() => rej(new Error('Timeout na sondagem de câmera')), 3500)
+          ),
+        ]);
         probe.getTracks().forEach((t) => t.stop());
+        await new Promise((r) => setTimeout(r, 150));
         devices = await navigator.mediaDevices.enumerateDevices();
       } catch {
         // segue com os dispositivos disponíveis
@@ -328,22 +334,18 @@ export class WebRtcEngine {
       'game capture',
       ' FHD ',
       'streaming',
-      'passthrough',
-      'headset',
-      'quest',
-      'oculus',
-      'camera2 0',
-      'camera2 1',
     ];
 
+    const isPlainAndroid = isAndroidEnvironment() && !isMetaQuestDevice();
     const videoDevices: VideoInputDeviceInfo[] = [];
     const audioDevices: AudioInputDeviceInfo[] = [];
 
     devices.forEach((d, idx) => {
       if (d.kind === 'videoinput') {
-        const label = d.label || `Dispositivo de Vídeo USB #${videoDevices.length + 1}`;
+        const label = d.label || `Câmera #${videoDevices.length + 1}`;
         const lower = label.toLowerCase();
-        const isCapture = captureKeywords.some((kw) => lower.includes(kw.toLowerCase()));
+        const isCapture =
+          !isPlainAndroid && captureKeywords.some((kw) => lower.includes(kw.toLowerCase()));
         videoDevices.push({
           deviceId: d.deviceId || `default-video-${idx}`,
           label,
@@ -881,13 +883,44 @@ export class WebRtcEngine {
             }
           }
 
+          // Remove de receivedTracks quaisquer faixas órfãs que não pertençam mais à tela ou às fontes ativas
+          const validTrackIds = new Set<string>();
+          const validStreamIds = new Set<string>();
+          if (msg.has_screen) {
+            if (msg.screen_track_id) validTrackIds.add(msg.screen_track_id);
+            if (msg.screen_audio_track_id) validTrackIds.add(msg.screen_audio_track_id);
+            if (msg.screen_stream_id) validStreamIds.add(msg.screen_stream_id);
+          }
+          if (msg.has_webcam && msg.webcam_track_id) {
+            validTrackIds.add(msg.webcam_track_id);
+          }
+          for (const src of incomingSources) {
+            if (src.video_track_id) validTrackIds.add(src.video_track_id);
+            if (src.audio_track_id) validTrackIds.add(src.audio_track_id);
+            if (src.stream_id) validStreamIds.add(src.stream_id);
+          }
+
+          if (!msg.has_screen && !msg.has_webcam && incomingSources.length === 0) {
+            peer.receivedTracks.clear();
+          } else if (validTrackIds.size > 0 || validStreamIds.size > 0) {
+            for (const [tid, entry] of Array.from(peer.receivedTracks.entries())) {
+              const matchesId = validTrackIds.has(tid);
+              const matchesStream = Boolean(entry.streamId && validStreamIds.has(entry.streamId));
+              if (!matchesId && !matchesStream) {
+                peer.receivedTracks.delete(tid);
+              }
+            }
+          }
+
           if (!msg.has_screen) {
+            peer.info.hasScreen = false;
             peer.info.screenStream = undefined;
           } else if (peer.watchedScreen && !peer.info.screenStream) {
             this.requestPeerStream(msg.peer_id, 'screen');
           }
 
           if (!msg.has_webcam && incomingSources.length === 0) {
+            peer.info.hasWebcam = false;
             peer.info.webcamStream = undefined;
             peer.info.mediaStreams = {};
           } else {
@@ -1261,13 +1294,15 @@ export class WebRtcEngine {
     for (const [, entry] of peerEntry.receivedTracks.entries()) {
       if (entry.track.readyState === 'ended' || matchedTrackIds.has(entry.track.id)) continue;
 
-      const isExplicitScreenTrack =
+      const isExplicitScreenTrack = Boolean(
         (screenVideoId && entry.track.id === screenVideoId) ||
-        (screenAudioId && entry.track.id === screenAudioId) ||
-        (screenStreamId && entry.streamId && entry.streamId === screenStreamId);
+          (screenAudioId && entry.track.id === screenAudioId) ||
+          (screenStreamId && entry.streamId && entry.streamId === screenStreamId)
+      );
 
-      // Se a track não pertence a nenhuma webcam/placa de captura em mediaSources,
-      // ela pertence à transmissão de tela (1 vídeo + 1 áudio)
+      // Só vincula tracks genéricas à tela se o peer realmente declarou que está transmitindo a tela (info.hasScreen)
+      if (!isExplicitScreenTrack && !info.hasScreen) continue;
+
       if (entry.track.kind === 'video') {
         if (isExplicitScreenTrack || !chosenScreenVideo) {
           chosenScreenVideo = entry.track;
@@ -1291,7 +1326,7 @@ export class WebRtcEngine {
       matchedTrackIds.add(chosenScreenAudio.id);
     }
 
-    if (screenTracks.length > 0 && (info.hasScreen || chosenScreenVideo || chosenScreenAudio)) {
+    if (screenTracks.length > 0 && info.hasScreen) {
       const currentIds = info.screenStream
         ? info.screenStream.getTracks().map((t) => t.id).sort().join(',')
         : '';
@@ -1300,14 +1335,13 @@ export class WebRtcEngine {
       if (!info.screenStream || currentIds !== newIds) {
         info.screenStream = new MediaStream(screenTracks);
       }
-      if (chosenScreenVideo) {
-        info.hasScreen = true;
-      }
       if (chosenScreenAudio) {
         info.hasIsolatedAudio = true;
       }
       peerEntry.watchedScreen = true;
       this.callbacks.onRemoteStream?.(peerId, 'screen', info.screenStream);
+    } else if (!info.hasScreen) {
+      info.screenStream = undefined;
     }
   }
 
@@ -1361,7 +1395,8 @@ export class WebRtcEngine {
           params.encodings = [{}];
         }
 
-        (params as any).degradationPreference = 'balanced';
+        // Mantém a taxa de quadros cravada (60 FPS / 30 FPS) mesmo sob alta carga de GPU em Jogos ou Vídeos em Tela Cheia
+        (params as any).degradationPreference = 'maintain-framerate';
 
         let scaleDown = 1.0;
         const vTrack = this.localScreenStream?.getVideoTracks()[0];
@@ -1407,7 +1442,7 @@ export class WebRtcEngine {
           if (!params.encodings || params.encodings.length === 0) {
             params.encodings = [{}];
           }
-          (params as any).degradationPreference = 'balanced';
+          (params as any).degradationPreference = 'maintain-framerate';
           params.encodings[0].maxBitrate = srcProfile.maxBitrate;
           params.encodings[0].maxFramerate = srcProfile.fps;
           (params.encodings[0] as any).priority = 'high';
@@ -1951,8 +1986,8 @@ export class WebRtcEngine {
           videoTrack.contentHint = 'motion';
         }
         await videoTrack.applyConstraints({
-          width: { ideal: profile.width, max: profile.width },
-          height: { ideal: profile.height, max: profile.height },
+          width: { ideal: profile.width },
+          height: { ideal: profile.height },
           frameRate: { ideal: fps, max: fps },
         });
       } catch (err) {
@@ -2051,10 +2086,10 @@ export class WebRtcEngine {
 
       stream = await navigator.mediaDevices.getDisplayMedia({
         video: {
-          width: { ideal: profile.width, max: profile.width },
-          height: { ideal: profile.height, max: profile.height },
+          width: { ideal: profile.width },
+          height: { ideal: profile.height },
           frameRate: { ideal: fps, max: fps },
-          cursor: 'always',
+          cursor: 'motion',
         } as any,
         audio: {
           echoCancellation: false,
@@ -2356,11 +2391,41 @@ export class WebRtcEngine {
       frameRate: { ideal: fps },
     };
 
-    // Primeiro abre o fluxo de vídeo da Webcam ou Placa de Captura
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: videoConstraints,
-      audio: false,
-    });
+    if (typeof window !== 'undefined' && (window as any).DisCrabAndroidBridge?.requestCameraAndMicPermissions) {
+      try {
+        (window as any).DisCrabAndroidBridge.requestCameraAndMicPermissions();
+      } catch {}
+    }
+
+    // Primeiro abre o fluxo de vídeo da Webcam ou Placa de Captura com timeout de segurança para nunca travar infinitamente
+    const getMediaWithTimeout = (constraints: MediaStreamConstraints, timeoutMs = 10000) =>
+      Promise.race([
+        navigator.mediaDevices.getUserMedia(constraints),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () =>
+              reject(
+                new Error(
+                  'Tempo limite excedido ao abrir a câmera/fonte. Verifique a permissão de câmera.'
+                )
+              ),
+            timeoutMs
+          )
+        ),
+      ]);
+
+    let stream: MediaStream;
+    try {
+      stream = await getMediaWithTimeout({
+        video: videoConstraints,
+        audio: false,
+      });
+    } catch {
+      stream = await getMediaWithTimeout({
+        video: true,
+        audio: false,
+      });
+    }
 
     // Se for Placa de Captura e o envio de áudio estiver ativado, captura o áudio estéreo de alta fidelidade da placa
     if (kind === 'capture_card' && audioDeviceId !== 'none') {
@@ -2513,6 +2578,20 @@ export class WebRtcEngine {
   }
 
   public async startWebcam(): Promise<MediaStream> {
+    // No Android comum (fora do Quest 3), abre diretamente a câmera do celular sem passar pela sondagem dupla nem modo placa de captura
+    if (isAndroidEnvironment() && !isMetaQuestDevice()) {
+      this.stopWebcam();
+      const src = await this.startMediaSource({
+        deviceId: 'default',
+        title: 'Câmera do Celular',
+        kind: 'webcam',
+        resolution: '720p',
+        fps: 30,
+        audioDeviceId: 'none',
+      });
+      return src.stream;
+    }
+
     const { videoDevices } = await this.enumerateMediaDevices(true);
     const preferred =
       videoDevices.find((d) => d.kind === 'webcam') || videoDevices[0];

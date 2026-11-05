@@ -11,6 +11,9 @@ import {
   Glasses,
   Eye,
   Sparkles,
+  ExternalLink,
+  Tv,
+  CheckCircle2,
 } from 'lucide-react';
 import { WindowItem, AudioSourceMode, LocalMediaSource } from '../types';
 import {
@@ -18,6 +21,7 @@ import {
   isTauriEnvironment,
   getAntiBlackScreenPreference,
   setNativeAntiBlackScreen,
+  launchStreamingBrowser,
 } from '../services/tauriBridge';
 import {
   isMetaQuestDevice,
@@ -79,6 +83,8 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
   const [antiBlackScreen, setAntiBlackScreen] = useState<boolean>(() =>
     getAntiBlackScreenPreference()
   );
+  const [showAntiBlackMenu, setShowAntiBlackMenu] = useState<boolean>(false);
+  const [browserLaunchStatus, setBrowserLaunchStatus] = useState<string | null>(null);
 
   // Escuta detecção inicial e eventos de prontidão da ponte Android nativa (APK do Quest 3)
   useEffect(() => {
@@ -132,6 +138,7 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
 
   const capabilities = getDeviceBroadcastCapabilities(isAndroid, isTauriDesktop);
   const effectiveIsQuestOrVr = isQuestOrVr || capabilities.isQuestOrVr;
+  const isPlainAndroid = isAndroid && !effectiveIsQuestOrVr;
 
   // Quando não está transmitindo, desabilita o botão "Tela" comum se for Quest/VR (que usa o Quest 3 POV) ou se o dispositivo não suportar captura de tela
   const isScreenBtnDisabled = !isScreenSharing && !capabilities.canShareScreen && !isAndroid;
@@ -159,12 +166,34 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
     }
   };
 
+  const handleLaunchStreamingSite = async (url: string, label: string) => {
+    try {
+      setBrowserLaunchStatus(`Abrindo ${label} sem overlay de tela preta...`);
+      if (!antiBlackScreen) {
+        setAntiBlackScreen(true);
+        await setNativeAntiBlackScreen(true, selectedWindow?.hwnd || 0);
+      }
+      const browserName = await launchStreamingBrowser(url);
+      setBrowserLaunchStatus(
+        `${label} aberto no ${browserName} (Modo Captura Direta Ativo)! Agora clique em "Tela" e selecione a janela ou tela.`
+      );
+      setTimeout(() => {
+        setBrowserLaunchStatus(null);
+      }, 6000);
+    } catch (err: any) {
+      setBrowserLaunchStatus(err?.message || 'Erro ao abrir navegador de streaming.');
+      setTimeout(() => {
+        setBrowserLaunchStatus(null);
+      }, 5000);
+    }
+  };
+
   return (
     <div className="space-y-2">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        {/* Controles Compactos de Captura: Desabilita automaticamente botões incompatíveis com o dispositivo atual */}
+        {/* Controles Compactos de Captura: No Android comum (não-Quest), exibe apenas Compartilhar Tela e Câmera */}
         <div className="flex items-center gap-1.5 flex-wrap">
-          {/* 1. Transmitir Tela (Desabilitado no Quest/VR enquanto não estiver em live para usar o botão Quest 3 POV, ou se o navegador não suportar) */}
+          {/* 1. Transmitir Tela */}
           <button
             type="button"
             disabled={isScreenBtnDisabled}
@@ -186,7 +215,7 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
                 : isScreenBtnDisabled
                 ? 'Captura de tela não compatível neste navegador (use o APK Android ou aplicativo Desktop)'
                 : isAndroid
-                ? 'Gravar e transmitir a tela inteira com áudio diretamente'
+                ? 'Gravar e transmitir a tela do celular com áudio diretamente'
                 : 'Iniciar transmissão de tela'
             }
           >
@@ -198,13 +227,13 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
             ) : (
               <>
                 <Monitor className="w-3.5 h-3.5 shrink-0" />
-                <span>{isAndroid ? 'Tela + Áudio' : 'Tela'}</span>
+                <span>{isAndroid ? 'Compartilhar Tela' : 'Tela'}</span>
               </>
             )}
           </button>
 
-          {/* 2. Seletor de Janela WASAPI (Compatível apenas com Windows Desktop; desabilitado em dispositivos incompatíveis) */}
-          {onToggleWindowSelector && (
+          {/* 2. Seletor de Janela WASAPI (Oculto no Android comum; disponível no Desktop) */}
+          {!isPlainAndroid && onToggleWindowSelector && (
             <button
               type="button"
               disabled={isAudioWindowBtnDisabled}
@@ -240,8 +269,8 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
             </button>
           )}
 
-          {/* 3. Botão Dedicado Meta Quest 3 / VR — Disponível no Quest, Headsets VR e no APK Android */}
-          {(effectiveIsQuestOrVr || isAndroid) && onStartQuestPov && (
+          {/* 3. Botão Dedicado Meta Quest 3 / VR — Abre apenas no Quest ou VR */}
+          {effectiveIsQuestOrVr && onStartQuestPov && (
             <button
               type="button"
               onClick={() => setShowQuestMenu((prev) => !prev)}
@@ -262,13 +291,22 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
             </button>
           )}
 
-          {/* 4. Botão Compacto: Câmera / Placa de Captura (Desabilitado no Quest/VR pois a câmera POV fica no botão Quest 3) */}
+          {/* 4. Botão Compacto: Câmera (No Android comum liga/desliga direto a câmera do celular sem abrir gerenciador de fonte) */}
           <div className="flex items-center gap-1">
             <button
               type="button"
               disabled={isCameraBtnDisabled}
               onClick={() => {
                 if (isCameraBtnDisabled) return;
+                if (isPlainAndroid) {
+                  if (activeCount > 0 || isWebcamActive) {
+                    if (onStopAllSources) onStopAllSources();
+                    else onToggleWebcam();
+                  } else {
+                    onToggleWebcam();
+                  }
+                  return;
+                }
                 if (onToggleSourceManager) {
                   onToggleSourceManager();
                 } else {
@@ -279,7 +317,9 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
                 isCameraBtnDisabled
                   ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
                   : activeCount > 0 || isWebcamActive
-                  ? 'bg-indigo-950/80 border-indigo-500 text-indigo-200 font-bold cursor-pointer'
+                  ? isPlainAndroid
+                    ? 'bg-red-600 hover:bg-red-500 border-red-500 text-white font-bold cursor-pointer'
+                    : 'bg-indigo-950/80 border-indigo-500 text-indigo-200 font-bold cursor-pointer'
                   : showSourceManager
                   ? 'bg-neutral-800 border-indigo-500/60 text-white cursor-pointer'
                   : 'bg-neutral-950 border-neutral-800 text-neutral-300 hover:text-white hover:border-neutral-700 cursor-pointer'
@@ -289,20 +329,37 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
                   ? 'No Meta Quest / VR, use a opção "Câmera Passthrough POV" dentro do botão Quest 3 POV'
                   : isCameraBtnDisabled
                   ? 'Nenhuma câmera ou placa de captura compatível disponível neste dispositivo'
+                  : isPlainAndroid
+                  ? activeCount > 0 || isWebcamActive
+                    ? 'Parar câmera do celular'
+                    : 'Compartilhar câmera do celular'
                   : 'Gerenciar Webcams e Placas de Captura USB'
               }
             >
               <Video
                 className={`w-3.5 h-3.5 shrink-0 ${
-                  isCameraBtnDisabled ? 'text-neutral-600' : 'text-indigo-400'
+                  isCameraBtnDisabled
+                    ? 'text-neutral-600'
+                    : isPlainAndroid && (activeCount > 0 || isWebcamActive)
+                    ? 'text-white'
+                    : 'text-indigo-400'
                 }`}
               />
-              <span>{activeCount > 0 ? `Câmera (${activeCount})` : 'Câmera'}</span>
-              {showSourceManager && !isCameraBtnDisabled ? (
-                <ChevronUp className="w-3 h-3 text-neutral-400 shrink-0" />
-              ) : (
-                <ChevronDown className="w-3 h-3 text-neutral-500 shrink-0" />
-              )}
+              <span>
+                {isPlainAndroid
+                  ? activeCount > 0 || isWebcamActive
+                    ? 'Parar Câmera'
+                    : 'Câmera'
+                  : activeCount > 0
+                  ? `Câmera (${activeCount})`
+                  : 'Câmera'}
+              </span>
+              {!isPlainAndroid &&
+                (showSourceManager && !isCameraBtnDisabled ? (
+                  <ChevronUp className="w-3 h-3 text-neutral-400 shrink-0" />
+                ) : (
+                  <ChevronDown className="w-3 h-3 text-neutral-500 shrink-0" />
+                ))}
             </button>
 
             {activeCount > 0 && onStopAllSources && (
@@ -310,44 +367,56 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
                 type="button"
                 onClick={onStopAllSources}
                 className="h-8 w-8 flex items-center justify-center rounded-lg bg-red-950/70 hover:bg-red-900 border border-red-800 text-red-300 cursor-pointer transition-colors shrink-0"
-                title="Desligar todas as webcams e placas de captura ativas"
+                title="Desligar câmera ativa"
               >
                 <PowerOff className="w-3.5 h-3.5" />
               </button>
             )}
           </div>
 
-          {/* 5. Botão Anti-Tela Preta (Compatível apenas com Windows DWM; desabilitado em dispositivos incompatíveis) */}
-          <button
-            type="button"
-            disabled={isAntiBlackBtnDisabled}
-            onClick={handleToggleAntiBlackScreen}
-            className={`sc-btn h-8 flex items-center gap-1.5 px-2.5 rounded-lg font-mono text-xs whitespace-nowrap transition-all border ${
-              isAntiBlackBtnDisabled
-                ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
-                : antiBlackScreen
-                ? 'bg-emerald-950/70 border-emerald-500/60 text-emerald-300 hover:border-emerald-400 cursor-pointer'
-                : 'bg-neutral-950 border-neutral-800 text-neutral-500 hover:text-neutral-300 cursor-pointer'
-            }`}
-            title={
-              isAntiBlackBtnDisabled
-                ? 'Modo Anti-Tela Preta (DWM) disponível apenas no aplicativo Desktop Windows'
-                : antiBlackScreen
-                ? 'Modo Anti-Tela Preta ATIVO: impede que sites como Disney+ e navegadores deixem o vídeo preto quando você para de mexer o mouse (força composição DWM + keep-alive de vídeo)'
-                : 'Modo Anti-Tela Preta DESATIVADO (clique para ativar proteção contra vídeo preto no Disney+ / Navegador)'
-            }
-          >
-            <ShieldCheck
-              className={`w-3.5 h-3.5 shrink-0 ${
+          {/* 5. Botão Anti-Tela Preta (Oculto no Android comum; disponível no Desktop) */}
+          {!isPlainAndroid && (
+            <button
+              type="button"
+              disabled={isAntiBlackBtnDisabled}
+              onClick={() => {
+                if (!isAntiBlackBtnDisabled) {
+                  setShowAntiBlackMenu((prev) => !prev);
+                }
+              }}
+              className={`sc-btn h-8 flex items-center gap-1.5 px-2.5 rounded-lg font-mono text-xs whitespace-nowrap transition-all border ${
                 isAntiBlackBtnDisabled
-                  ? 'text-neutral-600'
+                  ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
+                  : showAntiBlackMenu
+                  ? 'bg-emerald-950 border-emerald-400 text-emerald-200 font-bold cursor-pointer'
                   : antiBlackScreen
-                  ? 'text-emerald-400'
-                  : 'text-neutral-600'
+                  ? 'bg-emerald-950/70 border-emerald-500/60 text-emerald-300 hover:border-emerald-400 cursor-pointer'
+                  : 'bg-neutral-950 border-neutral-800 text-neutral-400 hover:text-neutral-200 cursor-pointer'
               }`}
-            />
-            <span className="hidden sm:inline">Anti-Tela Preta</span>
-          </button>
+              title={
+                isAntiBlackBtnDisabled
+                  ? 'Modo Anti-Tela Preta (DWM) disponível apenas no aplicativo Desktop Windows'
+                  : 'Configurar Anti-Tela Preta para Crunchyroll, Disney+, Netflix e vídeos em Tela Cheia (sem mexer no mouse e sem queda de FPS)'
+              }
+            >
+              <ShieldCheck
+                className={`w-3.5 h-3.5 shrink-0 ${
+                  isAntiBlackBtnDisabled
+                    ? 'text-neutral-600'
+                    : antiBlackScreen
+                    ? 'text-emerald-400'
+                    : 'text-neutral-500'
+                }`}
+              />
+              <span className="hidden sm:inline">Anti-Tela Preta</span>
+              {!isAntiBlackBtnDisabled &&
+                (showAntiBlackMenu ? (
+                  <ChevronUp className="w-3 h-3 text-emerald-300 shrink-0" />
+                ) : (
+                  <ChevronDown className="w-3 h-3 text-emerald-400/70 shrink-0" />
+                ))}
+            </button>
+          )}
         </div>
 
         {/* Seletores Alinhados de Resolução e FPS */}
@@ -388,8 +457,109 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
         </div>
       </div>
 
-      {/* Painel Rápido do Meta Quest 3 — Abre no Meta Quest, Headsets VR e APK Android */}
-      {(effectiveIsQuestOrVr || isAndroid) && showQuestMenu && onStartQuestPov && (
+      {/* Painel Anti-Tela Preta (Crunchyroll, Disney+, Netflix & 60 FPS Tela Cheia) */}
+      {!isAntiBlackBtnDisabled && showAntiBlackMenu && (
+        <div className="p-3 rounded-xl bg-emerald-950/25 border border-emerald-500/40 font-mono text-xs space-y-2.5 animate-in fade-in duration-150">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 text-emerald-200 font-bold">
+              <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span>Motor Anti-Tela Preta DWM & Navegador de Streaming (60 FPS)</span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleToggleAntiBlackScreen}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-bold border transition-all cursor-pointer ${
+                  antiBlackScreen
+                    ? 'bg-emerald-500 text-black border-emerald-400'
+                    : 'bg-neutral-900 text-neutral-300 border-neutral-700 hover:border-neutral-500'
+                }`}
+              >
+                {antiBlackScreen ? 'Bloqueador DWM: ATIVO' : 'Bloqueador DWM: INATIVO'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAntiBlackMenu(false)}
+                className="text-[11px] text-neutral-400 hover:text-white cursor-pointer px-1"
+              >
+                Fechar
+              </button>
+            </div>
+          </div>
+
+          <p className="text-[11px] text-neutral-300 leading-relaxed">
+            O bloqueador DWM evita tela preta em tela cheia <strong className="text-emerald-300">sem mexer no seu mouse</strong> e <strong className="text-emerald-300">sem derrubar o FPS</strong>. Se um site como <strong className="text-orange-300">Crunchyroll</strong> ou <strong className="text-cyan-300">Disney+</strong> ficar com vídeo preto (devido ao overlay DirectComposition do Chrome/Edge), abra-o pelos botões abaixo:
+          </p>
+
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+            <button
+              type="button"
+              onClick={() =>
+                handleLaunchStreamingSite('https://www.crunchyroll.com', 'Crunchyroll')
+              }
+              className="flex items-center justify-between gap-1.5 px-2.5 py-2 rounded-lg bg-neutral-950/90 hover:bg-orange-950/50 border border-orange-500/40 hover:border-orange-400 text-orange-200 text-[11px] font-bold cursor-pointer transition-all"
+              title="Abre o navegador com DirectComposition Video Overlays desativado para transmitir Crunchyroll sem tela preta"
+            >
+              <span className="flex items-center gap-1.5 truncate">
+                <Tv className="w-3.5 h-3.5 text-orange-400 shrink-0" />
+                <span className="truncate">Crunchyroll</span>
+              </span>
+              <ExternalLink className="w-3 h-3 text-orange-400/80 shrink-0" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleLaunchStreamingSite('https://www.disneyplus.com', 'Disney+')}
+              className="flex items-center justify-between gap-1.5 px-2.5 py-2 rounded-lg bg-neutral-950/90 hover:bg-cyan-950/50 border border-cyan-500/40 hover:border-cyan-400 text-cyan-200 text-[11px] font-bold cursor-pointer transition-all"
+              title="Abre o navegador com DirectComposition Video Overlays desativado para transmitir Disney+ sem tela preta"
+            >
+              <span className="flex items-center gap-1.5 truncate">
+                <Tv className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="truncate">Disney+</span>
+              </span>
+              <ExternalLink className="w-3 h-3 text-cyan-400/80 shrink-0" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleLaunchStreamingSite('https://www.netflix.com', 'Netflix')}
+              className="flex items-center justify-between gap-1.5 px-2.5 py-2 rounded-lg bg-neutral-950/90 hover:bg-red-950/50 border border-red-500/40 hover:border-red-400 text-red-200 text-[11px] font-bold cursor-pointer transition-all"
+              title="Abre o navegador com DirectComposition Video Overlays desativado para transmitir Netflix sem tela preta"
+            >
+              <span className="flex items-center gap-1.5 truncate">
+                <Tv className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                <span className="truncate">Netflix</span>
+              </span>
+              <ExternalLink className="w-3 h-3 text-red-400/80 shrink-0" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() =>
+                handleLaunchStreamingSite('https://www.primevideo.com', 'Prime Video')
+              }
+              className="flex items-center justify-between gap-1.5 px-2.5 py-2 rounded-lg bg-neutral-950/90 hover:bg-sky-950/50 border border-sky-500/40 hover:border-sky-400 text-sky-200 text-[11px] font-bold cursor-pointer transition-all"
+              title="Abre o navegador com DirectComposition Video Overlays desativado para transmitir Prime Video sem tela preta"
+            >
+              <span className="flex items-center gap-1.5 truncate">
+                <Tv className="w-3.5 h-3.5 text-sky-400 shrink-0" />
+                <span className="truncate">Prime Video</span>
+              </span>
+              <ExternalLink className="w-3 h-3 text-sky-400/80 shrink-0" />
+            </button>
+          </div>
+
+          {browserLaunchStatus && (
+            <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-emerald-950/80 border border-emerald-500/50 text-emerald-200 text-[11px]">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+              <span>{browserLaunchStatus}</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Painel Rápido do Meta Quest 3 — Abre apenas no Meta Quest e Headsets VR */}
+      {effectiveIsQuestOrVr && showQuestMenu && onStartQuestPov && (
         <div className="p-3 rounded-xl bg-purple-950/30 border border-purple-500/40 font-mono text-xs space-y-2.5 animate-in fade-in duration-150">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <div className="flex items-center gap-2 text-purple-200 font-bold">
@@ -481,4 +651,5 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
     </div>
   );
 };
+
 

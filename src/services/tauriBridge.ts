@@ -270,7 +270,7 @@ export async function getAppSystemInfo(): Promise<AppSystemInfo> {
     return await invokeTauri<AppSystemInfo>('get_app_system_info');
   }
   return {
-    current_version: '1.1.8',
+    current_version: '1.1.9',
     exe_path: 'Modo Web (Navegador)',
     cloudflared: {
       installed: false,
@@ -330,7 +330,7 @@ export async function checkGithubUpdate(
       repo: effectiveRepo,
     });
     // Garante validação semântica estrita também no lado TypeScript (latest > current)
-    res.has_update = isStrictlyNewerVersion(res.current_version || '1.1.8', res.latest_version);
+    res.has_update = isStrictlyNewerVersion(res.current_version || '1.1.9', res.latest_version);
     if (preferApk && res.apk_download_url) {
       res.download_url = res.apk_download_url;
       res.asset_name = res.apk_asset_name || res.asset_name;
@@ -358,7 +358,7 @@ export async function checkGithubUpdate(
     throw new Error(`GitHub API retornou status ${resp.status} para '${repo}'.`);
   }
   const json = await resp.json();
-  const currentVersion = '1.1.8';
+  const currentVersion = '1.1.9';
   const latestVersion = json.tag_name || currentVersion;
 
   let exeDownloadUrl: string | null = null;
@@ -754,7 +754,7 @@ export function getAntiBlackScreenPreference(): boolean {
   }
 }
 
-// Ativa/desativa o motor nativo Win32 Anti-Tela Preta (composição DWM WS_EX_LAYERED + micro-pulso de compositor)
+// Ativa/desativa o motor nativo Win32 Anti-Tela Preta (pino invisível DWM 2x2px sem mexer no mouse e sem WS_EX_LAYERED nos navegadores)
 export async function setNativeAntiBlackScreen(
   enabled: boolean,
   targetHwnd?: number
@@ -772,5 +772,19 @@ export async function setNativeAntiBlackScreen(
   }
   return enabled;
 }
+
+// Abre uma janela dedicada do navegador instalado (Chrome, Brave, Edge, Opera) com flags Anti-Tela Preta
+// que desativam DirectComposition Video Overlays e DRM MPO para Crunchyroll, Disney+, Netflix e Prime Video
+export async function launchStreamingBrowser(url?: string): Promise<string> {
+  if (isTauriEnvironment() && !isAndroidEnvironment()) {
+    return await invokeTauri<string>('launch_streaming_browser', {
+      url: url ?? null,
+    });
+  }
+  throw new Error(
+    'A abertura do navegador com flags nativas Anti-Tela Preta funciona dentro do aplicativo Desktop Windows (DisCrab.exe).'
+  );
+}
+
 
 

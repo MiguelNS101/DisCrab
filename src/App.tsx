@@ -152,6 +152,7 @@ function MainAppWorkspace() {
   const isTauriDesktopEnv = isTauriEnvironment() && !isAndroidEnv;
   const deviceCapabilities = getDeviceBroadcastCapabilities(isAndroidEnv, isTauriDesktopEnv);
   const effectiveIsQuestOrVr = isQuestOrVr || deviceCapabilities.isQuestOrVr;
+  const isPlainAndroid = isAndroidEnv && !effectiveIsQuestOrVr;
   const [isLocalStudio, setIsLocalStudio] = useState<boolean>(false);
   const [externalUpdaterOpen, setExternalUpdaterOpen] = useState<boolean>(false);
   const [isEnteringRoomTransition, setIsEnteringRoomTransition] = useState<boolean>(false);
@@ -891,7 +892,9 @@ function MainAppWorkspace() {
                       Palco de Transmissões Pronto
                     </h3>
                     <p className="text-xs text-neutral-400 font-mono max-w-lg mx-auto">
-                      As transmissões da sala aparecem aqui no topo de ponta a ponta. Inicie sua tela, jogo, webcam ou placa de captura abaixo:
+                      {isPlainAndroid
+                        ? 'As transmissões da sala aparecem aqui no topo. Compartilhe a tela do celular ou sua câmera abaixo:'
+                        : 'As transmissões da sala aparecem aqui no topo de ponta a ponta. Inicie sua tela, jogo, webcam ou placa de captura abaixo:'}
                     </p>
                   </div>
                   <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
@@ -917,11 +920,11 @@ function MainAppWorkspace() {
                       <Monitor className="w-4 h-4" />
                       <span>
                         {isAndroidEnv
-                          ? 'Transmitir Tela + Áudio Agora'
+                          ? 'Compartilhar Tela do Celular'
                           : 'Transmitir Tela Agora'}
                       </span>
                     </button>
-                    {(effectiveIsQuestOrVr || isAndroidEnv) && (
+                    {effectiveIsQuestOrVr && (
                       <>
                         <button
                           type="button"
@@ -965,7 +968,12 @@ function MainAppWorkspace() {
                       type="button"
                       disabled={!deviceCapabilities.canUseStandardCamera}
                       onClick={() => {
-                        if (deviceCapabilities.canUseStandardCamera) setShowSourceManager(true);
+                        if (!deviceCapabilities.canUseStandardCamera) return;
+                        if (isPlainAndroid) {
+                          toggleWebcam();
+                        } else {
+                          setShowSourceManager(true);
+                        }
                       }}
                       className={`sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 border font-mono text-xs rounded-xl transition-all ${
                         !deviceCapabilities.canUseStandardCamera
@@ -975,6 +983,8 @@ function MainAppWorkspace() {
                       title={
                         effectiveIsQuestOrVr
                           ? 'No Meta Quest / VR, use o botão Câmera Passthrough POV (Quest 3)'
+                          : isPlainAndroid
+                          ? 'Ligar Câmera do Celular'
                           : 'Ligar Webcam ou Placa de Captura USB'
                       }
                     >
@@ -985,36 +995,42 @@ function MainAppWorkspace() {
                             : 'text-indigo-400'
                         }`}
                       />
-                      <span>Ligar Câmera / Placa de Captura</span>
+                      <span>
+                        {isPlainAndroid
+                          ? 'Compartilhar Câmera'
+                          : 'Ligar Câmera / Placa de Captura'}
+                      </span>
                     </button>
-                    <button
-                      type="button"
-                      disabled={!deviceCapabilities.canUseWindowAudioSelector}
-                      onClick={() => {
-                        if (deviceCapabilities.canUseWindowAudioSelector) {
-                          setShowWindowSelector(true);
-                        }
-                      }}
-                      className={`sc-btn sc-btn-sized flex items-center gap-2 px-3.5 py-2 border font-mono text-xs rounded-xl transition-all ${
-                        !deviceCapabilities.canUseWindowAudioSelector
-                          ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
-                          : 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-neutral-300 cursor-pointer'
-                      }`}
-                      title={
-                        !deviceCapabilities.canUseWindowAudioSelector
-                          ? 'Separação de áudio por janela disponível apenas no aplicativo Desktop Windows'
-                          : 'Configurar Janela de Áudio WASAPI'
-                      }
-                    >
-                      <AppWindow
-                        className={`w-4 h-4 ${
+                    {!isPlainAndroid && (
+                      <button
+                        type="button"
+                        disabled={!deviceCapabilities.canUseWindowAudioSelector}
+                        onClick={() => {
+                          if (deviceCapabilities.canUseWindowAudioSelector) {
+                            setShowWindowSelector(true);
+                          }
+                        }}
+                        className={`sc-btn sc-btn-sized flex items-center gap-2 px-3.5 py-2 border font-mono text-xs rounded-xl transition-all ${
                           !deviceCapabilities.canUseWindowAudioSelector
-                            ? 'text-neutral-600'
-                            : 'text-cyan-400'
+                            ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
+                            : 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-neutral-300 cursor-pointer'
                         }`}
-                      />
-                      <span>Configurar Janela de Áudio</span>
-                    </button>
+                        title={
+                          !deviceCapabilities.canUseWindowAudioSelector
+                            ? 'Separação de áudio por janela disponível apenas no aplicativo Desktop Windows'
+                            : 'Configurar Janela de Áudio WASAPI'
+                        }
+                      >
+                        <AppWindow
+                          className={`w-4 h-4 ${
+                            !deviceCapabilities.canUseWindowAudioSelector
+                              ? 'text-neutral-600'
+                              : 'text-cyan-400'
+                          }`}
+                        />
+                        <span>Configurar Janela de Áudio</span>
+                      </button>
+                    )}
                   </div>
                 </div>
               ) : (
@@ -1045,6 +1061,7 @@ function MainAppWorkspace() {
                       isPoppedOut={!!activePopups['self-screen']}
                       isMirrored={isStreamMirrored('self-screen')}
                       onToggleMirror={() => toggleStreamMirror('self-screen')}
+                      onStopLocalSource={stopScreenShare}
                       onOpenPopup={() =>
                         openPopup(
                           'self-screen',
@@ -1287,9 +1304,9 @@ function MainAppWorkspace() {
                   </div>
                 </div>
 
-                {/* Gaveta Discreta 1: Gerenciador Multi-Fonte (Webcams & Placas de Captura) */}
+                {/* Gaveta Discreta 1: Gerenciador Multi-Fonte (Webcams & Placas de Captura — apenas no Desktop) */}
                 <VideoSourceManager
-                  isOpen={showSourceManager}
+                  isOpen={showSourceManager && !isPlainAndroid}
                   onClose={() => setShowSourceManager(false)}
                   videoDevices={videoDevices}
                   audioDevices={audioDevices}

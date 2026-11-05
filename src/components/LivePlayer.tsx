@@ -106,9 +106,16 @@ const AudioWaveformVisualizer: React.FC<AudioWaveformVisualizerProps> = ({
 
     const freqData = new Uint8Array(analyser.frequencyBinCount);
     const timeData = new Uint8Array(analyser.fftSize);
+    let lastDrawTime = 0;
 
-    const renderFrame = () => {
+    const renderFrame = (now: number) => {
       if (!analyser || !canvas) return;
+
+      if (now - lastDrawTime < 42) {
+        rafId = requestAnimationFrame(renderFrame);
+        return;
+      }
+      lastDrawTime = now;
 
       if (audioCtx && audioCtx.state === 'suspended') {
         audioCtx.resume().catch(() => {});
@@ -634,7 +641,7 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
             )}
 
             {/* Botões de Ação Superior Direito (Inverter + Reset P2P + Popup + Tela Cheia + Encerrar Fonte) */}
-            <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 opacity-0 group-hover:opacity-100 transition-opacity z-10">
+            <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity z-10">
               {onToggleMirror && (
                 <button
                   onClick={onToggleMirror}
@@ -820,6 +827,19 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
         </div>
 
         <div className="flex items-center gap-2">
+          {/* Botão explícito para encerrar fonte local (especialmente útil no celular/Android) */}
+          {isSelf && onStopLocalSource && (
+            <button
+              type="button"
+              onClick={onStopLocalSource}
+              className="text-[11px] font-mono flex items-center gap-1.5 cursor-pointer px-2.5 py-1 rounded border bg-red-950/80 hover:bg-red-900 border-red-700 text-red-200 font-bold transition-colors"
+              title="Encerrar esta transmissão"
+            >
+              <PowerOff className="w-3.5 h-3.5" />
+              <span>Parar</span>
+            </button>
+          )}
+
           {/* Botão explícito para Inverter / Espelhar qualquer fonte */}
           {isWatched && onToggleMirror && (
             <button
