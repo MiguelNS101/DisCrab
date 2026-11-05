@@ -220,8 +220,7 @@ pub fn force_restore_and_check_offscreen_win32(_raw_hwnd: isize, _force_unminimi
 pub fn optimize_process_for_fullscreen_streaming() {
     use windows::Win32::System::Threading::{
         GetCurrentProcess, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
-         SetThreadExecutionState, ABOVE_NORMAL_PRIORITY_CLASS, ES_CONTINUOUS, ES_DISPLAY_REQUIRED,
-        ES_SYSTEM_REQUIRED, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ABOVE_NORMAL_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
         PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
     };
 
@@ -230,7 +229,15 @@ pub fn optimize_process_for_fullscreen_streaming() {
         fn timeBeginPeriod(uPeriod: u32) -> u32;
     }
 
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetThreadExecutionState(esFlags: u32) -> u32;
+    }
+
     const PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION_FLAG: u32 = 0x4;
+    const ES_CONTINUOUS_FLAG: u32 = 0x80000000;
+    const ES_SYSTEM_REQUIRED_FLAG: u32 = 0x00000001;
+    const ES_DISPLAY_REQUIRED_FLAG: u32 = 0x00000002;
 
     unsafe {
         let _ = timeBeginPeriod(1);
@@ -252,7 +259,9 @@ pub fn optimize_process_for_fullscreen_streaming() {
             std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
         );
 
-        let _ = SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED);
+        let _ = SetThreadExecutionState(
+            ES_CONTINUOUS_FLAG | ES_SYSTEM_REQUIRED_FLAG | ES_DISPLAY_REQUIRED_FLAG,
+        );
     }
 }
 
@@ -365,22 +374,27 @@ impl AntiBlackScreenKeeper {
             std::thread::spawn(move || {
                 #[cfg(windows)]
                 {
-                    use windows::Win32::Foundation::{COLORREF, HMENU, HWND, RECT};
+                    use windows::Win32::Foundation::{COLORREF, HWND, RECT};
                     use windows::Win32::Graphics::Dwm::{
                         DwmFlush, DwmSetWindowAttribute, DWMWINDOWATTRIBUTE,
-                    };
-                    use windows::Win32::System::Threading::{
-                        SetThreadExecutionState, ES_CONTINUOUS, ES_DISPLAY_REQUIRED,
-                        ES_SYSTEM_REQUIRED,
                     };
                     use windows::Win32::UI::WindowsAndMessaging::{
                         CreateWindowExW, DestroyWindow, DispatchMessageW, GetWindowRect, IsWindow,
                         PeekMessageW, SetLayeredWindowAttributes, SetWindowPos, ShowWindow,
-                        TranslateMessage, HWND_TOPMOST, LWA_ALPHA, MSG, PM_REMOVE,
+                        TranslateMessage, HMENU, HWND_TOPMOST, LWA_ALPHA, MSG, PM_REMOVE,
                         SWP_NOACTIVATE, SWP_SHOWWINDOW, SW_SHOWNOACTIVATE, WS_EX_LAYERED,
                         WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
                         WS_POPUP,
                     };
+
+                    #[link(name = "kernel32")]
+                    extern "system" {
+                        fn SetThreadExecutionState(esFlags: u32) -> u32;
+                    }
+
+                    const ES_CONTINUOUS_FLAG: u32 = 0x80000000;
+                    const ES_SYSTEM_REQUIRED_FLAG: u32 = 0x00000001;
+                    const ES_DISPLAY_REQUIRED_FLAG: u32 = 0x00000002;
 
                     optimize_process_for_fullscreen_streaming();
 
@@ -424,7 +438,9 @@ impl AntiBlackScreenKeeper {
                             }
 
                             let _ = SetThreadExecutionState(
-                                ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED,
+                                ES_CONTINUOUS_FLAG
+                                    | ES_SYSTEM_REQUIRED_FLAG
+                                    | ES_DISPLAY_REQUIRED_FLAG,
                             );
 
                             let current_target =
