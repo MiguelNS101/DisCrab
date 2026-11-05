@@ -14,6 +14,7 @@ import {
   ExternalLink,
   Tv,
   CheckCircle2,
+  RefreshCw,
 } from 'lucide-react';
 import { WindowItem, AudioSourceMode, LocalMediaSource } from '../types';
 import {
@@ -48,7 +49,9 @@ interface BroadcastControlsProps {
   resolution: '720p' | '1080p' | '1440p';
   onToggleScreenShare: () => void;
   onStartQuestPov?: (mode: 'vr_screen' | 'passthrough_camera') => void;
-  onToggleWebcam: () => void;
+  onToggleWebcam: (facingMode?: 'user' | 'environment') => void;
+  cameraFacingMode?: 'user' | 'environment';
+  onSwitchCameraFacingMode?: (mode?: 'user' | 'environment') => void;
   onToggleIsolateAudio: (val: boolean) => void;
   onChangeFps: (val: 30 | 60) => void;
   onChangeResolution: (res: '720p' | '1080p' | '1440p') => void;
@@ -70,6 +73,8 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
   onToggleScreenShare,
   onStartQuestPov,
   onToggleWebcam,
+  cameraFacingMode = 'user',
+  onSwitchCameraFacingMode,
   onChangeFps,
   onChangeResolution,
 }) => {
@@ -291,7 +296,7 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
             </button>
           )}
 
-          {/* 4. Botão Compacto: Câmera (No Android comum liga/desliga direto a câmera do celular sem abrir gerenciador de fonte) */}
+          {/* 4. Botão Compacto: Câmera (No Android comum liga/desliga direto a câmera do celular e permite alternar Frontal / Traseira) */}
           <div className="flex items-center gap-1">
             <button
               type="button"
@@ -303,7 +308,7 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
                     if (onStopAllSources) onStopAllSources();
                     else onToggleWebcam();
                   } else {
-                    onToggleWebcam();
+                    onToggleWebcam(cameraFacingMode);
                   }
                   return;
                 }
@@ -332,7 +337,7 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
                   : isPlainAndroid
                   ? activeCount > 0 || isWebcamActive
                     ? 'Parar câmera do celular'
-                    : 'Compartilhar câmera do celular'
+                    : `Compartilhar câmera ${cameraFacingMode === 'environment' ? 'Traseira' : 'Frontal'} do celular`
                   : 'Gerenciar Webcams e Placas de Captura USB'
               }
             >
@@ -349,7 +354,7 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
                 {isPlainAndroid
                   ? activeCount > 0 || isWebcamActive
                     ? 'Parar Câmera'
-                    : 'Câmera'
+                    : `Câmera (${cameraFacingMode === 'environment' ? 'Traseira' : 'Frontal'})`
                   : activeCount > 0
                   ? `Câmera (${activeCount})`
                   : 'Câmera'}
@@ -361,6 +366,23 @@ export const BroadcastControls: React.FC<BroadcastControlsProps> = ({
                   <ChevronDown className="w-3 h-3 text-neutral-500 shrink-0" />
                 ))}
             </button>
+
+            {/* Botão Rápido para Alternar entre Câmera Frontal e Traseira no Android */}
+            {isPlainAndroid && !isCameraBtnDisabled && onSwitchCameraFacingMode && (
+              <button
+                type="button"
+                onClick={() => onSwitchCameraFacingMode()}
+                className="sc-btn h-8 flex items-center gap-1.5 px-2.5 rounded-lg bg-indigo-950/70 hover:bg-indigo-900 border border-indigo-500/60 text-indigo-200 hover:text-white font-mono text-xs cursor-pointer transition-colors shrink-0"
+                title={
+                  cameraFacingMode === 'environment'
+                    ? 'Mudar para a Câmera Frontal'
+                    : 'Mudar para a Câmera Traseira'
+                }
+              >
+                <RefreshCw className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                <span>{cameraFacingMode === 'environment' ? 'Usar Frontal' : 'Usar Traseira'}</span>
+              </button>
+            )}
 
             {activeCount > 0 && onStopAllSources && (
               <button

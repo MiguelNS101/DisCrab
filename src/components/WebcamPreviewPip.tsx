@@ -7,6 +7,7 @@ import {
   X,
   GripHorizontal,
   Tv,
+  RefreshCw,
 } from 'lucide-react';
 
 interface WebcamPreviewPipProps {
@@ -16,6 +17,8 @@ interface WebcamPreviewPipProps {
   sourceKind?: 'webcam' | 'capture_card';
   isMirrored?: boolean;
   onToggleMirror?: () => void;
+  cameraFacingMode?: 'user' | 'environment';
+  onSwitchCamera?: () => void;
   onStopWebcam: () => void;
 }
 
@@ -26,6 +29,8 @@ export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
   sourceKind = 'webcam',
   isMirrored = false,
   onToggleMirror,
+  cameraFacingMode = 'user',
+  onSwitchCamera,
   onStopWebcam,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -120,6 +125,22 @@ export const WebcamPreviewPip: React.FC<WebcamPreviewPipProps> = ({
         </div>
 
         <div className="flex items-center gap-1 shrink-0">
+          {/* Alternar Câmera Frontal / Traseira */}
+          {onSwitchCamera && (
+            <button
+              onClick={onSwitchCamera}
+              className="px-1.5 py-0.5 text-[10px] rounded bg-indigo-950/90 hover:bg-indigo-800 border border-indigo-600/80 text-indigo-200 font-bold flex items-center gap-1 cursor-pointer transition-colors"
+              title={
+                cameraFacingMode === 'environment'
+                  ? 'Mudar para a Câmera Frontal'
+                  : 'Mudar para a Câmera Traseira'
+              }
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>{cameraFacingMode === 'environment' ? 'Frontal' : 'Traseira'}</span>
+            </button>
+          )}
+
           {/* Toggle Espelho / Inverter */}
           <button
             onClick={handleMirrorClick}

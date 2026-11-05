@@ -270,6 +270,19 @@ export class WebRtcEngine {
   private detectedWindowInfo: WindowItem | null = null;
   private isBroadcastingScreen = false;
   private isBroadcastingWebcam = false;
+  private cameraFacingMode: 'user' | 'environment' = (() => {
+    try {
+      return localStorage.getItem('sc_camera_facing_mode') === 'environment'
+        ? 'environment'
+        : 'user';
+    } catch {
+      return 'user';
+    }
+  })();
+
+  public getCameraFacingMode(): 'user' | 'environment' {
+    return this.cameraFacingMode;
+  }
 
   public getDetectedWindowPid(): number {
     return this.detectedWindowPid;
@@ -2359,6 +2372,7 @@ export class WebRtcEngine {
    */
   public async startMediaSource(options: {
     deviceId: string;
+    facingMode?: 'user' | 'environment';
     audioDeviceId?: string;
     title?: string;
     kind?: 'webcam' | 'capture_card';
@@ -2382,9 +2396,38 @@ export class WebRtcEngine {
     let audioDeviceId =
       kind === 'webcam' ? 'none' : options.audioDeviceId ?? 'default';
 
+    // Se um facingMode (user = Frontal, environment = Traseira) foi solicitado no Android,
+    // também verifica se enumerateDevices já conhece o deviceId exato da lente correspondente
+    let resolvedDeviceId =
+      options.deviceId &&
+      !options.deviceId.startsWith('default') &&
+      !options.deviceId.startsWith('android_')
+        ? options.deviceId
+        : '';
+
+    if (!resolvedDeviceId && options.facingMode && navigator.mediaDevices?.enumerateDevices) {
+      try {
+        const rawDevices = await navigator.mediaDevices.enumerateDevices();
+        const videoInputs = rawDevices.filter((d) => d.kind === 'videoinput' && d.deviceId);
+        if (options.facingMode === 'environment') {
+          const backCam = videoInputs.find((d) =>
+            /back|rear|traseira|environment|camera2 0|0,\s*facing back/i.test(d.label || '')
+          );
+          if (backCam?.deviceId) resolvedDeviceId = backCam.deviceId;
+        } else {
+          const frontCam = videoInputs.find((d) =>
+            /front|frontal|user|selfie|camera2 1|1,\s*facing front/i.test(d.label || '')
+          );
+          if (frontCam?.deviceId) resolvedDeviceId = frontCam.deviceId;
+        }
+      } catch {}
+    }
+
     const videoConstraints: MediaTrackConstraints = {
-      ...(options.deviceId && !options.deviceId.startsWith('default-')
-        ? { deviceId: { exact: options.deviceId } }
+      ...(resolvedDeviceId
+        ? { deviceId: { exact: resolvedDeviceId } }
+        : options.facingMode
+        ? { facingMode: { exact: options.facingMode } }
         : {}),
       width: { ideal: profile.width },
       height: { ideal: profile.height },
@@ -2421,10 +2464,29 @@ export class WebRtcEngine {
         audio: false,
       });
     } catch {
-      stream = await getMediaWithTimeout({
-        video: true,
-        audio: false,
-      });
+      if (options.facingMode) {
+        try {
+          stream = await getMediaWithTimeout({
+            video: {
+              facingMode: { ideal: options.facingMode },
+              width: { ideal: profile.width },
+              height: { ideal: profile.height },
+              frameRate: { ideal: fps },
+            },
+            audio: false,
+          });
+        } catch {
+          stream = await getMediaWithTimeout({
+            video: { facingMode: options.facingMode },
+            audio: false,
+          });
+        }
+      } else {
+        stream = await getMediaWithTimeout({
+          video: true,
+          audio: false,
+        });
+      }
     }
 
     // Se for Placa de Captura e o envio de áudio estiver ativado, captura o áudio estéreo de alta fidelidade da placa
@@ -2577,13 +2639,30 @@ export class WebRtcEngine {
     this.broadcastStreamStatus();
   }
 
-  public async startWebcam(): Promise<MediaStream> {
-    // No Android comum (fora do Quest 3), abre diretamente a câmera do celular sem passar pela sondagem dupla nem modo placa de captura
+  public async startWebcam(facingMode?: 'user' | 'environment'): Promise<MediaStream> {
+    if (facingMode) {
+      this.cameraFacingMode = facingMode;
+      try {
+        localStorage.setItem('sc_camera_facing_mode', facingMode);
+      } catch {}
+    }
+    const targetFacing = facingMode || this.cameraFacingMode;
+
+    // No Android comum (fora do Quest 3), abre diretamente a câmera escolhida (Frontal ou Traseira)
     if (isAndroidEnvironment() && !isMetaQuestDevice()) {
+      const hadActive = this.localMediaSources.size > 0;
       this.stopWebcam();
+      if (hadActive) {
+        // Pequena pausa para o Camera2 HAL do Android liberar o sensor anterior antes de abrir a outra lente
+        await new Promise((r) => setTimeout(r, 120));
+      }
       const src = await this.startMediaSource({
-        deviceId: 'default',
-        title: 'Câmera do Celular',
+        deviceId: `android_${targetFacing}`,
+        facingMode: targetFacing,
+        title:
+          targetFacing === 'environment'
+            ? 'Câmera Traseira'
+            : 'Câmera Frontal',
         kind: 'webcam',
         resolution: '720p',
         fps: 30,
@@ -2605,6 +2684,22 @@ export class WebRtcEngine {
       audioDeviceId: kind === 'capture_card' ? 'default' : 'none',
     });
     return src.stream;
+  }
+
+  public async switchCameraFacingMode(
+    targetMode?: 'user' | 'environment'
+  ): Promise<'user' | 'environment'> {
+    const nextMode: 'user' | 'environment' =
+      targetMode || (this.cameraFacingMode === 'user' ? 'environment' : 'user');
+    this.cameraFacingMode = nextMode;
+    try {
+      localStorage.setItem('sc_camera_facing_mode', nextMode);
+    } catch {}
+
+    if (this.localMediaSources.size > 0) {
+      await this.startWebcam(nextMode);
+    }
+    return nextMode;
   }
 
   public stopWebcam(): void {

@@ -275,6 +275,8 @@ interface LivePlayerProps {
   onChangeVolume: (vol: number) => void;
   onToggleMute: () => void;
   onToggleMirror?: () => void;
+  onSwitchCamera?: () => void;
+  cameraFacingMode?: 'user' | 'environment';
   onStopLocalSource?: () => void;
   onResetConnection?: () => void;
 }
@@ -302,6 +304,8 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
   onChangeVolume,
   onToggleMute,
   onToggleMirror,
+  onSwitchCamera,
+  cameraFacingMode = 'user',
   onStopLocalSource,
   onResetConnection,
 }) => {
@@ -680,6 +684,19 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
               >
                 {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
               </button>
+              {isSelf && type === 'webcam' && onSwitchCamera && (
+                <button
+                  onClick={onSwitchCamera}
+                  className="p-1.5 bg-indigo-950/85 hover:bg-indigo-800 text-indigo-200 rounded border border-indigo-600 cursor-pointer backdrop-blur"
+                  title={
+                    cameraFacingMode === 'environment'
+                      ? 'Virar para a Câmera Frontal'
+                      : 'Virar para a Câmera Traseira'
+                  }
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              )}
               {isSelf && onStopLocalSource && (
                 <button
                   onClick={onStopLocalSource}
@@ -826,7 +843,24 @@ export const LivePlayer: React.FC<LivePlayerProps> = ({
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Botão explícito para alternar entre Câmera Frontal e Traseira */}
+          {isSelf && type === 'webcam' && onSwitchCamera && (
+            <button
+              type="button"
+              onClick={onSwitchCamera}
+              className="text-[11px] font-mono flex items-center gap-1.5 cursor-pointer px-2.5 py-1 rounded border bg-indigo-950/80 hover:bg-indigo-900 border-indigo-600 text-indigo-200 font-bold transition-colors"
+              title={
+                cameraFacingMode === 'environment'
+                  ? 'Trocar para a Câmera Frontal'
+                  : 'Trocar para a Câmera Traseira'
+              }
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+              <span>{cameraFacingMode === 'environment' ? 'Frontal' : 'Traseira'}</span>
+            </button>
+          )}
+
           {/* Botão explícito para encerrar fonte local (especialmente útil no celular/Android) */}
           {isSelf && onStopLocalSource && (
             <button

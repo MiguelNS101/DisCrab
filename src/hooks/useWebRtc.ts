@@ -129,7 +129,9 @@ export interface UseWebRtcReturn {
   detectedWindow: WindowItem | null;
   activeScreenTitle: string;
   stopScreenShare: () => void;
-  toggleWebcam: () => Promise<void>;
+  toggleWebcam: (facingMode?: 'user' | 'environment') => Promise<void>;
+  cameraFacingMode: 'user' | 'environment';
+  switchCameraFacingMode: (targetMode?: 'user' | 'environment') => Promise<void>;
   requestPeerStream: (peerId: string, type: string) => void;
   getStreamVolume: (streamId: string, userName?: string, type?: string) => number;
   setStreamVolume: (
@@ -165,6 +167,15 @@ export function useWebRtc(): UseWebRtcReturn {
   const [activeScreenTitle, setActiveScreenTitle] = useState<string>('Tela do Usuário');
   const [videoDevices, setVideoDevices] = useState<VideoInputDeviceInfo[]>([]);
   const [audioDevices, setAudioDevices] = useState<AudioInputDeviceInfo[]>([]);
+  const [cameraFacingMode, setCameraFacingMode] = useState<'user' | 'environment'>(() => {
+    try {
+      return localStorage.getItem('sc_camera_facing_mode') === 'environment'
+        ? 'environment'
+        : 'user';
+    } catch {
+      return 'user';
+    }
+  });
 
   // Mapa persistente de volume por stream e por usuário (salvo em localStorage)
   const [volumeMap, setVolumeMap] = useState<Record<string, number>>(() =>
@@ -521,21 +532,52 @@ export function useWebRtc(): UseWebRtcReturn {
     syncLocalSourcesState(engine);
   }, [initEngine, syncLocalSourcesState]);
 
-  const toggleWebcam = useCallback(async () => {
-    const engine = initEngine();
-    if (engine.getLocalMediaSources().length > 0) {
-      engine.stopWebcam();
-      syncLocalSourcesState(engine);
-    } else {
-      try {
-        await engine.startWebcam();
+  const toggleWebcam = useCallback(
+    async (preferredFacingMode?: 'user' | 'environment') => {
+      const engine = initEngine();
+      if (engine.getLocalMediaSources().length > 0) {
+        if (preferredFacingMode && preferredFacingMode !== engine.getCameraFacingMode()) {
+          try {
+            const next = await engine.switchCameraFacingMode(preferredFacingMode);
+            setCameraFacingMode(next);
+            syncLocalSourcesState(engine);
+          } catch (err: any) {
+            setError(`Falha ao trocar câmera: ${err.message}`);
+          }
+          return;
+        }
+        engine.stopWebcam();
         syncLocalSourcesState(engine);
-        await refreshMediaDevices(false);
-      } catch (err: any) {
-        setError(`Falha ao ligar câmera/fonte: ${err.message}`);
+      } else {
+        try {
+          if (preferredFacingMode) {
+            setCameraFacingMode(preferredFacingMode);
+          }
+          await engine.startWebcam(preferredFacingMode);
+          setCameraFacingMode(engine.getCameraFacingMode());
+          syncLocalSourcesState(engine);
+          await refreshMediaDevices(false);
+        } catch (err: any) {
+          setError(`Falha ao ligar câmera/fonte: ${err.message}`);
+        }
       }
-    }
-  }, [initEngine, refreshMediaDevices, syncLocalSourcesState]);
+    },
+    [initEngine, refreshMediaDevices, syncLocalSourcesState]
+  );
+
+  const switchCameraFacingMode = useCallback(
+    async (targetMode?: 'user' | 'environment') => {
+      const engine = initEngine();
+      try {
+        const nextMode = await engine.switchCameraFacingMode(targetMode);
+        setCameraFacingMode(nextMode);
+        syncLocalSourcesState(engine);
+      } catch (err: any) {
+        setError(`Falha ao alternar câmera Frontal/Traseira: ${err?.message || err}`);
+      }
+    },
+    [initEngine, syncLocalSourcesState]
+  );
 
   const requestPeerStream = useCallback((peerId: string, type: string) => {
     if (engineRef.current) {
@@ -660,6 +702,8 @@ export function useWebRtc(): UseWebRtcReturn {
     activeScreenTitle,
     stopScreenShare,
     toggleWebcam,
+    cameraFacingMode,
+    switchCameraFacingMode,
     requestPeerStream,
     getStreamVolume,
     setStreamVolume,

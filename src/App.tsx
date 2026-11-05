@@ -219,6 +219,8 @@ function MainAppWorkspace() {
     activeScreenTitle,
     stopScreenShare,
     toggleWebcam,
+    cameraFacingMode,
+    switchCameraFacingMode,
     requestPeerStream,
     getStreamVolume,
     setStreamVolume,
@@ -964,43 +966,75 @@ function MainAppWorkspace() {
                         </button>
                       </>
                     )}
-                    <button
-                      type="button"
-                      disabled={!deviceCapabilities.canUseStandardCamera}
-                      onClick={() => {
-                        if (!deviceCapabilities.canUseStandardCamera) return;
-                        if (isPlainAndroid) {
-                          toggleWebcam();
-                        } else {
-                          setShowSourceManager(true);
-                        }
-                      }}
-                      className={`sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 border font-mono text-xs rounded-xl transition-all ${
-                        !deviceCapabilities.canUseStandardCamera
-                          ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
-                          : 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-neutral-200 cursor-pointer'
-                      }`}
-                      title={
-                        effectiveIsQuestOrVr
-                          ? 'No Meta Quest / VR, use o botão Câmera Passthrough POV (Quest 3)'
-                          : isPlainAndroid
-                          ? 'Ligar Câmera do Celular'
-                          : 'Ligar Webcam ou Placa de Captura USB'
-                      }
-                    >
-                      <Video
-                        className={`w-4 h-4 ${
+                    {isPlainAndroid ? (
+                      <>
+                        <button
+                          type="button"
+                          disabled={!deviceCapabilities.canUseStandardCamera}
+                          onClick={() => {
+                            if (deviceCapabilities.canUseStandardCamera) {
+                              toggleWebcam('user');
+                            }
+                          }}
+                          className={`sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 border font-mono text-xs rounded-xl transition-all ${
+                            !deviceCapabilities.canUseStandardCamera
+                              ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
+                              : 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-neutral-200 cursor-pointer'
+                          }`}
+                          title="Compartilhar Câmera Frontal do Celular"
+                        >
+                          <Video className="w-4 h-4 text-indigo-400" />
+                          <span>Câmera Frontal</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={!deviceCapabilities.canUseStandardCamera}
+                          onClick={() => {
+                            if (deviceCapabilities.canUseStandardCamera) {
+                              toggleWebcam('environment');
+                            }
+                          }}
+                          className={`sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 border font-mono text-xs rounded-xl transition-all ${
+                            !deviceCapabilities.canUseStandardCamera
+                              ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
+                              : 'bg-indigo-950/70 hover:bg-indigo-900 border-indigo-500/60 text-indigo-200 cursor-pointer'
+                          }`}
+                          title="Compartilhar Câmera Traseira do Celular"
+                        >
+                          <Video className="w-4 h-4 text-indigo-400" />
+                          <span>Câmera Traseira</span>
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={!deviceCapabilities.canUseStandardCamera}
+                        onClick={() => {
+                          if (deviceCapabilities.canUseStandardCamera) {
+                            setShowSourceManager(true);
+                          }
+                        }}
+                        className={`sc-btn sc-btn-sized flex items-center gap-2 px-4 py-2 border font-mono text-xs rounded-xl transition-all ${
                           !deviceCapabilities.canUseStandardCamera
-                            ? 'text-neutral-600'
-                            : 'text-indigo-400'
+                            ? 'bg-neutral-950 border-neutral-900 text-neutral-600 opacity-45 cursor-not-allowed'
+                            : 'bg-neutral-950 hover:bg-neutral-800 border-neutral-800 text-neutral-200 cursor-pointer'
                         }`}
-                      />
-                      <span>
-                        {isPlainAndroid
-                          ? 'Compartilhar Câmera'
-                          : 'Ligar Câmera / Placa de Captura'}
-                      </span>
-                    </button>
+                        title={
+                          effectiveIsQuestOrVr
+                            ? 'No Meta Quest / VR, use o botão Câmera Passthrough POV (Quest 3)'
+                            : 'Ligar Webcam ou Placa de Captura USB'
+                        }
+                      >
+                        <Video
+                          className={`w-4 h-4 ${
+                            !deviceCapabilities.canUseStandardCamera
+                              ? 'text-neutral-600'
+                              : 'text-indigo-400'
+                          }`}
+                        />
+                        <span>Ligar Câmera / Placa de Captura</span>
+                      </button>
+                    )}
                     {!isPlainAndroid && (
                       <button
                         type="button"
@@ -1098,6 +1132,10 @@ function MainAppWorkspace() {
                         isPoppedOut={!!activePopups[selfId]}
                         isMirrored={isStreamMirrored(selfId)}
                         onToggleMirror={() => toggleStreamMirror(selfId)}
+                        cameraFacingMode={cameraFacingMode}
+                        onSwitchCamera={
+                          isPlainAndroid ? () => switchCameraFacingMode() : undefined
+                        }
                         onStopLocalSource={() => stopMediaSource(src.sourceId)}
                         onOpenPopup={() => openPopup(selfId, src.title, nickname)}
                         onClosePopup={() => closePopup(selfId)}
@@ -1218,6 +1256,8 @@ function MainAppWorkspace() {
                     onToggleScreenShare={handleToggleScreenShare}
                     onStartQuestPov={(mode) => startQuestPovShare(mode, fps, resolution)}
                     onToggleWebcam={toggleWebcam}
+                    cameraFacingMode={cameraFacingMode}
+                    onSwitchCameraFacingMode={switchCameraFacingMode}
                     onToggleIsolateAudio={setIsolateAudio}
                     onChangeFps={setFps}
                     onChangeResolution={setResolution}
@@ -1450,6 +1490,8 @@ function MainAppWorkspace() {
             sourceKind={localMediaSources[0].kind}
             isMirrored={isStreamMirrored(`self-${localMediaSources[0].sourceId}`)}
             onToggleMirror={() => toggleStreamMirror(`self-${localMediaSources[0].sourceId}`)}
+            cameraFacingMode={cameraFacingMode}
+            onSwitchCamera={isPlainAndroid ? () => switchCameraFacingMode() : undefined}
             onStopWebcam={() => stopMediaSource(localMediaSources[0].sourceId)}
           />
         )}
