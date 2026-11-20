@@ -40,7 +40,7 @@ interface WindowTitleBarProps {
 }
 
 export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
-  currentVersion = '1.1.6',
+  currentVersion = '1.1.10',
   isInRoom = false,
   activeProcessName,
   activePid,
@@ -133,7 +133,7 @@ export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
       data-tauri-drag-region
       onMouseDown={handleDragMouseDown}
       onDoubleClick={handleDoubleClickBar}
-      className="sc-titlebar sc-header w-full h-9 select-none shrink-0 sticky top-0 z-50 flex items-center justify-between border-b backdrop-blur-md transition-colors duration-200"
+      className="sc-titlebar sc-header relative w-full h-[clamp(36px,4.2vh,48px)] min-h-[clamp(36px,4.2vh,48px)] max-h-[clamp(36px,4.2vh,48px)] select-none shrink-0 z-50 flex items-center justify-between border-b backdrop-blur-md transition-colors duration-200 overflow-hidden"
       style={{
         backgroundColor: 'var(--sc-bg-elevated, #09090b)',
         borderColor: 'var(--sc-border-color, #27272a)',
@@ -307,7 +307,7 @@ export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
             <button
               type="button"
               onClick={handleTogglePin}
-              className="sc-win-btn h-full w-9 flex items-center justify-center transition-colors cursor-pointer"
+              className="sc-win-btn h-full w-[clamp(36px,3vw,44px)] flex items-center justify-center transition-colors cursor-pointer"
               style={{
                 color: isAlwaysOnTop
                   ? 'var(--sc-accent, #06b6d4)'
@@ -332,7 +332,7 @@ export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
             <button
               type="button"
               onClick={minimizeAppWindow}
-              className="sc-win-btn h-full w-10 flex items-center justify-center transition-colors cursor-pointer"
+              className="sc-win-btn h-full w-[clamp(38px,3.2vw,46px)] flex items-center justify-center transition-colors cursor-pointer"
               style={{
                 color: 'var(--sc-text-muted, #a1a1aa)',
                 borderRadius: 0,
@@ -347,7 +347,7 @@ export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
             <button
               type="button"
               onClick={handleToggleMaximize}
-              className="sc-win-btn h-full w-10 flex items-center justify-center transition-colors cursor-pointer"
+              className="sc-win-btn h-full w-[clamp(38px,3.2vw,46px)] flex items-center justify-center transition-colors cursor-pointer"
               style={{
                 color: 'var(--sc-text-muted, #a1a1aa)',
                 borderRadius: 0,
@@ -366,7 +366,7 @@ export const WindowTitleBar: React.FC<WindowTitleBarProps> = ({
             <button
               type="button"
               onClick={handleClose}
-              className="sc-win-btn-close h-full w-11 flex items-center justify-center transition-all cursor-pointer text-neutral-400 hover:bg-rose-600 hover:text-white"
+              className="sc-win-btn-close h-full w-[clamp(42px,3.6vw,52px)] flex items-center justify-center transition-all cursor-pointer text-neutral-400 hover:bg-rose-600 hover:text-white"
               style={{ borderRadius: 0 }}
               title="Fechar"
               aria-label="Fechar"

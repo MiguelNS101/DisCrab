@@ -389,14 +389,25 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         color: var(--sc-text-primary) !important;
         font-family: ${fontStack} !important;
       }
-      /* Bloqueio total de Scroll na Tela de Login (Cartão Compacto) */
+      /* Bloqueio total de Scroll no container raiz (o scroll do palco ocorre apenas dentro de .sc-workspace-scroll, mantendo a barra superior sempre presa) */
+      html[data-view-mode="lobby"],
+      html[data-view-mode="lobby"] body,
+      html[data-view-mode="lobby"] #root,
+      html[data-view-mode="lobby"] .sc-app,
+      html[data-view-mode="workspace"],
+      html[data-view-mode="workspace"] body,
+      html[data-view-mode="workspace"] #root,
+      html[data-view-mode="workspace"] .sc-app {
+        overflow: hidden !important;
+        height: 100vh !important;
+        max-height: 100vh !important;
+        width: 100vw !important;
+        margin: 0 !important;
+      }
       html[data-view-mode="lobby"],
       html[data-view-mode="lobby"] body,
       html[data-view-mode="lobby"] #root,
       html[data-view-mode="lobby"] .sc-app {
-        overflow: hidden !important;
-        height: 100vh !important;
-        max-height: 100vh !important;
         scrollbar-width: none !important;
       }
       .sc-lobby-card {
@@ -490,10 +501,17 @@ export const ThemeProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       .border-cyan-500, .border-cyan-500\\/60, .border-cyan-800 {
         border-color: var(--sc-accent) !important;
       }
-      /* Barra de Título Customizada da Janela (Frameless Titlebar) */
+      /* Barra de Título Customizada da Janela (Frameless Titlebar - Fixa no topo e proporcional à tela) */
       .sc-titlebar {
         background-color: var(--sc-bg-elevated) !important;
         border-color: var(--sc-border-color) !important;
+      }
+      .sc-titlebar.sc-header {
+        height: clamp(36px, 4.2vh, 48px) !important;
+        min-height: clamp(36px, 4.2vh, 48px) !important;
+        max-height: clamp(36px, 4.2vh, 48px) !important;
+        width: 100% !important;
+        flex-shrink: 0 !important;
       }
       .sc-titlebar .sc-win-btn {
         border-radius: 0px !important;

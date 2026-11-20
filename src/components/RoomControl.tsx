@@ -156,7 +156,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
     const res = getStartupUpdateState().result;
     return Boolean(
       res?.has_update &&
-        isStrictlyNewerVersion(res.current_version || '1.1.9', res.latest_version)
+        isStrictlyNewerVersion(res.current_version || '1.1.10', res.latest_version)
     );
   });
   const [latestTag, setLatestTag] = useState<string>(
@@ -170,7 +170,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
         const verified = Boolean(
           st.result.has_update &&
             isStrictlyNewerVersion(
-              st.result.current_version || '1.1.9',
+              st.result.current_version || '1.1.10',
               st.result.latest_version
             )
         );
@@ -185,7 +185,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
       if (custom.detail) {
         const tag = custom.detail.latestTag || '';
         const verified = Boolean(
-          custom.detail.hasUpdate && tag && isStrictlyNewerVersion('1.1.9', tag)
+          custom.detail.hasUpdate && tag && isStrictlyNewerVersion('1.1.10', tag)
         );
         setHasUpdateAvailable(verified);
         setLatestTag(tag);
@@ -898,7 +898,7 @@ export const RoomControl: React.FC<RoomControlProps> = ({
                     border: '1px solid rgba(var(--sc-accent-rgb, 6, 182, 212), 0.28)',
                   }}
                 >
-                  v1.1.6
+                  v1.1.10
                 </span>
               </div>
             </div>

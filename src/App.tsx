@@ -628,11 +628,7 @@ function MainAppWorkspace() {
   return (
     <ThemeProvider>
       <div
-        className={`sc-app bg-neutral-950 text-neutral-100 flex flex-col font-sans selection:bg-cyan-500 selection:text-black ${
-          !isInRoomWorkspace
-            ? 'h-screen w-screen overflow-hidden'
-            : 'min-h-screen overflow-x-hidden'
-        }`}
+        className="sc-app bg-neutral-950 text-neutral-100 h-screen w-screen overflow-hidden flex flex-col font-sans selection:bg-cyan-500 selection:text-black"
       >
         {/* Barra de Moldura Superior (Oculta na tela de Login/Cartão, visível após entrar na Sala/Estúdio) */}
         <Header
@@ -679,7 +675,7 @@ function MainAppWorkspace() {
           </main>
         ) : isShowingRoomTransition && roomDetails ? (
           /* MODO TRANSIÇÃO DE TELA INTEIRA AO ENTRAR NA SALA */
-          <main className="flex-1 flex flex-col items-center justify-center p-4 sm:p-6">
+          <main className="flex-1 min-h-0 w-full overflow-y-auto flex flex-col items-center justify-center p-4 sm:p-6">
             <div className="sc-card w-full max-w-md bg-neutral-900/95 border border-neutral-800 rounded-2xl p-7 sm:p-8 shadow-2xl text-center space-y-6 relative overflow-hidden">
               <div className="relative flex items-center justify-center mx-auto w-24 h-24">
                 <span className="absolute inset-0 rounded-full border-2 border-cyan-500/30 animate-ping" />
@@ -785,8 +781,9 @@ function MainAppWorkspace() {
             </div>
           </main>
         ) : (
-          /* MODO 2: SALA ATIVA (PALCO DE TRANSMISSÕES NO TOPO DE PONTA A PONTA + INFO DA SALA E CHAT EMBAIXO) */
-          <main className="sc-container-width flex-1 max-w-[1600px] w-full mx-auto p-3 sm:p-5 space-y-5">
+          /* MODO 2: SALA ATIVA (SCROLL DEDICADO ABAIXO DA BARRA SUPERIOR FIXA) */
+          <div className="sc-workspace-scroll flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden">
+          <main className="sc-container-width max-w-[1600px] w-full mx-auto p-3 sm:p-5 space-y-5">
             {/* Banner de Reconexão Automática Transparente em Caso de Oscilação */}
             {isReconnecting && (
               <div className="bg-amber-950/80 border border-amber-700 rounded-xl p-3 flex items-center justify-between gap-3 shadow-lg text-xs font-mono">
@@ -1391,6 +1388,7 @@ function MainAppWorkspace() {
               </div>
             </section>
           </main>
+          </div>
         )}
 
         {/* Janelas Flutuantes (Popups Externos Multi-Monitor) de Transmissão */}
